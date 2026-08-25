@@ -11,8 +11,10 @@ $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 
 function Invoke-Python {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
-    & cmd.exe /c "$Python -m $($Args -join ' ')"
+    param([Parameter(Mandatory = $true)][string]$CommandLine)
+    # Accept one command string so pip flags such as ``-e`` are passed through
+    # to Python instead of being interpreted as PowerShell function parameters.
+    & cmd.exe /c "$Python -m $CommandLine"
     if ($LASTEXITCODE -ne 0) { throw "Python command failed ($LASTEXITCODE)" }
 }
 
@@ -42,9 +44,9 @@ if (-not $JuliaDepot -and -not $SkipJuliaPackages) {
 }
 
 Write-Host "Installing Python dependencies and PyInstaller ..."
-Invoke-Python pip install --upgrade pip
-Invoke-Python pip install -e . pyinstaller
+Invoke-Python "pip install --upgrade pip"
+Invoke-Python "pip install -e . pyinstaller"
 
 Write-Host "Building NNLC_Trainer.exe ..."
-Invoke-Python PyInstaller --clean --noconfirm nnlc_windows.spec
+Invoke-Python "PyInstaller --clean --noconfirm nnlc_windows.spec"
 Write-Host "Done: $ProjectDir\dist\NNLC_Trainer.exe"
