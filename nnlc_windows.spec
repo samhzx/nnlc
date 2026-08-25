@@ -21,11 +21,27 @@ if not JULIA_DEPOT.is_dir():
     raise SystemExit(f"Missing {JULIA_DEPOT}; run build_windows.ps1 first")
 
 def directory_datas(source_dir: Path, target_dir: str):
-    """Return files in a directory using Analysis(datas=...)'s 2-tuples."""
+    """Return runtime files using Analysis(datas=...)'s 2-tuples.
+
+    Julia artifacts contain CMake build metadata under ``lib/cmake``.  Those
+    files are not read when loading the precompiled Julia packages, and their
+    very deep names can exceed Windows' extraction path limit in a one-file
+    PyInstaller executable.
+    """
+    def is_runtime_file(path: Path) -> bool:
+        relative_parts = {part.lower() for part in path.relative_to(source_dir).parts}
+        if "cmake" in relative_parts:
+            return False
+        if path.name.lower() == "cmakelists.txt":
+            return False
+        if path.name.lower().endswith((".cmake", ".cmake.in")):
+            return False
+        return True
+
     return [
         (str(path), str(Path(target_dir) / path.relative_to(source_dir)))
         for path in source_dir.rglob("*")
-        if path.is_file()
+        if path.is_file() and is_runtime_file(path)
     ]
 
 
