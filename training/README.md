@@ -78,10 +78,6 @@ GPU is still recommended for large datasets:
 - **Apple Silicon with Metal** — supported via `latmodel_temporal.jl`
 - M1 Pro with 16GB RAM is insufficient for larger datasets — consider M2 Pro/Max or better
 
-### Docker
-
-For reproducible environments, consider using night_raider_'s Docker container (referenced in sunnypilot Discord). Docker with NVIDIA GPU passthrough (`--gpus all`) is the most reliable training setup.
-
 ### AMD GPU
 
 AMD GPU support via ROCm is not yet working with Julia's Flux. This is an open area of investigation — rgbacon has volunteered a 7900 XT for testing.

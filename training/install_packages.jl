@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 # Install and precompile all Julia packages needed for NNLC training.
-# Used during Docker build to avoid a 20-minute wait on first run.
+# Used during automated builds to avoid a 20-minute wait on first run.
 
 import Pkg
 

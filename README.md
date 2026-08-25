@@ -158,50 +158,6 @@ All CLI tools work with `uv run` (auto-discovers the `.venv`, no manual activati
 uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
 ```
 
-## Docker
-
-Docker eliminates dependency hell (pycapnp builds, Julia packages, CUDA) and makes the pipeline reproducible.
-
-### Build
-
-```bash
-docker compose -f docker/docker-compose.yml build
-```
-
-### Usage
-
-Two services are provided:
-- **`tools`** — Python CLI tools (extract, score, visualize). No GPU needed.
-- **`train`** — Julia training with NVIDIA GPU passthrough.
-
-Place your rlogs in `./data/` and outputs go to `./output/`.
-
-```bash
-# Extract lateral data
-docker compose -f docker/docker-compose.yml run --rm tools nnlc-extract /app/data -o /app/output/lateral_data.csv --temporal
-
-# Score routes
-docker compose -f docker/docker-compose.yml run --rm tools nnlc-score /app/output/lateral_data.csv
-
-# Visualize coverage
-docker compose -f docker/docker-compose.yml run --rm tools nnlc-visualize /app/output/lateral_data.csv -o /app/output/coverage.png
-
-# Train with GPU (requires nvidia-container-toolkit)
-docker compose -f docker/docker-compose.yml run --rm train bash training/run.sh /app/output/lateral_data.csv
-
-# Train on CPU (no GPU required)
-docker compose -f docker/docker-compose.yml run --rm tools bash training/run.sh /app/output/lateral_data.csv --cpu
-
-# Run tests
-docker compose -f docker/docker-compose.yml run --rm tools pytest tests/ -m "not slow"
-```
-
-### GPU Support
-
-GPU training in Docker requires [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed on the host. The `train` service automatically passes through all NVIDIA GPUs.
-
-**Note:** Metal (Apple Silicon) GPU passthrough is not supported in Docker. Mac users should use the native install for GPU training, or Docker with `--cpu`.
-
 ## Quick Start
 
 The full pipeline: **sync → extract → score → prune routes → visualize → classify & prune → train → deploy**
@@ -535,7 +491,6 @@ This project builds on work from:
 - [ryanomatic/rlog_aggregation](https://github.com/ryanomatic/rlog_aggregation) (`main` @ `26b1ea05`) — Rlog download tool
 - [mmmorks/OP_ML_FF](https://github.com/mmmorks/OP_ML_FF) (`master` @ `0116b9e3`, forked from [twilsonco/OP_ML_FF](https://github.com/twilsonco/OP_ML_FF)) — Julia training scripts
 - warren.2 — Testing, debugging, and pipeline feedback that shaped the tool design
-- night_raider_ — Original SP-NNLC Docker container for NVIDIA
 
 ## Roadmap
 
@@ -547,7 +502,6 @@ Derived from community feedback from the Sunnypilot tuning-nnlc Discord channel.
 - [x] **Rlog syncing** — `nnlc-sync` with rsync (primary) and SFTP fallback, incremental sync
 - [x] **Dependencies** — `pyproject.toml` with pinned versions, bundled cereal schemas (no openpilot checkout needed)
 - [x] **CPU training** — Fixed with `CustomAdaGrad` optimizer and `--cpu` flag
-- [x] **Docker** — Dockerfile + docker-compose with `tools` and `train` services, Julia packages pre-compiled
 - [x] **Coverage visualization** — `nnlc-visualize` generates 3-panel coverage chart (heatmap, histogram, override rate)
 - [x] **Route quality scoring** — `nnlc-score` with 6-criteria scorer (100-point scale)
 - [x] **Route pruning** — removes saturated and lane-change frames, optionally excludes low-scoring routes before training
@@ -559,8 +513,6 @@ Derived from community feedback from the Sunnypilot tuning-nnlc Discord channel.
 - [x] **Steering input filtering** — 3-stage cascade classifier (`nnlc-interventions`) distinguishes driver corrections from mechanical disturbances; `--prune-output` removes unwanted frames before training
 - [ ] **NNLC-on data quality** — Investigate whether collecting data with an existing NNLC model active degrades the next trained model
 - [ ] **Temporal signal alignment** — Verify that all signals in each training row share the same timestamp and that lag/lead columns are correctly offset
-- [ ] **Docker GPU training** — Test NVIDIA GPU passthrough for Julia training in Docker
 - [ ] **AMD GPU support** — Port training to support ROCm (community member with 7900 XT available to test)
-- [ ] **Docker AMD GPU** — Add AMD GPU passthrough to Docker setup
 - [ ] **Honda/Acura EPS filtering** — Review and integrate `Micim987/opendbc` signal filtering
 - [ ] **Mazda compatibility** — Investigate signal compatibility issues; does the HKG fix above address this too?
