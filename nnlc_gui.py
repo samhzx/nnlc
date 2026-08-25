@@ -42,7 +42,7 @@ class NNLCApp:
         self.worker: threading.Thread | None = None
 
         self.data_var = tk.StringVar()
-        self.output_var = tk.StringVar(default=self._default_output())
+        self.output_var = tk.StringVar(value=self._default_output())
         self.car_var = tk.StringVar(value="BYD_TANG_DMI_24")
         self.threshold_var = tk.StringVar()
         self.auto_threshold_var = tk.BooleanVar(value=True)
@@ -88,10 +88,12 @@ class NNLCApp:
             variable=self.auto_threshold_var,
             command=self._toggle_threshold,
         ).pack(side="left", padx=(10, 0))
-
-        options = ttk.Frame(header)
-        options.grid(row=5, column=1, sticky="w", padx=8, pady=(3, 8))
-        ttk.Checkbutton(options, text="生成覆盖度图（默认）", variable=self.skip_viz_var, command=self._toggle_viz).pack(side="left")
+        ttk.Checkbutton(
+            threshold_frame,
+            text="生成覆盖度图（默认）",
+            variable=self.skip_viz_var,
+            command=self._toggle_viz,
+        ).pack(side="left", padx=(24, 0))
 
         buttons = ttk.Frame(header)
         buttons.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
