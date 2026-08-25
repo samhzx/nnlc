@@ -9,7 +9,6 @@ require Python, Julia, or any package installation on the target computer.
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, EXE, PYZ, COLLECT
-from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
@@ -21,11 +20,20 @@ if not JULIA_RUNTIME.is_dir():
 if not JULIA_DEPOT.is_dir():
     raise SystemExit(f"Missing {JULIA_DEPOT}; run build_windows.ps1 first")
 
+def directory_datas(source_dir: Path, target_dir: str):
+    """Return files in a directory using Analysis(datas=...)'s 2-tuples."""
+    return [
+        (str(path), str(Path(target_dir) / path.relative_to(source_dir)))
+        for path in source_dir.rglob("*")
+        if path.is_file()
+    ]
+
+
 datas = [
-    *Tree(str(PROJECT_DIR / "training"), prefix="training"),
-    *Tree(str(PROJECT_DIR / "nnlc_tools" / "cereal"), prefix="nnlc_tools/cereal"),
-    *Tree(str(JULIA_RUNTIME), prefix="julia-runtime"),
-    *Tree(str(JULIA_DEPOT), prefix="julia-depot"),
+    *directory_datas(PROJECT_DIR / "training", "training"),
+    *directory_datas(PROJECT_DIR / "nnlc_tools" / "cereal", "nnlc_tools/cereal"),
+    *directory_datas(JULIA_RUNTIME, "julia-runtime"),
+    *directory_datas(JULIA_DEPOT, "julia-depot"),
 ]
 binaries = []
 hiddenimports = [
