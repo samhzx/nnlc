@@ -71,5 +71,18 @@ $BundleFileCount = @(Get-ChildItem -Recurse -File $BundleDir).Count
 if ($BundleFileCount -lt 10) {
     throw "one-dir build validation failed: bundle contains only $BundleFileCount files"
 }
+$BundledJulia = Join-Path $BundleDir "_internal\julia-runtime\bin\julia.exe"
+if (-not (Test-Path -LiteralPath $BundledJulia -PathType Leaf)) {
+    throw "one-dir build validation failed: bundled Julia executable is missing or is not a file: $BundledJulia"
+}
+$BundledTrainingScript = Join-Path $BundleDir "_internal\training\latmodel_temporal.jl"
+if (-not (Test-Path -LiteralPath $BundledTrainingScript -PathType Leaf)) {
+    throw "one-dir build validation failed: training script is missing or is not a file: $BundledTrainingScript"
+}
+Write-Host "Testing bundled Julia runtime ..."
+& $BundledJulia --version
+if ($LASTEXITCODE -ne 0) {
+    throw "one-dir build validation failed: bundled Julia did not start ($LASTEXITCODE)"
+}
 Write-Host "Validated one-dir bundle: $BundleFileCount files"
 Write-Host "Done: $BundleExe"

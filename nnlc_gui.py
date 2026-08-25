@@ -6,7 +6,10 @@ import contextlib
 import io
 import os
 import queue
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -36,21 +39,23 @@ class NNLCApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("NNLC 横向控制模型训练")
-        self.root.geometry("820x650")
-        self.root.minsize(700, 520)
+        self.root.geometry("900x720")
+        self.root.minsize(760, 600)
         self.messages: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.started_at: float | None = None
+        self.config_widgets = []
 
         self.data_var = tk.StringVar()
         self.output_var = tk.StringVar(value=self._default_output())
         self.car_var = tk.StringVar(value="BYD_TANG_DMI_24")
         self.threshold_var = tk.StringVar()
         self.auto_threshold_var = tk.BooleanVar(value=True)
-        # This control is phrased positively in the UI; checked means keep the
-        # existing pipeline's default of generating coverage plots.
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
+        self.elapsed_var = tk.StringVar(value="")
         self._build_widgets()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_messages()
 
     @staticmethod
@@ -60,75 +65,109 @@ class NNLCApp:
 
     def _build_widgets(self) -> None:
         root = self.root
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(1, weight=1)
+        style = ttk.Style(root)
+        style.configure("TButton", padding=(10, 6))
+        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(18, 8))
+        style.configure("Section.TLabelframe", padding=10)
+        style.configure("Section.TLabelframe.Label", font=("Microsoft YaHei UI", 10, "bold"))
 
-        header = ttk.Frame(root, padding=(18, 16, 18, 8))
-        header.grid(row=0, column=0, sticky="ew")
-        header.columnconfigure(1, weight=1)
-        ttk.Label(header, text="NNLC 横向控制模型训练", font=("Microsoft YaHei UI", 16, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        container = ttk.Frame(root, padding=(20, 16, 20, 14))
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(5, weight=1)
+
+        ttk.Label(container, text="NNLC 横向控制模型训练", font=("Microsoft YaHei UI", 17, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 12)
         )
 
-        self._path_row(header, 1, "reallog 目录", self.data_var, self._choose_data)
-        self._path_row(header, 2, "输出目录", self.output_var, self._choose_output)
+        path_frame = ttk.LabelFrame(container, text="目录设置", style="Section.TLabelframe")
+        path_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        path_frame.columnconfigure(1, weight=1)
+        data_widgets = self._path_row(path_frame, 0, "reallog 目录", self.data_var, self._choose_data)
+        output_widgets = self._path_row(path_frame, 1, "输出目录", self.output_var, self._choose_output)
+        self.config_widgets.extend((*data_widgets, *output_widgets))
 
-        ttk.Label(header, text="车型").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(header, textvariable=self.car_var).grid(row=3, column=1, sticky="ew", padx=8, pady=5)
-        ttk.Label(header, text="如 BYD_TANG_DMI_24").grid(row=3, column=2, sticky="w", pady=5)
+        options_frame = ttk.LabelFrame(container, text="训练参数", style="Section.TLabelframe")
+        options_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        options_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(header, text="路线阈值").grid(row=4, column=0, sticky="w", pady=5)
-        threshold_frame = ttk.Frame(header)
-        threshold_frame.grid(row=4, column=1, sticky="w", padx=8, pady=5)
+        ttk.Label(options_frame, text="车型").grid(row=0, column=0, sticky="w", pady=6)
+        self.car_entry = ttk.Entry(options_frame, textvariable=self.car_var)
+        self.car_entry.grid(row=0, column=1, sticky="ew", padx=(12, 10), pady=6)
+        ttk.Label(options_frame, text="示例：BYD_TANG_DMI_24").grid(row=0, column=2, sticky="w", pady=6)
+        self.config_widgets.append(self.car_entry)
+
+        ttk.Label(options_frame, text="路线阈值").grid(row=1, column=0, sticky="w", pady=6)
+        threshold_frame = ttk.Frame(options_frame)
+        threshold_frame.grid(row=1, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
         self.threshold_entry = ttk.Entry(threshold_frame, textvariable=self.threshold_var, width=12, state="disabled")
         self.threshold_entry.pack(side="left")
-        ttk.Checkbutton(
+        self.auto_threshold_check = ttk.Checkbutton(
             threshold_frame,
             text="自动推荐（默认）",
             variable=self.auto_threshold_var,
             command=self._toggle_threshold,
-        ).pack(side="left", padx=(10, 0))
-        ttk.Checkbutton(
+        )
+        self.auto_threshold_check.pack(side="left", padx=(12, 0))
+        self.visualize_check = ttk.Checkbutton(
             threshold_frame,
             text="生成覆盖度图（默认）",
             variable=self.skip_viz_var,
-            command=self._toggle_viz,
-        ).pack(side="left", padx=(24, 0))
+        )
+        self.visualize_check.pack(side="left", padx=(28, 0))
+        self.config_widgets.extend((self.auto_threshold_check, self.visualize_check))
 
-        buttons = ttk.Frame(header)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        buttons.columnconfigure(0, weight=1)
-        self.start_button = ttk.Button(buttons, text="开始训练", command=self.start)
-        self.start_button.grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(buttons, text="清空日志", command=self.clear_log).grid(row=0, column=2, padx=(8, 0))
+        controls = ttk.Frame(container)
+        controls.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        controls.columnconfigure(1, weight=1)
+        self.start_button = ttk.Button(controls, text="开始训练", style="Primary.TButton", command=self.start)
+        self.start_button.grid(row=0, column=0, sticky="w")
+        self.progress = ttk.Progressbar(controls, mode="indeterminate", length=220)
+        self.progress.grid(row=0, column=1, sticky="ew", padx=14)
+        ttk.Label(controls, textvariable=self.elapsed_var, width=13, anchor="e").grid(row=0, column=2)
+        self.open_output_button = ttk.Button(controls, text="打开输出目录", command=self._open_output)
+        self.open_output_button.grid(row=0, column=3, padx=(12, 0))
+        ttk.Button(controls, text="清空日志", command=self.clear_log).grid(row=0, column=4, padx=(8, 0))
 
-        log_frame = ttk.LabelFrame(root, text="运行日志", padding=8)
-        log_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(4, 10))
+        log_frame = ttk.LabelFrame(container, text="运行日志", style="Section.TLabelframe")
+        log_frame.grid(row=5, column=0, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.log = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 9))
+        self.log = tk.Text(
+            log_frame,
+            wrap="word",
+            state="disabled",
+            font=("Consolas", 9),
+            borderwidth=0,
+            padx=8,
+            pady=8,
+        )
         self.log.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
+        self.log.tag_configure("info", foreground="#2563a6")
+        self.log.tag_configure("success", foreground="#16803a")
+        self.log.tag_configure("error", foreground="#c62828")
 
-        ttk.Label(root, textvariable=self.status_var, relief="sunken", anchor="w").grid(
-            row=2, column=0, sticky="ew", padx=18, pady=(0, 10)
+        ttk.Label(container, textvariable=self.status_var, relief="sunken", anchor="w", padding=(8, 5)).grid(
+            row=6, column=0, sticky="ew", pady=(10, 0)
         )
 
     @staticmethod
     def _path_row(parent, row, label, variable, browse_command):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=8, pady=5)
-        ttk.Button(parent, text="浏览...", command=browse_command).grid(row=row, column=2, sticky="e", pady=5)
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+        entry = ttk.Entry(parent, textvariable=variable)
+        entry.grid(row=row, column=1, sticky="ew", padx=(12, 10), pady=6)
+        button = ttk.Button(parent, text="浏览...", command=browse_command)
+        button.grid(row=row, column=2, sticky="e", pady=6)
+        return entry, button
 
     def _toggle_threshold(self) -> None:
         self.threshold_entry.configure(state="disabled" if self.auto_threshold_var.get() else "normal")
-
-    def _toggle_viz(self) -> None:
-        # The checkbox text is intentionally positive; the internal option is
-        # named skip_visualize to match the existing pipeline API.
-        pass
 
     def _choose_data(self) -> None:
         path = filedialog.askdirectory(title="选择包含 reallog/rlog 的目录")
@@ -140,16 +179,74 @@ class NNLCApp:
         if path:
             self.output_var.set(path)
 
+    def _open_output(self) -> None:
+        output_dir = Path(self.output_var.get().strip())
+        if not output_dir.is_dir():
+            messagebox.showinfo("输出目录", "输出目录尚未创建，请先完成一次训练。")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(output_dir)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(output_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(output_dir)])
+        except OSError as exc:
+            messagebox.showerror("打开失败", str(exc))
+
     def clear_log(self) -> None:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
-    def _append_log(self, text: str) -> None:
+    def _append_log(self, text: str, tag: str | None = None) -> None:
         self.log.configure(state="normal")
-        self.log.insert("end", text)
+        self.log.insert("end", text, tag)
         self.log.see("end")
         self.log.configure(state="disabled")
+
+    def _append_event(self, text: str, tag: str) -> None:
+        self._append_log(f"[{time.strftime('%H:%M:%S')}] {text}\n", tag)
+
+    def _set_running(self, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        for widget in self.config_widgets:
+            widget.configure(state=state)
+        self.threshold_entry.configure(
+            state="disabled" if running or self.auto_threshold_var.get() else "normal"
+        )
+        self.start_button.configure(state=state)
+        if running:
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+
+    def _update_elapsed(self) -> None:
+        if not self.worker or not self.worker.is_alive() or self.started_at is None:
+            return
+        seconds = int(time.monotonic() - self.started_at)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            self.elapsed_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        else:
+            self.elapsed_var.set(f"{minutes:02d}:{seconds:02d}")
+        self.root.after(1000, self._update_elapsed)
+
+    def _finish_running(self, status: str) -> None:
+        self._set_running(False)
+        self.status_var.set(status)
+
+    def _on_close(self) -> None:
+        if self.worker and self.worker.is_alive():
+            should_close = messagebox.askyesno(
+                "训练仍在进行",
+                "关闭窗口会中断当前训练，确定要退出吗？",
+                icon="warning",
+            )
+            if not should_close:
+                return
+        self.root.destroy()
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -176,8 +273,11 @@ class NNLCApp:
                 return
 
         self.clear_log()
-        self.start_button.configure(state="disabled")
+        self._append_event("训练任务已启动", "info")
+        self._set_running(True)
         self.status_var.set("训练中，请保持窗口打开...")
+        self.elapsed_var.set("00:00")
+        self.started_at = time.monotonic()
         skip_visualize = not self.skip_viz_var.get()
         self.worker = threading.Thread(
             target=self._run_worker,
@@ -185,6 +285,7 @@ class NNLCApp:
             daemon=True,
         )
         self.worker.start()
+        self._update_elapsed()
 
     def _run_worker(self, data_dir, output_dir, car, min_score, skip_visualize) -> None:
         writer = _QueueWriter(self.messages)
@@ -209,13 +310,12 @@ class NNLCApp:
                 if kind == "log":
                     self._append_log(payload)
                 elif kind == "done":
-                    self.start_button.configure(state="normal")
-                    self.status_var.set("训练完成")
+                    self._finish_running("训练完成")
+                    self._append_event("训练完成", "success")
                     messagebox.showinfo("训练完成", f"模型已输出到：\n{payload}")
                 elif kind == "error":
-                    self.start_button.configure(state="normal")
-                    self.status_var.set("训练失败")
-                    self._append_log(f"\n[ERROR] {payload}\n")
+                    self._finish_running("训练失败")
+                    self._append_event(f"训练失败：{payload}", "error")
                     messagebox.showerror("训练失败", str(payload))
         except queue.Empty:
             pass

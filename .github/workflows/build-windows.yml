@@ -43,6 +43,18 @@ jobs:
           if (Test-Path "dist\NNLC_Trainer.exe") {
             throw "Unexpected one-file executable found at dist\NNLC_Trainer.exe"
           }
+          $bundledJulia = Join-Path $bundleDir "_internal\julia-runtime\bin\julia.exe"
+          if (-not (Test-Path -LiteralPath $bundledJulia -PathType Leaf)) {
+            throw "Bundled Julia executable is missing or is not a file: $bundledJulia"
+          }
+          & $bundledJulia --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled Julia failed to start ($LASTEXITCODE)"
+          }
+          $trainingScript = Join-Path $bundleDir "_internal\training\latmodel_temporal.jl"
+          if (-not (Test-Path -LiteralPath $trainingScript -PathType Leaf)) {
+            throw "Bundled training script is missing or is not a file: $trainingScript"
+          }
           $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
           if ($fileCount -lt 10) {
             throw "Bundle contains only $fileCount files; expected a one-dir dependency bundle"

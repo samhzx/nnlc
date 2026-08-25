@@ -23,6 +23,10 @@ if not JULIA_DEPOT.is_dir():
 def directory_datas(source_dir: Path, target_dir: str):
     """Return runtime files using Analysis(datas=...)'s 2-tuples.
 
+    The second item in each tuple is a destination directory, not a complete
+    destination filename.  Including the filename there creates an extra
+    directory layer such as ``bin/julia.exe/julia.exe``.
+
     Julia artifacts contain CMake build metadata under ``lib/cmake``.  Those
     files are not read when loading the precompiled Julia packages, and their
     very deep names can exceed Windows' extraction path limit in a one-file
@@ -56,7 +60,10 @@ def directory_datas(source_dir: Path, target_dir: str):
         return True
 
     return [
-        (str(path), str(Path(target_dir) / path.relative_to(source_dir)))
+        (
+            str(path),
+            str(Path(target_dir) / path.relative_to(source_dir).parent),
+        )
         for path in source_dir.rglob("*")
         if path.is_file() and is_runtime_file(path)
     ]

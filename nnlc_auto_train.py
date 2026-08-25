@@ -257,16 +257,24 @@ def get_python_exe():
 def validate_julia():
     """验证 Julia 安装。"""
     julia_exe = get_julia_exe()
-    if not os.path.exists(julia_exe):
+    if not os.path.isfile(julia_exe):
         print_error(f"Julia 未找到: {julia_exe}")
-        print_info("请先安装 Julia 1.10.11，参考 nnlc_training_tutorial.md 第 2.1 节")
+        if os.path.isdir(julia_exe):
+            print_error("打包目录结构错误：julia.exe 被创建成了文件夹")
+        else:
+            print_info("请先安装 Julia 1.10.11，参考 nnlc_training_tutorial.md 第 2.1 节")
         return False
-    result = subprocess.run(
-        [julia_exe, "--version"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
+    try:
+        result = subprocess.run(
+            [julia_exe, "--version"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError as exc:
+        print_error(f"Julia 无法启动: {julia_exe}")
+        print_error(f"系统错误: {exc}")
+        return False
     if result.returncode != 0:
-        print_error("Julia 执行失败")
+        print_error(f"Julia 执行失败: {result.stderr.strip() or result.returncode}")
         return False
     print_ok(f"Julia: {result.stdout.strip()}")
     return True
