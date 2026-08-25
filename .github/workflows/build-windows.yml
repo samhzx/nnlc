@@ -61,5 +61,7 @@ jobs:
           name: NNLC_Trainer-windows-x64-onedir
           path: dist/NNLC_Trainer
           if-no-files-found: error
-          compression-level: 0
+          # Compress the large one-dir bundle for faster downloads. Level 6
+          # balances archive size against the extra runner time.
+          compression-level: 6
           retention-days: 14
