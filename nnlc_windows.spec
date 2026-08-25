@@ -27,36 +27,29 @@ def directory_datas(source_dir: Path, target_dir: str):
     destination filename.  Including the filename there creates an extra
     directory layer such as ``bin/julia.exe/julia.exe``.
 
-    Julia artifacts contain CMake build metadata under ``lib/cmake``.  Those
-    files are not read when loading the precompiled Julia packages, and their
-    very deep names can exceed Windows' extraction path limit in a one-file
-    PyInstaller executable.
+    Julia runtime and depot files stay complete because package source files
+    outside the usual test directories can still be required during Julia
+    precompilation.
     """
     def is_runtime_file(path: Path) -> bool:
         relative_path = path.relative_to(source_dir)
         relative_parts = {part.lower() for part in relative_path.parts}
         target_parts = {part.lower() for part in Path(target_dir).parts}
+
+        # Keep the Julia runtime and package depot intact.  Only transient
+        # depot caches are removed by the build script before this runs.
+        if target_parts == {"julia-runtime"}:
+            return True
+        if target_parts == {"julia-depot"}:
+            top_level = relative_path.parts[0].lower() if relative_path.parts else ""
+            return top_level not in {"scratchspaces", "logs", "clones"}
+
         if "cmake" in relative_parts:
             return False
         if path.name.lower() == "cmakelists.txt":
             return False
         if path.name.lower().endswith((".cmake", ".cmake.in")):
             return False
-        # Julia's runtime test suite and documentation are not needed by the
-        # trainer and account for many unnecessary files in the bundle.
-        if target_parts == {"julia-runtime"} and relative_parts.intersection(
-            {"test", "tests", "doc", "docs", "man"}
-        ):
-            return False
-        # Package tests/examples/benchmarks are development-only content.
-        if target_parts == {"julia-depot"} and relative_path.parts:
-            top_level = relative_path.parts[0].lower()
-            if top_level in {"scratchspaces", "logs", "clones"}:
-                return False
-            if top_level == "packages" and relative_parts.intersection(
-                {"test", "tests", "docs", "examples", "benchmark", "benchmarks"}
-            ):
-                return False
         return True
 
     return [
