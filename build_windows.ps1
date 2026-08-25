@@ -47,6 +47,23 @@ Write-Host "Installing Python dependencies and PyInstaller ..."
 Invoke-Python "pip install --upgrade pip"
 Invoke-Python "pip install -e . pyinstaller"
 
+Write-Host "Cleaning previous PyInstaller output ..."
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "build"
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "dist"
+
 Write-Host "Building NNLC_Trainer.exe ..."
 Invoke-Python "PyInstaller --clean --noconfirm nnlc_windows.spec"
-Write-Host "Done: $ProjectDir\dist\NNLC_Trainer\NNLC_Trainer.exe"
+$BundleDir = Join-Path $ProjectDir "dist\NNLC_Trainer"
+$BundleExe = Join-Path $BundleDir "NNLC_Trainer.exe"
+if (-not (Test-Path $BundleExe)) {
+    throw "one-dir build validation failed: missing $BundleExe"
+}
+if (Test-Path (Join-Path $ProjectDir "dist\NNLC_Trainer.exe")) {
+    throw "one-dir build validation failed: unexpected one-file executable was created"
+}
+$BundleFileCount = @(Get-ChildItem -Recurse -File $BundleDir).Count
+if ($BundleFileCount -lt 10) {
+    throw "one-dir build validation failed: bundle contains only $BundleFileCount files"
+}
+Write-Host "Validated one-dir bundle: $BundleFileCount files"
+Write-Host "Done: $BundleExe"

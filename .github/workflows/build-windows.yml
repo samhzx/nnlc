@@ -32,10 +32,33 @@ jobs:
           $juliaDir = Split-Path (Split-Path $juliaExe -Parent) -Parent
           .\build_windows.ps1 -JuliaDir $juliaDir
 
+      - name: Verify one-dir bundle
+        shell: pwsh
+        run: |
+          $bundleDir = "dist\NNLC_Trainer"
+          $bundleExe = Join-Path $bundleDir "NNLC_Trainer.exe"
+          if (-not (Test-Path $bundleExe)) {
+            throw "Expected one-dir executable was not found: $bundleExe"
+          }
+          if (Test-Path "dist\NNLC_Trainer.exe") {
+            throw "Unexpected one-file executable found at dist\NNLC_Trainer.exe"
+          }
+          $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
+          if ($fileCount -lt 10) {
+            throw "Bundle contains only $fileCount files; expected a one-dir dependency bundle"
+          }
+          @(
+            "Packaging mode: one-dir"
+            "Commit: $env:GITHUB_SHA"
+            "Files: $fileCount"
+            "Executable: $bundleExe"
+          ) | Set-Content (Join-Path $bundleDir "BUILD_INFO.txt") -Encoding UTF8
+          Get-ChildItem $bundleDir
+
       - name: Upload one-dir bundle
         uses: actions/upload-artifact@v4
         with:
-          name: NNLC_Trainer-windows-x64
+          name: NNLC_Trainer-windows-x64-onedir
           path: dist/NNLC_Trainer
           if-no-files-found: error
           compression-level: 0
