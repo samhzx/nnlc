@@ -1,25 +1,25 @@
-# openpilot NNLC Training Tools
+# openpilot NNLC 训练工具
 
-Tools for training NNLC (Neural Network Lateral Control) models for [openpilot](https://github.com/commaai/openpilot) / [sunnypilot](https://github.com/sunnypilot/sunnypilot).
+用于训练 [openpilot](https://github.com/commaai/openpilot) / [sunnypilot](https://github.com/sunnypilot/sunnypilot) NNLC（Neural Network Lateral Control，神经网络横向控制）模型的工具。
 
-NNLC replaces the standard torque lateral controller with a per-vehicle neural network that learns the relationship between desired lateral acceleration and steering torque. This produces smoother, more accurate steering — but training a model requires collecting driving data, processing it, and running the Julia training pipeline.
+NNLC 使用针对每辆车的神经网络替代标准扭矩横向控制器，学习期望横向加速度与转向扭矩之间的关系。这样可以获得更平顺、更准确的转向，但训练模型需要采集驾驶数据、处理数据并运行 Julia 训练流程。
 
-This repo consolidates the scattered, broken tooling into one place. Discussion and support on the [Sunnypilot forum](https://community.sunnypilot.ai/t/nnlc-tools-repo-for-complete-training-to-driving/3283).
+本仓库将分散且无法正常工作的工具整合到了一处。相关讨论和支持请参见 [Sunnypilot 论坛](https://community.sunnypilot.ai/t/nnlc-tools-repo-for-complete-training-to-driving/3283)。
 
-## Prerequisites
+## 前置条件
 
 - **Python 3.11+**
-- **Julia 1.9+** — for model training (with CUDA or Metal GPU recommended)
-- **comma device** — for collecting driving data (comma 3/3X)
+- **Julia 1.9+** — 用于模型训练（建议使用 CUDA 或 Metal GPU）
+- **comma 设备** — 用于采集驾驶数据（comma 3/3X）
 
-## Existing Vehicle NNLC Models
+## 现有车型 NNLC 模型
 
-As of Feb 2026 there are 113 NNLC models. I personally don't know the status of any of them.
+截至 2026 年 2 月，共有 113 个 NNLC 模型。作者不了解这些模型目前各自的状态。
 
 <details>
-<summary>View all 113 models</summary>
+<summary>查看全部 113 个模型</summary>
 
-| Model | Training Date |
+| 模型 | 训练日期 |
 |---|---|
 | ACURA_RDX_3G | 2023-08-05 |
 | AUDI_A3_MK3 | 2023-08-05 |
@@ -137,206 +137,206 @@ As of Feb 2026 there are 113 NNLC models. I personally don't know the status of 
 
 </details>
 
-## Installation
+## 安装
 
 ```bash
 git clone https://github.com/amzoo/openpilot-nnlc-tools.git
 cd openpilot-nnlc-tools
 
-# Create virtual environment with uv (recommended)
+# 使用 uv 创建虚拟环境（推荐）
 uv venv
 uv pip install -e .
 ```
 
-Or use the setup script (handles everything including uv installation):
+也可以使用安装脚本（包括安装 uv 在内会自动处理所有步骤）：
 ```bash
 bash scripts/setup.sh
 ```
 
-All CLI tools work with `uv run` (auto-discovers the `.venv`, no manual activation needed):
+所有命令行工具都可以通过 `uv run` 运行（会自动发现 `.venv`，无需手动激活）：
 ```bash
 uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
 ```
 
-## Quick Start
+## 快速开始
 
-The full pipeline: **sync → extract → score → prune routes → visualize → classify & prune → train → deploy**
+完整流程：**同步 → 提取 → 评分 → 剪枝路线 → 可视化 → 分类并剪枝 → 训练 → 部署**
 
-### One-command pipeline
+### 一条命令运行完整流程
 
 `scripts/prepare_training_data.sh` chains steps 1-6 into a single command:
 
 ```bash
-# Full pipeline with device sync
+# 包含设备同步的完整流程
 bash scripts/prepare_training_data.sh -d 192.168.1.161
 
-# Without sync (rlogs already in ./data)
+# 不同步（rlogs 已位于 ./data）
 bash scripts/prepare_training_data.sh
 
-# Custom output dir and minimum score filter
+# 自定义输出目录和最低评分筛选
 bash scripts/prepare_training_data.sh -o ./my_output --min-score 70
 ```
 
-Or run each step individually:
+也可以逐步运行：
 
-### 1. Sync rlogs from device
+### 1. 从设备同步 rlogs
 
-**Mac desktop shortcut:** Copy `scripts/sync_device.command` to your Desktop. Double-click it — a dialog prompts for the device IP (pre-filled with `192.168.1.161`), then syncs to `./data/`.
+**Mac 桌面快捷方式：** 将 `scripts/sync_device.command` 复制到桌面并双击，弹窗会提示输入设备 IP（预填 `192.168.1.161`），随后同步到 `./data/`。
 
 ```bash
 cp scripts/sync_device.command ~/Desktop/
 ```
 
-Or run directly:
+也可以直接运行：
 
 ```bash
 python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data
 
-# Dry run first to see what would be synced
+# 先执行试运行，查看将要同步的内容
 python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data --dry-run
 ```
 
-### 2. Extract lateral data
+### 2. 提取横向数据
 
 ```bash
-# Basic extraction
+# 基本提取
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv
 
-# With temporal features (required for training)
+# 包含时序特征（训练必需）
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv --temporal
 
-# Parquet format (faster for large datasets)
+# Parquet 格式（大型数据集更快）
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parquet --format parquet
 ```
 
-### 3. Score route quality
+### 3. 评估路线质量
 
 ```bash
 python3 -m nnlc_tools.score_routes ./data
 
-# Or score from extracted CSV
+# 或从提取出的 CSV 评分
 python3 -m nnlc_tools.score_routes ./output/lateral_data.csv
 
-# Only show routes scoring 70+
+# 仅显示评分达到 70 分的路线
 python3 -m nnlc_tools.score_routes ./output/lateral_data.csv --min-score 70
 ```
 
-### 4. Prune routes
+### 4. 剪枝路线
 
 ```bash
-# Drop saturated and lane-change frames, no route exclusion (default)
+# 删除饱和帧和变道帧，不排除路线（默认）
 uv run nnlc-prune-routes ./output/lateral_data.csv -o ./output/lateral_data_routes_pruned.csv
 
-# Also exclude routes scoring below 60
+# 同时排除评分低于 60 分的路线
 uv run nnlc-prune-routes ./output/lateral_data.csv --min-score 60 -o ./output/lateral_data_routes_pruned.csv
 
-# Keep saturated frames (opt out of frame-level filter)
+# 保留饱和帧（停用帧级筛选）
 uv run nnlc-prune-routes ./output/lateral_data.csv --keep-saturated -o ./output/lateral_data_routes_pruned.csv
 ```
 
-### 5. Visualize data coverage
+### 5. 可视化数据覆盖度
 
 ```bash
 python3 -m nnlc_tools.visualize_coverage ./output/lateral_data_routes_pruned.csv -o ./output/coverage.png
 ```
 
-This generates a 6-panel plot (2 rows):
-- **Speed vs lateral accel heatmap** — shows data density, highlights gaps (<50 samples in red)
-- **Lateral accel distribution** — shows balance of left/right turning data
-- **Override rate by speed** — shows where the driver is fighting the controller
-- **Override rate by lat accel** — where in the lat-accel range interventions cluster
-- **Override density heatmap** — speed × lat-accel concentration of override events
-- **Torque magnitude during overrides** — distribution of driver torque inputs when steering_pressed
+这会生成一个 6 面板图（2 行）：
+- **车速与横向加速度热力图** — 显示数据密度，并用红色标出缺口（样本少于 50）
+- **横向加速度分布** — 显示左右转向数据是否均衡
+- **按车速统计的接管率** — 显示驾驶员与控制器对抗的位置
+- **按横向加速度统计的接管率** — 显示干预集中在哪个横向加速度范围
+- **接管密度热力图** — 接管事件在车速 × 横向加速度上的分布
+- **接管期间的扭矩幅值** — `steering_pressed` 时驾驶员扭矩输入的分布
 
-### 6. Classify & prune interventions
+### 6. 分类并剪枝干预事件
 
 ```bash
-# Prune all override frames (driver + mechanical) — default
+# 剪除所有接管帧（驾驶员 + 机械干扰）——默认
 uv run nnlc-interventions ./output/lateral_data_routes_pruned.csv \
     --prune-output ./output/lateral_data_pruned.csv
 
-# Prune only mechanical disturbances (keep driver interventions)
+# 仅剪除机械干扰（保留驾驶员干预）
 uv run nnlc-interventions ./output/lateral_data_routes_pruned.csv \
     --prune mechanical --prune-output ./output/lateral_data_pruned.csv
 
-# Optional: cascade feature diagnostic plot
+# 可选：级联特征诊断图
 uv run nnlc-interventions ./output/lateral_data_routes_pruned.csv --plot \
     --prune-output ./output/lateral_data_pruned.csv \
     -o ./output/interventions.png
 
-# Optional: standalone feature explorer
+# 可选：独立特征探索器
 uv run nnlc-sc-visualize ./output/lateral_data_routes_pruned.csv -o ./output/sc_features.png
 ```
 
-The cascade classifier labels each `steering_pressed` event as a **driver** intervention or **mechanical** disturbance (pothole/bump). `--prune-output` writes active frames with the selected event type(s) removed. Default is `both` — removes all override frames for the cleanest training signal. Use `--prune mechanical` to keep driver corrections in the data.
+级联分类器会将每个 `steering_pressed` 事件标记为**驾驶员**干预或**机械**干扰（坑洼/颠簸）。`--prune-output` 会将删除所选事件类型后的有效帧写入文件。默认值为 `both`，即删除所有接管帧，以获得最干净的训练信号；使用 `--prune mechanical` 可在数据中保留驾驶员修正。
 
-### 7. Assess coverage and iterate
+### 7. 检查覆盖度并迭代
 
-Review the coverage chart from step 4. If you see red bins (gaps with <50 samples), collect more driving data targeting those conditions before training. Common gaps:
-- Low-speed tight turns (city driving)
-- High-speed gentle curves (highway)
-- One turning direction over the other
+检查第 4 步生成的覆盖度图。如果看到红色区间（样本少于 50 的缺口），请在训练前针对这些条件继续采集驾驶数据。常见缺口包括：
+- 低速急转弯（城市驾驶）
+- 高速缓弯（高速公路）
+- 某一侧转向数据明显多于另一侧
 
-### 8. Train model
+### 8. 训练模型
 
-See [training/README.md](training/README.md) for Julia setup and training instructions.
+Julia 配置和训练说明请参见 [training/README.md](training/README.md)。
 
 ```bash
-# Recommended — handles juliaup PATH automatically
+# 推荐方式——自动处理 juliaup PATH
 bash training/run.sh ./output/lateral_data_pruned.csv
 
-# Or run Julia directly
+# 或直接运行 Julia
 cd training/
 julia latmodel_temporal.jl ../output/lateral_data_pruned.csv
 
-# Force CPU mode (no GPU required, slower for large datasets)
+# 强制 CPU 模式（不需要 GPU，大型数据集速度较慢）
 bash training/run.sh ./output/lateral_data_pruned.csv --cpu
 ```
 
-### 9. Deploy model
+### 9. 部署模型
 
-Copy the output JSON to your openpilot install:
+将输出的 JSON 复制到 openpilot 安装目录：
 
 ```bash
 cp my_car_model.json /path/to/openpilot/sunnypilot/neural_network_data/neural_network_lateral_control/
 ```
 
-The filename should match your car's fingerprint. See `sunnypilot/selfdrive/controls/lib/nnlc/helpers.py` for the naming convention.
+文件名应与车辆 fingerprint 匹配。命名规则请参见 `sunnypilot/selfdrive/controls/lib/nnlc/helpers.py`。
 
-## Driving Tips for Data Collection
+## 数据采集建议
 
-Good training data is diverse and clean. Aim for:
+良好的训练数据应当多样且干净，建议做到：
 
-- **Disable NNLC while collecting**: Use the stock torque controller during data collection so the torque signal reflects the base controller, not a previous model
-- **Disable "lateral on blinker"**: Turn off any blinker-based lateral override settings to avoid noisy data during lane changes
-- **Varied speeds**: City streets (5-15 m/s), suburban (15-25 m/s), highway (25-35 m/s)
-- **Varied turns**: Gentle curves, tight turns, S-curves, on-ramps/off-ramps
-- **Minimal overrides**: Let the controller drive — interventions corrupt the torque signal
-- **Both directions**: Left and right turns in equal measure
-- **Different road grades**: Flat, uphill, downhill — affects roll compensation
-- **Multiple routes**: Don't just drive the same loop repeatedly — aim for 20-30 clean routes across different road types
-- **Dry roads**: Wet/icy roads change tire grip and produce non-representative data
+- **采集时关闭 NNLC**：使用原厂扭矩控制器，使扭矩信号反映基础控制器，而不是已有模型
+- **关闭“转向灯触发横向控制”**：关闭基于转向灯的横向覆盖设置，避免变道时产生噪声数据
+- **覆盖不同车速**：城市道路（5-15 m/s）、郊区道路（15-25 m/s）、高速公路（25-35 m/s）
+- **覆盖不同转弯**：缓弯、急转弯、S 弯、上下匝道
+- **尽量少接管**：让控制器驾驶，干预会污染扭矩信号
+- **覆盖两个方向**：左右转弯数量尽量相等
+- **覆盖不同坡度**：平路、上坡、下坡都会影响横滚补偿
+- **使用多条路线**：不要反复驾驶同一个循环路线，建议在不同道路类型上采集 20-30 条干净路线
+- **选择干燥路面**：湿滑或结冰路面会改变轮胎抓地力，产生不具代表性的数据
 
-**How much data?** Start with 5-10 hours of clean driving across 20-30 routes. Check coverage gaps with `visualize_coverage` and fill them with targeted drives.
+**需要多少数据？** 建议先在 20-30 条路线中采集 5-10 小时干净数据。使用 `visualize_coverage` 检查覆盖缺口，再针对缺口驾驶补充数据。
 
-**What to avoid:**
-- Heavy traffic (lots of standstill/stop-and-go)
-- Construction zones (lane changes, overrides)
-- Parking lots (low speed, lots of turning at standstill)
+**应避免的场景：**
+- 拥堵交通（大量停车和走走停停）
+- 施工区域（频繁变道和接管）
+- 停车场（低速且经常在静止状态转向）
 
-## Tool Reference
+## 工具参考
 
 ### sync_rlogs
 
 ```
 python -m nnlc_tools.sync_rlogs [-h] -d DEVICE -o OUTPUT [-u USER] [-p PATH] [--dry-run] [--no-rsync]
 
-  -d, --device     Device IP address
-  -o, --output     Local output directory
-  -u, --user       SSH username (default: comma)
-  -p, --path       Device rlog path (default: /data/media/0/realdata/)
-  --dry-run        Show what would be synced
-  --no-rsync       Force SFTP mode
+  -d, --device     设备 IP 地址
+  -o, --output     本地输出目录
+  -u, --user       SSH 用户名（默认：comma）
+  -p, --path       设备 rlog 路径（默认：/data/media/0/realdata/）
+  --dry-run        显示将要同步的内容
+  --no-rsync       强制使用 SFTP 模式
 ```
 
 ### extract_lateral_data
@@ -344,11 +344,11 @@ python -m nnlc_tools.sync_rlogs [-h] -d DEVICE -o OUTPUT [-u USER] [-p PATH] [--
 ```
 python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] input
 
-  input               Directory containing rlog files
-  -o, --output        Output file path (default: lateral_data.csv)
-  --format            Output format (default: inferred from extension)
-  --temporal          Add temporal lag/lead columns for NNLC training
-  --filter-overrides  Drop rows where driver overrides (steering_pressed=True)
+  input               包含 rlog 文件的目录
+  -o, --output        输出文件路径（默认：lateral_data.csv）
+  --format            输出格式（默认：根据扩展名推断）
+  --temporal          添加 NNLC 训练所需的时序滞后/超前列
+  --filter-overrides  删除驾驶员接管的行（steering_pressed=True）
 ```
 
 ### score_routes
@@ -356,20 +356,20 @@ python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parque
 ```
 python -m nnlc_tools.score_routes [-h] [--min-score MIN_SCORE] input
 
-  input            CSV/Parquet file or directory of rlogs
-  --min-score      Only show routes with score >= this value
+  input            CSV/Parquet 文件或 rlog 目录
+  --min-score      仅显示评分 >= 此值的路线
 ```
 
-Scoring criteria (100 base, deductions):
+评分标准（基础分 100 分，按以下项目扣分）：
 
-| Criterion | Penalty |
+| 项目 | 扣分 |
 |-----------|---------|
-| Override rate > 10% | -15 |
-| Saturated > 5% | -20 |
-| Inactive > 20% | -25 |
-| Standstill > 30% | -15 |
-| Lane change > 10% | -10 |
-| < 2 min active driving | -20 |
+| 接管率 > 10% | -15 |
+| 饱和帧 > 5% | -20 |
+| 非激活帧 > 20% | -25 |
+| 静止帧 > 30% | -15 |
+| 变道帧 > 10% | -10 |
+| 有效驾驶少于 2 分钟 | -20 |
 
 ### prune_routes
 
@@ -378,27 +378,27 @@ nnlc-prune-routes [-h] [-o OUTPUT] [--min-score MIN_SCORE]
                   [--keep-saturated] [--keep-lane-change]
                   input
 
-  input                CSV/Parquet file from nnlc-extract
-  -o, --output         Output path (default: pruned_routes.csv)
-  --min-score N        Exclude routes scoring below N (default: 0, no exclusion)
-  --keep-saturated     Do not drop saturated frames
-  --keep-lane-change   Do not drop lane-change frames
+  input                nnlc-extract 生成的 CSV/Parquet 文件
+  -o, --output         输出路径（默认：pruned_routes.csv）
+  --min-score N        排除评分低于 N 的路线（默认：0，不排除）
+  --keep-saturated     不删除饱和帧
+  --keep-lane-change   不删除变道帧
 ```
 
-Sits between `score_routes` and `visualize_coverage` in the pipeline. Does two things:
-1. **Route-level**: exclude entire routes scoring below `--min-score`
-2. **Frame-level**: drop saturated frames and lane-change frames (enabled by default)
+它位于流程中的 `score_routes` 和 `visualize_coverage` 之间，完成两件事：
+1. **路线级**：排除评分低于 `--min-score` 的整条路线
+2. **帧级**：删除饱和帧和变道帧（默认启用）
 
 ### visualize_coverage
 
 ```
 python -m nnlc_tools.visualize_coverage [-h] [-o OUTPUT] [--gap-threshold GAP_THRESHOLD] [--torque-scatter] [--max-points MAX_POINTS] input
 
-  input              CSV/Parquet file or directory of rlogs
-  -o, --output       Output image path (default: coverage.png)
-  --gap-threshold    Highlight bins with fewer samples (default: 50)
-  --torque-scatter   Generate a separate lat_accel vs torque scatter plot
-  --max-points       Max data points per torque scatter subplot (random sample)
+  input              CSV/Parquet 文件或 rlog 目录
+  -o, --output       输出图像路径（默认：coverage.png）
+  --gap-threshold    突出显示样本较少的区间（默认：50）
+  --torque-scatter   额外生成横向加速度与扭矩散点图
+  --max-points       每个扭矩散点子图的最大数据点数（随机采样）
 ```
 
 ### visualize_model
@@ -406,14 +406,14 @@ python -m nnlc_tools.visualize_coverage [-h] [-o OUTPUT] [--gap-threshold GAP_TH
 ```
 python -m nnlc_tools.visualize_model [-h] [-o OUTPUT_DIR] model data
 
-  model              Trained model JSON file
-  data               Training data CSV/Parquet file
-  -o, --output-dir   Output directory for plots (default: ./output/)
+  model              已训练模型的 JSON 文件
+  data               训练数据 CSV/Parquet 文件
+  -o, --output-dir   图表输出目录（默认：./output/）
 ```
 
-Generates two plot sets with model prediction curves overlaid on data:
-- **lat_accel_vs_torque** — per-speed-bin scatter with viridis speed coloring + model curve
-- **torque_vs_speed** — per-lat_accel-bin scatter with viridis lat_accel coloring + model curve
+生成两组叠加模型预测曲线的数据图：
+- **lat_accel_vs_torque** — 按车速分箱的散点图，使用 viridis 以车速着色，并叠加模型曲线
+- **torque_vs_speed** — 按横向加速度分箱的散点图，使用 viridis 以横向加速度着色，并叠加模型曲线
 
 ### analyze_interventions
 
@@ -428,15 +428,15 @@ nnlc-interventions [-h] [-o OUTPUT] [--plot] [--scatter]
                    input
 ```
 
-Uses a 3-stage cascade classifier (11 features, F1–F11) to distinguish **driver** corrections from **mechanical** disturbances (potholes, bumps, curb impacts). Stage 1 decides on torque rate + duration alone (~10 ms); Stage 2 adds sign consistency, zero-crossing rate, kurtosis, and longitudinal shock (~50 ms); Stage 3 adds torque–lateral-accel correlation and frequency energy ratio (~150 ms).
+使用包含 11 个特征（F1-F11）的三级级联分类器，区分**驾驶员**修正与**机械**干扰（坑洼、颠簸、路缘碰撞）。第 1 阶段仅根据扭矩变化率和持续时间决策（约 10 ms）；第 2 阶段加入符号一致性、过零率、峰度和纵向冲击（约 50 ms）；第 3 阶段加入扭矩-横向加速度相关性和频率能量比（约 150 ms）。
 
-| Arg | Default | Effect |
+| 参数 | 默认值 | 作用 |
 |-----|---------|--------|
-| `--torque-rate-mechanical` | 80.0 Nm/s | Rate above which Stage 1 calls mechanical immediately |
-| `--torque-rate-driver` | 20.0 Nm/s | Rate below which Stage 1 calls driver immediately |
-| `--max-pothole-length` | 2.5 m | Pothole size estimate for speed-adaptive brevity |
-| `--prune-output PATH` | (none) | Write pruned active frames to PATH (.csv or .parquet) |
-| `--prune` | `both` | Remove `mechanical`, `driver`, or `both` event frames |
+| `--torque-rate-mechanical` | 80.0 Nm/s | 高于此变化率时，第 1 阶段立即判定为机械干扰 |
+| `--torque-rate-driver` | 20.0 Nm/s | 低于此变化率时，第 1 阶段立即判定为驾驶员干预 |
+| `--max-pothole-length` | 2.5 m | 用于按车速调整短事件阈值的坑洼尺寸估计 |
+| `--prune-output PATH` | （无） | 将剪枝后的有效帧写入 PATH（.csv 或 .parquet） |
+| `--prune` | `both` | 删除 `mechanical`、`driver` 或 `both` 类型的事件帧 |
 
 ### nnlc-sc-visualize
 
@@ -448,24 +448,24 @@ nnlc-sc-visualize [-h] [-o OUTPUT] [--gap-frames GAP_FRAMES]
                   input
 ```
 
-Standalone 3×3 feature diagnostic plot — histograms of all 11 classifier features split by driver/mechanical, speed-vs-duration scatter, speed band bar chart, and cascade stage distribution. Useful for threshold exploration without writing pruned output.
+独立的 3×3 特征诊断图：按驾驶员/机械类别分别绘制 11 个分类器特征的直方图、车速-持续时间散点图、车速区间柱状图和级联阶段分布图。适合探索阈值，无需写入剪枝后的输出文件。
 
-## Troubleshooting
+## 故障排查
 
-### Out of memory during extraction
+### 提取时内存不足
 
-Process fewer rlogs at a time, or use `--format parquet` which is more memory-efficient. The extractor processes segments one at a time, but the final DataFrame concatenation can be large.
+一次处理更少的 rlog，或使用更节省内存的 `--format parquet`。提取器会逐段处理数据，但最终拼接的 DataFrame 可能很大。
 
-### rsync connection refused
+### rsync 连接被拒绝
 
-The comma device may not have rsync installed. Use `--no-rsync` to fall back to SFTP:
+comma 设备可能没有安装 rsync。使用 `--no-rsync` 回退到 SFTP：
 ```bash
 python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data --no-rsync
 ```
 
-### No rlog files found
+### 未找到 rlog 文件
 
-Check that your rlogs are in the expected directory structure:
+检查 rlog 是否位于预期的目录结构中：
 ```
 ./data/
   2024-01-15--12-30-45/
@@ -474,45 +474,45 @@ Check that your rlogs are in the expected directory structure:
     ...
 ```
 
-### Julia training on CPU
+### 使用 CPU 进行 Julia 训练
 
-CPU training works — expect ~8 seconds for 1000 epochs on small datasets. Use `--cpu` to force CPU mode:
+CPU 训练可以正常工作，小型数据集运行 1000 个 epoch 预计需要约 8 秒。使用 `--cpu` 强制 CPU 模式：
 
 ```bash
 bash training/run.sh /path/to/latmodels/ --cpu
 ```
 
-GPU (CUDA or Metal) is still recommended for large datasets due to speed. See [training/README.md](training/README.md).
+由于速度原因，大型数据集仍建议使用 GPU（CUDA 或 Metal）。参见 [training/README.md](training/README.md)。
 
-## Source Attribution
+## 来源致谢
 
-This project builds on work from:
-- [mmmorks/sunnypilot](https://github.com/mmmorks/sunnypilot) (`staging-merged` @ `8a9f0311`) — Python rlog processing tools
-- [ryanomatic/rlog_aggregation](https://github.com/ryanomatic/rlog_aggregation) (`main` @ `26b1ea05`) — Rlog download tool
-- [mmmorks/OP_ML_FF](https://github.com/mmmorks/OP_ML_FF) (`master` @ `0116b9e3`, forked from [twilsonco/OP_ML_FF](https://github.com/twilsonco/OP_ML_FF)) — Julia training scripts
-- warren.2 — Testing, debugging, and pipeline feedback that shaped the tool design
+本项目基于以下项目的工作：
+- [mmmorks/sunnypilot](https://github.com/mmmorks/sunnypilot) (`staging-merged` @ `8a9f0311`) — Python rlog 处理工具
+- [ryanomatic/rlog_aggregation](https://github.com/ryanomatic/rlog_aggregation) (`main` @ `26b1ea05`) — rlog 下载工具
+- [mmmorks/OP_ML_FF](https://github.com/mmmorks/OP_ML_FF) (`master` @ `0116b9e3`，fork 自 [twilsonco/OP_ML_FF](https://github.com/twilsonco/OP_ML_FF)) — Julia 训练脚本
+- warren.2 — 参与测试、调试并提供流程反馈，帮助完善工具设计
 
-## Roadmap
+## 路线图
 
-Derived from community feedback from the Sunnypilot tuning-nnlc Discord channel.
+根据 Sunnypilot tuning-nnlc Discord 频道的社区反馈整理。
 
-- [x] **Forum documentation** — Published guide to Sunnypilot forum
-- [x] **Canonical repo** — Tools consolidated from 3 scattered repos into this one
-- [x] **Simplified rlog processing** — Refactored to accept a single input directory, stripped multi-server logic
-- [x] **Rlog syncing** — `nnlc-sync` with rsync (primary) and SFTP fallback, incremental sync
-- [x] **Dependencies** — `pyproject.toml` with pinned versions, bundled cereal schemas (no openpilot checkout needed)
-- [x] **CPU training** — Fixed with `CustomAdaGrad` optimizer and `--cpu` flag
-- [x] **Coverage visualization** — `nnlc-visualize` generates 3-panel coverage chart (heatmap, histogram, override rate)
-- [x] **Route quality scoring** — `nnlc-score` with 6-criteria scorer (100-point scale)
-- [x] **Route pruning** — removes saturated and lane-change frames, optionally excludes low-scoring routes before training
-- [x] **Driving guidance** — Documented in README (data collection tips, what to avoid)
-- [x] **End-to-end guide** — README covers full pipeline: sync → extract → score → visualize → train → deploy
-- [x] **Troubleshooting** — Common issues documented (OOM, rsync, rlogs, CPU training)
-- [x] **HKG compatibility** — Fixed rlog parsing failures for Hyundai/Kia/Genesis
-- [x] **Model validation plots** — `nnlc-validate` generates lat_accel_vs_torque and torque_vs_speed plots with model curves
-- [x] **Steering input filtering** — 3-stage cascade classifier (`nnlc-interventions`) distinguishes driver corrections from mechanical disturbances; `--prune-output` removes unwanted frames before training
-- [ ] **NNLC-on data quality** — Investigate whether collecting data with an existing NNLC model active degrades the next trained model
-- [ ] **Temporal signal alignment** — Verify that all signals in each training row share the same timestamp and that lag/lead columns are correctly offset
-- [ ] **AMD GPU support** — Port training to support ROCm (community member with 7900 XT available to test)
-- [ ] **Honda/Acura EPS filtering** — Review and integrate `Micim987/opendbc` signal filtering
-- [ ] **Mazda compatibility** — Investigate signal compatibility issues; does the HKG fix above address this too?
+- [x] **论坛文档** — 已在 Sunnypilot 论坛发布指南
+- [x] **规范仓库** — 将 3 个分散仓库中的工具整合到本仓库
+- [x] **简化 rlog 处理** — 重构为接收单个输入目录，移除多服务器逻辑
+- [x] **rlog 同步** — `nnlc-sync` 以 rsync 为主，并提供 SFTP 回退和增量同步
+- [x] **依赖管理** — `pyproject.toml` 固定版本并内置 cereal schema（无需检出 openpilot）
+- [x] **CPU 训练** — 使用 `CustomAdaGrad` 优化器和 `--cpu` 参数修复
+- [x] **覆盖度可视化** — `nnlc-visualize` 生成三面板覆盖度图（热力图、直方图、接管率）
+- [x] **路线质量评分** — `nnlc-score` 使用六项标准评分（百分制）
+- [x] **路线剪枝** — 删除饱和帧和变道帧，并可在训练前排除低评分路线
+- [x] **驾驶指南** — README 已记录数据采集建议和应避免的场景
+- [x] **端到端指南** — README 覆盖完整流程：同步 → 提取 → 评分 → 可视化 → 训练 → 部署
+- [x] **故障排查** — 已记录常见问题（OOM、rsync、rlog、CPU 训练）
+- [x] **HKG 兼容性** — 修复 Hyundai/Kia/Genesis 的 rlog 解析失败
+- [x] **模型验证图** — `nnlc-validate` 生成带模型曲线的 lat_accel_vs_torque 和 torque_vs_speed 图
+- [x] **转向输入筛选** — 三级级联分类器（`nnlc-interventions`）区分驾驶员修正和机械干扰；`--prune-output` 可在训练前删除不需要的帧
+- [ ] **NNLC 开启时的数据质量** — 研究采集数据时启用已有 NNLC 模型是否会降低下一模型的训练质量
+- [ ] **时序信号对齐** — 验证每个训练行中的信号是否共享同一时间戳，以及滞后/超前列是否正确偏移
+- [ ] **AMD GPU 支持** — 移植训练流程以支持 ROCm（有社区成员提供 7900 XT 测试）
+- [ ] **Honda/Acura EPS 筛选** — 评估并集成 `Micim987/opendbc` 的信号筛选
+- [ ] **Mazda 兼容性** — 调查信号兼容性问题，并确认上述 HKG 修复是否也能解决

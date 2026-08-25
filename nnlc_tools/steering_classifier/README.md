@@ -1,233 +1,233 @@
-# Steering Event Classifier
+# 转向事件分类器
 
-**Distinguishing genuine driver steering interventions from mechanical road disturbances in ADAS/autopilot override event logs.**
+**在 ADAS/自动驾驶接管事件日志中区分真实的驾驶员转向干预与道路机械干扰。**
 
-When a vehicle's autopilot detects steering torque that exceeds its control authority, it flags a `steering_pressed` override event. But not every override is a real driver intervention — potholes, road bumps, curb impacts, and rough surfaces can produce torque spikes that trigger the same flag. Misclassifying a pothole as a driver takeover (or vice versa) corrupts driver engagement metrics, safety analytics, and system tuning. This classifier separates the two.
+当车辆自动驾驶系统检测到超过自身控制能力的转向扭矩时，会标记一个 `steering_pressed` 接管事件。但并非每次接管都是真实的驾驶员干预：坑洼、路面颠簸、路缘碰撞和粗糙路面都可能产生触发同一标记的扭矩尖峰。将坑洼误判为驾驶员接管（或反之）会污染驾驶员参与度指标、安全分析和系统调校。本分类器用于区分这两类事件。
 
 ---
 
-## How It Works
+## 工作原理
 
-The classifier extracts 11 signal features from each override event and runs them through a **three-stage cascade** that trades off latency against accuracy. Each stage can emit a final decision or pass to the next stage for more evidence.
+分类器从每个接管事件中提取 11 个信号特征，并通过一个在延迟和准确率之间权衡的**三级级联**进行处理。每个阶段都可以直接给出最终判断，也可以将不确定事件交给下一阶段获取更多证据。
 
 ```
 Event frames (100 Hz)
         │
         ▼
 ┌─────────────────────────────┐
-│  STAGE 1 — Fast Gate (10ms) │  Torque rate + duration only
-│  Can resolve obvious cases  │  → "definite pothole" or "definite driver"
+│  阶段 1 — 快速门控（10ms）   │  仅使用扭矩变化率和持续时间
+│  可处理明显案例              │  → “确定为坑洼”或“确定为驾驶员”
 └──────────┬──────────────────┘
-           │ ambiguous
+           │ 不明确
            ▼
 ┌──────────────────────────────────┐
-│  STAGE 2 — Confirmation (50ms)   │  + sign consistency, ZCR, kurtosis,
-│  Weighted multi-feature scoring  │    longitudinal shock, torque-angle phase
+│  阶段 2 — 确认（50ms）           │  + 符号一致性、ZCR、峰度、
+│  加权多特征评分                 │    纵向冲击、扭矩-转角相位
 └──────────┬───────────────────────┘
-           │ still ambiguous
+           │ 仍不明确
            ▼
 ┌──────────────────────────────────────┐
-│  STAGE 3 — Contextual Gate (200ms)   │  + torque–lat-accel correlation,
-│  Cross-signal correlation features   │    frequency energy ratio,
-│  Resolves edge cases                 │    lateral accel residual
+│  阶段 3 — 上下文门控（200ms）        │  + 扭矩-横向加速度相关性、
+│  跨信号相关特征                      │    频率能量比、横向加速度残差
+│  处理边界案例                        │
 └──────────────────────────────────────┘
            │
            ▼
-   ("driver" | "mechanical", confidence)
+   （“driver” | “mechanical”，置信度）
 ```
 
-The system defaults to **"driver"** on ambiguity. Misclassifying a real driver intervention as mechanical is more safety-critical than the reverse.
+系统在无法确定时默认判定为 **“driver”**。将真实驾驶员干预误判为机械干扰，比反向误判具有更高的安全风险。
 
 ---
 
-## The 11 Features
+## 11 个特征
 
-Each feature's design is grounded in vehicle dynamics research and EPAS (Electric Power Assisted Steering) control literature. The features are grouped by the latency tier at which they become computable.
+每个特征的设计都基于车辆动力学研究和 EPAS（Electric Power Assisted Steering，电动助力转向）控制文献。特征按可计算所需的延迟等级分组。
 
-### Tier 1 — Fast Gate (1 sample / 10 ms)
+### 第 1 级 — 快速门控（1 个样本 / 10 ms）
 
-**F1: Peak Torque Rate (Nm/s)** — The first derivative of steering torque is the fastest discriminator. Human neuromuscular dynamics act as a second-order low-pass filter on steering input, limiting intentional torque rate to roughly 20 Nm/s for normal maneuvers. Road impacts bypass the driver entirely and produce torque rates of 50–100+ Nm/s through direct mechanical force on the steering linkage.
+**F1：扭矩峰值变化率（Nm/s）** —— 转向扭矩的一阶导数是最快的区分指标。人体神经肌肉动力学会对转向输入形成二阶低通滤波，使正常操作中的主动扭矩变化率大致不超过 20 Nm/s。道路冲击完全绕过驾驶员，通过转向连杆上的直接机械力产生 50–100+ Nm/s 的扭矩变化率。
 
-The original classifier used a 500 Nm/s threshold, which is approximately 5–10× too conservative. The literature-calibrated range is 50–80 Nm/s for the mechanical/driver boundary.
+原分类器使用 500 Nm/s 阈值，这一阈值约保守了 5–10 倍。根据文献校准，机械干扰/驾驶员干预的边界范围应为 50–80 Nm/s。
 
-*Sources:*
-- Pick & Cole, "Neuromuscular dynamics in the driver–vehicle system," *Vehicle System Dynamics*, 44(sup1):511-522, 2006 — established the neuromuscular bandwidth limit constraining driver torque rate.
-- Springer chapter on instrumented steering wheel characterization (2024) — measured unconscious reflex torque peaking at 0.13 ± 0.03 s vs. conscious steering at 0.28 ± 0.11 s, with reflex torque only ~20% of maximum voluntary.
+*来源：*
+- Pick & Cole, "Neuromuscular dynamics in the driver–vehicle system," *Vehicle System Dynamics*, 44(sup1):511-522, 2006 — 建立了限制驾驶员扭矩变化率的神经肌肉带宽上限。
+- Springer 关于仪器化方向盘特性的章节（2024）——测得无意识反射扭矩峰值为 0.13 ± 0.03 s，而有意识转向为 0.28 ± 0.11 s；反射扭矩仅约为最大自主扭矩的 20%。
 
-**F2: Event Duration (seconds)** — Road impact transients last 20–200 ms depending on speed and obstacle geometry. Lane-keeping corrections span 0.5–3 s; lane changes take 2–5 s. Emergency evasive maneuvers occupy 0.3–2 s with high sustained torque.
+**F2：事件持续时间（秒）** —— 道路冲击瞬态持续 20–200 ms，具体取决于车速和障碍物几何形状。车道保持修正持续 0.5–3 s；变道需要 2–5 s。紧急避让动作通常持续 0.3–2 s，并伴随较高且持续的扭矩。
 
-*Sources:*
-- Schinkel et al., "Driver Intervention Detection via Real-Time Transfer Function Estimation," *IEEE Trans. ITS*, 2021 — found reliable event classification requires minimum 0.2 s of data.
+*来源：*
+- Schinkel 等，"Driver Intervention Detection via Real-Time Transfer Function Estimation," *IEEE Trans. ITS*, 2021 — 发现可靠的事件分类至少需要 0.2 s 数据。
 
-### Tier 2 — Confirmation Gate (5 samples / 50 ms)
+### 第 2 级 — 确认门控（5 个样本 / 50 ms）
 
-**F3: Torque Sign Consistency** — Intentional steering is unidirectional: a driver turning left applies sustained negative (or positive) torque throughout the maneuver. Road disturbances produce oscillatory torque that alternates sign rapidly. The ratio of dominant-sign samples to total samples quantifies this.
+**F3：扭矩符号一致性** —— 主动转向具有单向性：驾驶员左转时会在整个动作中持续施加负（或正）扭矩。道路干扰会产生符号快速交替的振荡扭矩。主导符号样本数与总样本数之比可量化这一特征。
 
-*Sources:*
-- Moreillon et al., "Hands On/Off Detection Based on EPS Sensors," *JTEKT Engineering Journal*, No. 1017E, 2020 — measured ±1–2 Nm oscillatory torque on cobblestone roads with hands off the wheel; ±3 Nm during automated driving on asphalt. Their Driver Torque Estimator inherently low-pass filters to reject oscillatory content, validating sign consistency as a classification signal.
+*来源：*
+- Moreillon 等，"Hands On/Off Detection Based on EPS Sensors," *JTEKT Engineering Journal*, No. 1017E, 2020 — 测得无人握方向盘时在鹅卵石路面上有 ±1–2 Nm 的振荡扭矩，在沥青路面自动驾驶时有 ±3 Nm。其 Driver Torque Estimator 天然使用低通滤波抑制振荡成分，验证了符号一致性作为分类信号的有效性。
 
-**F4: Zero-Crossing Rate (Hz)** — A computationally efficient proxy for the oscillation frequency of the torque signal. Road disturbances excite steering at 8–20+ Hz (producing ZCR of 16–40 Hz); driver inputs stay below 2–4 Hz (ZCR < 4 Hz). This feature complements sign consistency by capturing oscillation frequency rather than just polarity balance.
+**F4：过零率（Hz）** —— 这是扭矩信号振荡频率的高效计算代理指标。道路干扰会以 8–20+ Hz 激励转向（产生 16–40 Hz 的 ZCR）；驾驶员输入通常低于 2–4 Hz（ZCR < 4 Hz）。该特征捕捉振荡频率，与只反映极性平衡的符号一致性形成互补。
 
-*Sources:*
-- Cole et al., "Real-time characterisation of driver steering behaviour," *Vehicle System Dynamics*, 56(10), 2018 — measured intentional driver steering at 0.2–2 Hz with road excitation above 2 Hz.
-- Giacomin & Woo, "A study of the human ability to detect road surface type on the basis of steering wheel vibration feedback," *Proc. IMechE Part D*, 219(11), 2005 — found steering wheel vibration from road surface concentrated at 10–60 Hz, with 26–35 Hz most diagnostic.
+*来源：*
+- Cole 等，"Real-time characterisation of driver steering behaviour," *Vehicle System Dynamics*, 56(10), 2018 — 测得驾驶员主动转向频率为 0.2–2 Hz，而道路激励高于 2 Hz。
+- Giacomin & Woo，"A study of the human ability to detect road surface type on the basis of steering wheel vibration feedback," *Proc. IMechE Part D*, 219(11), 2005 — 发现路面引起的方向盘振动集中在 10–60 Hz，其中 26–35 Hz 最具诊断性。
 
-**F5: Torque Kurtosis** — Excess kurtosis measures the "tailedness" of the torque distribution. A single sharp impulse (pothole strike) produces high kurtosis (>>3, leptokurtic). Smooth driver input produces approximately Gaussian or sub-Gaussian distributions (kurtosis ≈ 3). Extended rough road produces moderate kurtosis between the two extremes.
+**F5：扭矩峰度** —— 超额峰度衡量扭矩分布的“尾部厚度”。单个尖锐冲击（撞击坑洼）会产生高峰度（>>3，尖峰厚尾）。平滑的驾驶员输入大致呈高斯或次高斯分布（峰度 ≈ 3）。持续的粗糙路面会产生介于两者之间的中等峰度。
 
-*Sources:*
-- Standard statistical property used in vibration analysis and structural health monitoring. Applied here by analogy to the impulsive vs. smooth signal morphology established in the road excitation literature.
+*来源：*
+- 这是振动分析和结构健康监测中使用的标准统计属性。此处类比道路激励文献中已经确立的脉冲型与平滑型信号形态。
 
-**F6: Longitudinal Shock** — A concurrent spike in longitudinal acceleration (|a_ego| > 1.5 m/s²) during a short event (<0.4 s) is a strong indicator of a vertical road impact. Intentional steering maneuvers do not produce significant longitudinal acceleration unless combined with braking, which can be disambiguated by duration.
+**F6：纵向冲击** —— 短事件（<0.4 s）期间同时出现纵向加速度尖峰（|a_ego| > 1.5 m/s²），是垂直路面冲击的强指标。主动转向通常不会产生明显纵向加速度，除非同时制动；这种情况可以通过持续时间加以区分。
 
-*Sources:*
-- Mednis et al., "Real Time Pothole Detection Using Android Smartphones with Accelerometers," *IEEE DCOSS*, 2011 — validated accelerometer-based pothole detection using vertical/longitudinal acceleration thresholds.
-- Eriksson et al., "The Pothole Patrol," *MobiSys*, 2008 — demonstrated speed-dependent vertical acceleration filtering for road anomaly detection.
+*来源：*
+- Mednis 等，"Real Time Pothole Detection Using Android Smartphones with Accelerometers," *IEEE DCOSS*, 2011 — 使用垂直/纵向加速度阈值验证了基于加速度计的坑洼检测。
+- Eriksson 等，"The Pothole Patrol," *MobiSys*, 2008 — 展示了用于道路异常检测的车速相关垂直加速度滤波。
 
-**F7: Torque-Angle Phase Relationship** — During intentional steering, the driver applies torque *first* and the wheel turns *in response* (torque leads angle). During a road disturbance, an external force turns the wheel *first* and the driver feels the resulting torque *after* (angle leads torque). The cross-correlation between torque rate and angle rate at zero lag captures this causal direction as a continuous [-1, 1] value.
+**F7：扭矩-转角相位关系** —— 主动转向时，驾驶员*先*施加扭矩，方向盘随后响应转动（扭矩领先转角）。道路干扰时，外力*先*使方向盘转动，驾驶员随后感受到产生的扭矩（转角领先扭矩）。扭矩变化率和转角变化率在零延迟处的互相关，可将这种因果方向表示为连续的 [-1, 1] 数值。
 
-*Sources:*
-- Fundamental EPAS control principle. Validated indirectly by:
-  - Chevrel, Mars et al., "Modelling human control of steering for the design of advanced driver assistance systems," *Annual Reviews in Control*, 47:249-261, 2019 — cybernetic driver model showing torque as the *cause* of heading change in intentional control.
-  - GM Patent US 8,954,235 (2015) — compares measured vs. model-expected steering torque to detect driver override in lane centering, implicitly relying on the causal torque→angle relationship.
+*来源：*
+- EPAS 的基本控制原理。以下文献对其进行了间接验证：
+  - Chevrel、Mars 等，"Modelling human control of steering for the design of advanced driver assistance systems," *Annual Reviews in Control*, 47:249-261, 2019 — 赛博驾驶员模型表明，在主动控制中扭矩是航向变化的*原因*。
+  - GM Patent US 8,954,235 (2015) — 比较实测扭矩与模型预期扭矩来检测车道居中的驾驶员接管，隐含依赖扭矩→转角的因果关系。
 
-### Tier 3 — Contextual Gate (10–20 samples / 100–200 ms)
+### 第 3 级 — 上下文门控（10–20 个样本 / 100–200 ms）
 
-**F8: Torque–Lateral-Acceleration Correlation** — **The single most impactful feature missing from the original classifier.** When a driver steers intentionally, their applied torque produces a corresponding change in lateral acceleration — the two signals are tightly coupled (Pearson r > 0.6) with torque leading by 50–200 ms. During a road disturbance, a torque spike occurs *without* producing proportional lateral acceleration change (r ≈ 0), because the disturbance is absorbed by the suspension and steering system before it can alter the vehicle's lateral trajectory.
+**F8：扭矩-横向加速度相关性** —— **这是原分类器缺失的影响最大的单一特征。** 驾驶员主动转向时，施加的扭矩会引起相应的横向加速度变化，两者紧密耦合（Pearson r > 0.6），且扭矩领先 50–200 ms。道路干扰时，扭矩会出现尖峰，*但不会*产生相称的横向加速度变化（r ≈ 0），因为干扰在改变车辆横向轨迹之前就被悬架和转向系统吸收了。
 
-This feature is powerful because it exploits the physics of the vehicle rather than just the shape of the torque signal. A pothole can produce torque that "looks" intentional in magnitude and even sign consistency, but it will not produce correlated lateral acceleration.
+该特征之所以有效，是因为它利用了车辆物理规律，而不仅仅是扭矩信号的形状。坑洼可能产生在幅值甚至符号一致性上都“看起来”像主动操作的扭矩，但不会产生相关的横向加速度。
 
-*Sources:*
-- comma.ai torqued lateral control documentation — confirms the fundamental torque-to-lateral-acceleration relationship used in production ADAS control.
-- Hyundai Patent US2019/0077447 — models the driver torque as proportional to lateral acceleration for ADAS conflict detection.
-- Zhou et al., "Driver Steering Intention Prediction for Human-Machine Shared Systems of Intelligent Vehicles Based on CNN-GRU Network," *Sensors*, 25(10):3224, MDPI, 2025 — feature importance analysis ranks steering torque and lateral acceleration as the top two discriminative inputs for intent prediction.
+*来源：*
+- comma.ai torqued lateral control 文档——确认了生产级 ADAS 控制所使用的扭矩-横向加速度基本关系。
+- Hyundai Patent US2019/0077447 — 将驾驶员扭矩建模为与横向加速度成正比，用于 ADAS 冲突检测。
+- Zhou 等，"Driver Steering Intention Prediction for Human-Machine Shared Systems of Intelligent Vehicles Based on CNN-GRU Network," *Sensors*, 25(10):3224, MDPI, 2025 — 特征重要性分析将转向扭矩和横向加速度列为意图预测中最具区分性的两个输入。
 
-**F9: Frequency Energy Ratio (Low-Band / High-Band)** — The strongest *spectral* discriminator. Driver steering content lives at 0.5–3 Hz; road disturbance content concentrates at 5–40 Hz. Computing the RMS energy ratio of these two bands over a short window provides a single scalar that directly measures where the signal's power lies. Implemented with second-order Butterworth IIR bandpass filters in second-order-sections (SOS) form for numerical stability.
+**F9：频率能量比（低频段 / 高频段）** —— 最强的*频谱*区分指标。驾驶员转向内容位于 0.5–3 Hz；道路干扰内容集中在 5–40 Hz。在短窗口内计算两个频段的 RMS 能量比，可以用一个标量直接衡量信号功率所在的频段。为保证数值稳定性，使用 SOS（二阶节）形式的二阶 Butterworth IIR 带通滤波器实现。
 
-At 100 Hz sampling (Nyquist = 50 Hz), the full separation between driver and road bands is capturable. For events shorter than 200 ms (~20 samples), the bandpass filter edge effects dominate and this feature is not computed.
+在 100 Hz 采样率（Nyquist = 50 Hz）下，可以完整区分驾驶员频段和道路频段。对于短于 200 ms（约 20 个样本）的事件，带通滤波器的边缘效应占主导，因此不计算该特征。
 
-*Sources:*
-- Cole et al. (2018) — 0.2–2 Hz driver band.
-- Giacomin & Woo (2005) — 10–60 Hz road surface vibration band.
-- Giacomin et al., "Effect of steering wheel acceleration frequency distribution on detection of road type," *Ingeniería Mecánica, Tecnología y Desarrollo*, 2013 — confirmed frequency distribution as the primary cue for road surface type discrimination.
-- arXiv submission on steering feedback in dynamic driving simulators (2024) — confirmed 10–30 Hz as the road excitation band, noting content below 10 Hz would be perceived as external steering intervention.
-- Giacomin & Onesti, "Frequency weighting for the evaluation of steering wheel rotational vibration," *International Journal of Industrial Ergonomics*, 34(2):89-97, 2004 — established frequency-dependent human sensitivity to steering wheel vibration.
+*来源：*
+- Cole 等（2018）——驾驶员频段为 0.2–2 Hz。
+- Giacomin & Woo（2005）——路面振动频段为 10–60 Hz。
+- Giacomin 等，"Effect of steering wheel acceleration frequency distribution on detection of road type," *Ingeniería Mecánica, Tecnología y Desarrollo*, 2013 — 确认频率分布是区分路面类型的主要依据。
+- 关于动态驾驶模拟器中转向反馈的 arXiv 论文（2024）——确认道路激励频段为 10–30 Hz，并指出低于 10 Hz 的成分会被感知为外部转向干预。
+- Giacomin & Onesti，"Frequency weighting for the evaluation of steering wheel rotational vibration," *International Journal of Industrial Ergonomics*, 34(2):89-97, 2004 — 建立了人类对方向盘振动的频率相关敏感性。
 
-**F10: Speed-Adaptive Duration Threshold** — Replaces the original fixed 0.15 s and "highway brief" (speed > 20 m/s AND duration < 0.4 s) rules. The physics is straightforward: pothole crossing time equals pothole length divided by vehicle speed (T = L/V). A 2.5 m pothole takes 250 ms to cross at 10 m/s but only 83 ms at 30 m/s. Using a calibratable maximum pothole length (default 2.5 m), the threshold adapts continuously to speed rather than using binary cutoffs.
+**F10：车速自适应持续时间阈值** —— 替代原有固定的 0.15 s 和“高速短事件”（车速 > 20 m/s 且持续时间 < 0.4 s）规则。其物理关系很直接：穿越坑洼的时间等于坑洼长度除以车速（T = L/V）。在 10 m/s 下通过 2.5 m 坑洼需要 250 ms，而在 30 m/s 下只需要 83 ms。使用可校准的最大坑洼长度（默认 2.5 m），阈值可随车速连续调整，而不是使用二元截断。
 
-*Sources:*
-- SAE Paper 2015-01-0637, "Simulation of Vehicle Pothole Test and Techniques Used" — confirmed pothole size and vehicle speed as the two primary factors in impact severity, with duration scaling as L/V.
-- ISO 8608:2016, "Mechanical vibration — Road surface profiles — Reporting of measured data" — classifies road surface roughness via power spectral density at reference spatial frequency, establishing that temporal excitation frequency = spatial frequency × speed.
-- Bridgelall & Tolliver, "Characterisation of road bumps using smartphones," *European Transport Research Review*, 8:13, 2016 — demonstrated speed-dependent road anomaly detection thresholds.
+*来源：*
+- SAE Paper 2015-01-0637, "Simulation of Vehicle Pothole Test and Techniques Used" — 确认坑洼尺寸和车速是影响冲击严重程度的两个主要因素，持续时间按 L/V 缩放。
+- ISO 8608:2016, "Mechanical vibration — Road surface profiles — Reporting of measured data" — 通过参考空间频率处的功率谱密度对路面粗糙度分类，并确立时间激励频率 = 空间频率 × 车速。
+- Bridgelall & Tolliver，"Characterisation of road bumps using smartphones," *European Transport Research Review*, 8:13, 2016 — 展示了车速相关的道路异常检测阈值。
 
-**F11: Lateral Acceleration Residual** — The maximum absolute deviation between actual and desired lateral acceleration during the event. When a driver overrides the autopilot, they steer the vehicle away from its planned path, producing a large residual (>0.5 m/s²). A road disturbance produces a torque spike but the vehicle's trajectory remains close to the planned path (small residual), because the suspension absorbs the vertical/lateral perturbation before it significantly alters the vehicle's lateral dynamics.
+**F11：横向加速度残差** —— 事件期间实际横向加速度与期望横向加速度之间的最大绝对偏差。驾驶员接管自动驾驶并将车辆驶离规划路径时，会产生较大的残差（>0.5 m/s²）。道路干扰会产生扭矩尖峰，但车辆轨迹仍接近规划路径（残差较小），因为悬架会在垂直/横向扰动明显改变车辆横向动力学之前将其吸收。
 
-*Sources:*
-- Toyota Patent EP3659878B1 (Mitsumoto, 2021) — uses deviation between actual and model-expected yaw rate to detect external lateral disturbances, the rotational equivalent of the lateral acceleration residual.
-- Euro NCAP Assessment Protocol SA v10.4.1 (2024) — specifies lane-keeping assist override at ≤3.5 Nm, implying that driver override produces measurable path deviation.
-
----
-
-## Why Not Just Use Torque Threshold?
-
-The original classifier and most production ADAS systems use simple torque or torque-rate thresholds. This fails for three reasons:
-
-1. **Cobblestone and rough road surfaces produce sustained torque oscillations of ±1–3 Nm** — well above the hands-on detection threshold of 0.6–1.0 Nm — even with nobody touching the wheel (Moreillon et al., JTEKT 2020). A magnitude-only classifier would flag every cobblestone road as a driver intervention.
-
-2. **Emergency swerves produce torque rates >50 Nm/s and durations <0.5 s**, overlapping with the mechanical disturbance signature in both rate and duration. Only the cross-signal features (torque–lat-accel correlation, torque-angle phase, lateral acceleration residual) can resolve this ambiguity, because an emergency swerve *moves the vehicle laterally* while a pothole does not.
-
-3. **Road disturbance magnitude scales with speed** while duration shrinks. At highway speeds, a pothole impact can produce peak torque comparable to a gentle lane correction — but compressed into 40 ms with oscillatory sign pattern and high-frequency energy. Fixed thresholds optimized for one speed range systematically misclassify at others.
+*来源：*
+- Toyota Patent EP3659878B1 (Mitsumoto, 2021) — 使用实际偏航率与模型预期偏航率之间的偏差检测外部横向干扰，这是横向加速度残差的旋转等价形式。
+- Euro NCAP Assessment Protocol SA v10.4.1 (2024) — 规定施加不超过 3.5 Nm 即可覆盖车道保持辅助，说明驾驶员接管会产生可测量的路径偏差。
 
 ---
 
-## Speed-Dependent Effects
+## 为什么不能只使用扭矩阈值？
 
-Road disturbance signatures change systematically with vehicle speed through three coupled mechanisms:
+原分类器和大多数生产级 ADAS 系统使用简单的扭矩或扭矩变化率阈值，但这会因以下三个原因失效：
 
-**Duration shortens** — Crossing time T = L/V means the same 1 m pothole creates a 100 ms event at 10 m/s but a 33 ms event at 30 m/s.
+1. **鹅卵石和粗糙路面会产生持续的 ±1–3 Nm 扭矩振荡** —— 即使无人触碰方向盘，也远高于 0.6–1.0 Nm 的手握检测阈值（Moreillon 等，JTEKT 2020）。只看幅值的分类器会把每条鹅卵石路都标记为驾驶员干预。
 
-**Peak magnitude increases** — Impact energy scales with V². At low speeds the tire conforms to pothole geometry, distributing forces over time. At high speeds the tire acts rigidly during the brief contact, concentrating forces into sharper impulses. Research on two-wheeled vehicles has demonstrated "wheel launch" (loss of ground contact) at 60 km/h over potholes that produced only moderate loads at 20 km/h.
+2. **紧急避让会产生 >50 Nm/s 的扭矩变化率和 <0.5 s 的持续时间**，在变化率和持续时间上都与机械干扰特征重叠。只有跨信号特征（扭矩-横向加速度相关性、扭矩-转角相位、横向加速度残差）才能解决这一歧义，因为紧急避让会*使车辆横向移动*，而坑洼不会。
 
-**Excitation frequency increases** — A fixed spatial irregularity of wavelength L creates temporal excitation at f = V/L. At 30 m/s over a 0.5 m feature, the excitation frequency is 60 Hz — well above the driver steering band and into the wheel/suspension resonance range. This makes the frequency energy ratio (F9) increasingly discriminative at higher speeds.
-
-*Sources:*
-- ISO 8608:2016 — temporal frequency = spatial frequency × speed relationship.
-- Wang et al., "Influence of Road Excitation and Steering Wheel Input on Vehicle System Dynamic Responses," *Applied Sciences*, 2017 — showed coupled speed-dependent effects of road excitation on lateral response.
+3. **道路干扰幅值随车速增加而增大**，同时持续时间缩短。在高速下，坑洼冲击产生的峰值扭矩可能与轻微车道修正相当，但会压缩在 40 ms 内，并呈现振荡符号模式和高频能量。针对某一车速范围优化的固定阈值，在其他范围内会系统性地产生误判。
 
 ---
 
-## Alternative: Random Forest Classifier
+## 与车速相关的影响
 
-The cascade heuristic is designed for interpretability and real-time production deployment. For offline analysis or as a potential production upgrade, a random forest trained on the same 11+ features typically achieves 84–95% accuracy on vehicle sensor classification tasks.
+道路干扰特征会通过以下三个相互耦合的机制随车速系统性变化：
 
-The implementation includes a training pipeline using scikit-learn's `RandomForestClassifier` with 30 trees at depth 7, balanced class weights, and 5-fold stratified cross-validation. After training, feature importances provide interpretable evidence for which signals carry the most weight, which can feed back into cascade threshold tuning.
+**持续时间缩短** —— 穿越时间 T = L/V，因此同一个 1 m 坑洼在 10 m/s 下产生 100 ms 事件，在 30 m/s 下产生 33 ms 事件。
 
-*Sources:*
-- Das, Khan & Ahmed, "Deep Learning Approach for Detecting Lane Change Maneuvers Using SHRP2 Naturalistic Driving Data," *Transportation Research Record*, 2023 — XGBoost + ResNet-18 achieved 98.8% recall and 95% accuracy on naturalistic driving data.
-- Zhou et al. (MDPI *Sensors*, 2025) — CNN-GRU achieved RMSE reductions of ~32% vs. BP, ~21% vs. LSTM, ~25% vs. CNN alone for steering intention prediction. Feature importance: steering torque > steering angle > vehicle speed > lateral acceleration.
-- Lightweight CAN-bus driver behavior classification (*Sensors/PMC*, 2020) — depth-wise convolution + augmented RNN deployed on NVIDIA Jetson Nano with real-time inference.
+**峰值幅值增大** —— 冲击能量与 V² 成正比。低速时轮胎会顺应坑洼形状，使力在时间上分散；高速时轮胎在短暂接触期间表现得更刚性，使力集中为更尖锐的脉冲。两轮车研究表明，在 60 km/h 通过坑洼会出现“车轮跳起”（失去接地），而同一坑洼在 20 km/h 下只产生中等载荷。
+
+**激励频率升高** —— 波长为 L 的固定空间不平整会产生 f = V/L 的时间激励。在 30 m/s 通过 0.5 m 的路面特征时，激励频率为 60 Hz，远高于驾驶员转向频段并进入车轮/悬架共振范围。因此，频率能量比（F9）在高速下具有更强的区分能力。
+
+*来源：*
+- ISO 8608:2016 — 时间频率 = 空间频率 × 车速的关系。
+- Wang 等，"Influence of Road Excitation and Steering Wheel Input on Vehicle System Dynamic Responses," *Applied Sciences*, 2017 — 展示了道路激励对横向响应的车速相关耦合影响。
 
 ---
 
-## Relevant Standards
+## 替代方案：随机森林分类器
 
-| Standard | Relevance |
+级联启发式方法面向可解释性和实时生产部署。对于离线分析或潜在的生产升级，使用相同 11+ 个特征训练的随机森林，在车辆传感器分类任务中通常可达到 84–95% 的准确率。
+
+实现中包含一个训练流程，使用 scikit-learn 的 `RandomForestClassifier`，配置 30 棵深度为 7 的树、平衡类别权重和 5 折分层交叉验证。训练后，特征重要性可以解释哪些信号权重最高，并用于反馈调整级联阈值。
+
+*来源：*
+- Das、Khan & Ahmed，"Deep Learning Approach for Detecting Lane Change Maneuvers Using SHRP2 Naturalistic Driving Data," *Transportation Research Record*, 2023 — XGBoost + ResNet-18 在自然驾驶数据上达到 98.8% 召回率和 95% 准确率。
+- Zhou 等（MDPI *Sensors*，2025）——CNN-GRU 在驾驶员转向意图预测中的 RMSE 相比 BP 下降约 32%、相比 LSTM 下降约 21%、相比单独 CNN 下降约 25%。特征重要性为：转向扭矩 > 转向角 > 车速 > 横向加速度。
+- 轻量级 CAN 总线驾驶员行为分类（*Sensors/PMC*，2020）——在 NVIDIA Jetson Nano 上部署了逐通道卷积 + 增强 RNN，实现实时推理。
+
+---
+
+## 相关标准
+
+| 标准 | 相关性 |
 |---|---|
-| **ISO 8608:2016** | Road surface profile classification (Classes A–H) via PSD at reference spatial frequency. Provides the physics for speed-dependent excitation frequency and magnitude scaling. |
-| **ISO 11270:2014** | Steering feel — defines test procedures for steering system assessment including torque characteristics. |
-| **UN ECE R79** | Lane-keeping assist limits: max lateral acceleration 3 m/s², max lateral jerk 5 m/s³. Hands-off warning escalation at 15 s → 30 s → deactivation. |
-| **Euro NCAP SA Protocol v10.4.1 (2024)** | Driver override requirement: ≤3.5 Nm to override lane-keeping assist. |
-| **SAE J3016** | Levels of driving automation; defines when driver override authority is required. |
+| **ISO 8608:2016** | 通过参考空间频率处的 PSD 对路面轮廓进行分类（A-H 级）。为车速相关的激励频率和幅值缩放提供物理依据。 |
+| **ISO 11270:2014** | 转向手感 —— 定义转向系统评估的测试流程，包括扭矩特性。 |
+| **UN ECE R79** | 车道保持辅助限制：最大横向加速度 3 m/s²，最大横向加加速度 5 m/s³。脱手警告在 15 s → 30 s 后升级并停用。 |
+| **Euro NCAP SA Protocol v10.4.1 (2024)** | 驾驶员接管要求：施加不超过 3.5 Nm 即可覆盖车道保持辅助。 |
+| **SAE J3016** | 驾驶自动化等级；定义何时必须保留驾驶员接管权限。 |
 
 ---
 
-## Datasets for Training and Validation
+## 训练和验证数据集
 
-**commaSteeringControl** (comma.ai, Hugging Face) — ~12,500 hours of driving data with openpilot engaged across 275+ car models. Contains `steeringPressed` (binary override flag), `steer` (normalized torque), `steeringAngleDeg`, `vEgo`, `aEgo`, `latAccelDesired`, `latAccelSteeringAngle`. The `steeringPressed` events provide candidate labels but do not distinguish driver intent from road disturbance — which is exactly the classification gap this project addresses.
+**commaSteeringControl**（comma.ai，Hugging Face）—— 包含 275+ 个车型、约 12,500 小时的 openpilot 开启状态驾驶数据。包含 `steeringPressed`（二值接管标记）、`steer`（归一化扭矩）、`steeringAngleDeg`、`vEgo`、`aEgo`、`latAccelDesired`、`latAccelSteeringAngle`。`steeringPressed` 事件可提供候选标签，但无法区分驾驶员意图和道路干扰，这正是本项目要解决的分类空白。
 
-**comma2k19** (Schafer et al., arXiv:1812.05752) — 33+ hours with CAN bus data and 9-axis IMU on Honda Civic and Toyota RAV4.
+**comma2k19**（Schafer 等，arXiv:1812.05752）—— 包含 Honda Civic 和 Toyota RAV4 的 33+ 小时 CAN 总线数据及 9 轴 IMU 数据。
 
-**SHRP2 Naturalistic Driving Study** (FHWA/Virginia Tech) — large-scale naturalistic dataset with CAN signals; used in multiple lane change and driver behavior studies but requires data use agreement.
+**SHRP2 Naturalistic Driving Study**（FHWA/Virginia Tech）—— 大规模自然驾驶数据集，包含 CAN 信号；已用于多项变道和驾驶员行为研究，但需要签署数据使用协议。
 
-**Smartphone pothole datasets** — Multiple public datasets exist for accelerometer-based road anomaly detection (Kaggle, various research groups) which can provide road surface ground truth labels when cross-referenced with GPS coordinates.
+**智能手机坑洼数据集** —— 有多个用于基于加速度计检测道路异常的公开数据集（Kaggle 及不同研究团队），与 GPS 坐标交叉引用后可以提供路面真实标签。
 
-*Note:* No single public dataset combines steering torque data with labeled road surface impact events. Building ground truth requires combining vertical acceleration thresholding on `a_ego`, the `steeringPressed` flag, GPS-linked road quality databases, and selective manual video review for ambiguous cases.
+*注意：* 没有任何单一公开数据集同时提供转向扭矩数据和带标签的路面冲击事件。构建真实标签需要结合 `a_ego` 的垂直加速度阈值、`steeringPressed` 标记、与 GPS 关联的道路质量数据库，以及对不明确案例进行选择性人工视频复核。
 
 ---
 
-## Key Literature References
+## 主要文献参考
 
-### Driver steering dynamics and bandwidth
-1. Cole, D.J. et al., "Real-time characterisation of driver steering behaviour," *Vehicle System Dynamics*, 56(10), 2018. — Driver steering at 0.2–2 Hz.
-2. Pick, A.J. & Cole, D.J., "Neuromuscular dynamics in the driver–vehicle system," *Vehicle System Dynamics*, 44(sup1):511-522, 2006. — Neuromuscular low-pass filtering limits torque rate.
-3. Timings, J.P. & Cole, D.J., "A review of human sensory dynamics for application to models of driver steering and speed control," *Biological Cybernetics*, 110(2-3), 2016. — Driver feedback bandwidth ~1–2 Hz.
-4. Chevrel, P., Mars, F. et al., "Modelling human control of steering for the design of advanced driver assistance systems," *Annual Reviews in Control*, 47:249-261, 2019. — Cybernetic driver model with visual anticipation + compensatory control.
+### 驾驶员转向动力学和带宽
+1. Cole, D.J. et al., "Real-time characterisation of driver steering behaviour," *Vehicle System Dynamics*, 56(10), 2018. — 驾驶员转向频率为 0.2–2 Hz。
+2. Pick, A.J. & Cole, D.J., "Neuromuscular dynamics in the driver–vehicle system," *Vehicle System Dynamics*, 44(sup1):511-522, 2006. — 神经肌肉低通滤波限制扭矩变化率。
+3. Timings, J.P. & Cole, D.J., "A review of human sensory dynamics for application to models of driver steering and speed control," *Biological Cybernetics*, 110(2-3), 2016. — 驾驶员反馈带宽约为 1–2 Hz。
+4. Chevrel, P., Mars, F. et al., "Modelling human control of steering for the design of advanced driver assistance systems," *Annual Reviews in Control*, 47:249-261, 2019. — 具有视觉预判和补偿控制的赛博驾驶员模型。
 
-### Road surface vibration and steering disturbance
-5. Giacomin, J. & Woo, Y.J., "A study of the human ability to detect road surface type on the basis of steering wheel vibration feedback," *Proc. IMechE Part D*, 219(11), 2005. — Road vibration at 10–60 Hz, 26–35 Hz most diagnostic.
-6. Giacomin, J. et al., "Effect of steering wheel acceleration frequency distribution on detection of road type," *Ingeniería Mecánica, Tecnología y Desarrollo*, 2013. — Frequency distribution as primary road surface cue.
-7. Giacomin, J. & Onesti, L., "Frequency weighting for the evaluation of steering wheel rotational vibration," *International Journal of Industrial Ergonomics*, 34(2):89-97, 2004. — Frequency-dependent sensitivity to steering vibration.
+### 路面振动和转向干扰
+5. Giacomin, J. & Woo, Y.J., "A study of the human ability to detect road surface type on the basis of steering wheel vibration feedback," *Proc. IMechE Part D*, 219(11), 2005. — 路面振动位于 10–60 Hz，其中 26–35 Hz 最具诊断性。
+6. Giacomin, J. et al., "Effect of steering wheel acceleration frequency distribution on detection of road type," *Ingeniería Mecánica, Tecnología y Desarrollo*, 2013. — 频率分布是识别路面类型的主要依据。
+7. Giacomin, J. & Onesti, L., "Frequency weighting for the evaluation of steering wheel rotational vibration," *International Journal of Industrial Ergonomics*, 34(2):89-97, 2004. — 人类对转向振动的敏感性与频率有关。
 
-### EPAS hands-on detection and disturbance rejection
-8. Moreillon, L. et al., "Hands On/Off Detection Based on EPS Sensors," *JTEKT Engineering Journal*, No. 1017E, 2020. — ±1–2 Nm oscillatory torque on cobblestone; Driver Torque Estimator architecture.
-9. Dornhege, C., Nolden, P. & Mayer, R., "Steering Torque Disturbance Rejection," *SAE Int. J. Veh. Dyn., Stab., and NVH*, 1(2):165-172, 2017. — Dual rack-force model for disturbance identification.
-10. Yamamoto, K. et al., "Driver torque estimation in Electric Power Steering system using an H∞/H2 Proportional Integral Observer," *IEEE CDC*, 2015. — Observer bandwidth as implicit consistency time scale.
+### EPAS 手握检测和干扰抑制
+8. Moreillon, L. et al., "Hands On/Off Detection Based on EPS Sensors," *JTEKT Engineering Journal*, No. 1017E, 2020. — 鹅卵石路面上存在 ±1–2 Nm 振荡扭矩；Driver Torque Estimator 架构。
+9. Dornhege, C., Nolden, P. & Mayer, R., "Steering Torque Disturbance Rejection," *SAE Int. J. Veh. Dyn., Stab., and NVH*, 1(2):165-172, 2017. — 用于干扰识别的双齿条力模型。
+10. Yamamoto, K. et al., "Driver torque estimation in Electric Power Steering system using an H∞/H2 Proportional Integral Observer," *IEEE CDC*, 2015. — 观测器带宽构成隐含的一致性时间尺度。
 
-### Driver intent and intervention detection
-11. Schinkel, W. et al., "Driver Intervention Detection via Real-Time Transfer Function Estimation," *IEEE Trans. ITS*, 2021. — Transfer-function approach; minimum 0.2 s for reliable classification.
-12. Zhou, Y. et al., "Driver Steering Intention Prediction for Human-Machine Shared Systems of Intelligent Vehicles Based on CNN-GRU Network," *Sensors*, 25(10):3224, MDPI, 2025. — CNN-GRU RMSE reductions vs. LSTM/Transformer; feature importance ranking.
-13. Das, A., Khan, M.N. & Ahmed, M.M., "Deep Learning Approach for Detecting Lane Change Maneuvers Using SHRP2 Naturalistic Driving Data," *Transportation Research Record*, 2023. — XGBoost + ResNet-18, 98.8% recall.
+### 驾驶员意图和干预检测
+11. Schinkel, W. et al., "Driver Intervention Detection via Real-Time Transfer Function Estimation," *IEEE Trans. ITS*, 2021. — 传递函数方法；可靠分类至少需要 0.2 s。
+12. Zhou, Y. et al., "Driver Steering Intention Prediction for Human-Machine Shared Systems of Intelligent Vehicles Based on CNN-GRU Network," *Sensors*, 25(10):3224, MDPI, 2025. — CNN-GRU 相比 LSTM/Transformer 的 RMSE 降幅；特征重要性排序。
+13. Das, A., Khan, M.N. & Ahmed, M.M., "Deep Learning Approach for Detecting Lane Change Maneuvers Using SHRP2 Naturalistic Driving Data," *Transportation Research Record*, 2023. — XGBoost + ResNet-18，召回率 98.8%。
 
-### Road anomaly detection
-14. Mednis, A. et al., "Real Time Pothole Detection Using Android Smartphones with Accelerometers," *IEEE DCOSS*, 2011. — STDEV(Z) algorithm, ~90% true positive rate.
-15. Bridgelall, R. & Tolliver, D., "Characterisation of road bumps using smartphones," *European Transport Research Review*, 8:13, 2016. — Speed-dependent anomaly detection thresholds.
+### 道路异常检测
+14. Mednis, A. et al., "Real Time Pothole Detection Using Android Smartphones with Accelerometers," *IEEE DCOSS*, 2011. — STDEV(Z) 算法，真正例率约 90%。
+15. Bridgelall, R. & Tolliver, D., "Characterisation of road bumps using smartphones," *European Transport Research Review*, 8:13, 2016. — 车速相关的异常检测阈值。
 
-### Vehicle dynamics and disturbance modeling
-16. Abe, M. et al., "A yaw-moment control method based on a vehicle's lateral jerk information," *Vehicle System Dynamics*, 52(10), 2014. — Lateral jerk as intentional maneuver indicator.
+### 车辆动力学和干扰建模
+16. Abe, M. et al., "A yaw-moment control method based on a vehicle's lateral jerk information," *Vehicle System Dynamics*, 52(10), 2014. — 将横向加加速度作为主动操作指标。
 17. ISO 8608:2016, "Mechanical vibration — Road surface profiles — Reporting of measured data."
-18. Toyota Patent EP3659878B1 (Mitsumoto, 2021) — Yaw rate residual for external disturbance detection.
-19. GM Patent US 8,954,235 (2015) — Enhanced steering override detection during automated lane centering.
+18. Toyota Patent EP3659878B1 (Mitsumoto, 2021) — 使用偏航率残差检测外部干扰。
+19. GM Patent US 8,954,235 (2015) — 改进自动车道居中期间的转向接管检测。
 
-### Standards
-20. UN ECE R79 — Lane-keeping assist lateral acceleration/jerk limits, hands-off detection timing.
-21. Euro NCAP Assessment Protocol SA v10.4.1 (2024) — Override force requirements.
-22. ISO 11270:2014 — Steering feel test procedures.
+### 标准
+20. UN ECE R79 — 车道保持辅助横向加速度/加加速度限制及脱手检测时序。
+21. Euro NCAP Assessment Protocol SA v10.4.1 (2024) — 接管力要求。
+22. ISO 11270:2014 — 转向手感测试流程。

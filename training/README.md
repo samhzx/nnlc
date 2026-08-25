@@ -1,33 +1,33 @@
-# NNLC Julia Training Scripts
+# NNLC Julia 训练脚本
 
-These Julia scripts train the neural network feedforward model used by NNLC (Neural Network Lateral Control) in openpilot/sunnypilot.
+这些 Julia 脚本用于训练 NNLC（Neural Network Lateral Control，神经网络横向控制）在 openpilot/sunnypilot 中使用的神经网络前馈模型。
 
-## Which Script to Use
+## 选择哪个脚本
 
-| Script | Description | Recommended |
-|--------|-------------|-------------|
-| `latmodel_temporal.jl` | Temporal model with past/future context | **Yes — primary** |
-| `latmodel.jl` | Base model (no temporal features) | For comparison only |
-| `latmodel_temporal_steer_angle.jl` | Temporal + steer angle input | Experimental |
-| `latmodel_NeuralPDE.jl` | Physics-informed (Lux + NeuralPDE) | Experimental |
+| 脚本 | 说明 | 推荐程度 |
+|---|---|---|
+| `latmodel_temporal.jl` | 包含过去/未来上下文的时序模型 | **是，主模型** |
+| `latmodel.jl` | 基础模型，不含时序特征 | 仅用于对比 |
+| `latmodel_temporal_steer_angle.jl` | 时序模型 + 转向角输入 | 实验性 |
+| `latmodel_NeuralPDE.jl` | 物理信息模型（Lux + NeuralPDE） | 实验性 |
 
-**Use `latmodel_temporal.jl`** — this is the model variant that matches the production NNLC code in sunnypilot.
+请使用 `latmodel_temporal.jl`。该模型版本与 sunnypilot 中的生产 NNLC 代码一致。
 
-## Input Format
+## 输入格式
 
-The training script reads a CSV file produced by `extract_lateral_data.py --temporal`. Required columns:
+训练脚本读取由 `extract_lateral_data.py --temporal` 生成的 CSV 文件。所需列包括：
 
-- `v_ego` — vehicle speed (m/s)
-- `actual_lateral_accel` — measured lateral acceleration (m/s²)
-- `desired_lateral_accel` — desired lateral acceleration (m/s²)
-- `roll` — road roll angle (radians)
-- Temporal columns at offsets: `-0.3, -0.2, -0.1, +0.3, +0.6, +1.0, +1.5` seconds
+- `v_ego`：车速（m/s）
+- `actual_lateral_accel`：实际横向加速度（m/s²）
+- `desired_lateral_accel`：期望横向加速度（m/s²）
+- `roll`：道路横滚角（弧度）
+- 时间偏移列：`-0.3`、`-0.2`、`-0.1`、`+0.3`、`+0.6`、`+1.0`、`+1.5` 秒
 
-The script expects the CSV at a path like `/path/to/latmodels/YOUR_CAR_NAME.csv`.
+CSV 文件路径应类似 `/path/to/latmodels/YOUR_CAR_NAME.csv`。
 
-## Output Format
+## 输出格式
 
-The training script outputs a JSON file compatible with sunnypilot's `NNTorqueModel`:
+训练脚本输出可供 sunnypilot `NNTorqueModel` 使用的 JSON 文件：
 
 ```json
 {
@@ -46,11 +46,11 @@ The training script outputs a JSON file compatible with sunnypilot's `NNTorqueMo
 }
 ```
 
-Deploy the JSON file to: `sunnypilot/neural_network_data/neural_network_lateral_control/`
+将 JSON 文件部署到：`sunnypilot/neural_network_data/neural_network_lateral_control/`
 
-## Dependencies
+## 依赖
 
-Install Julia 1.9+ and the required packages:
+安装 Julia 1.9 或更高版本，以及所需软件包：
 
 ```julia
 using Pkg
@@ -58,47 +58,49 @@ Pkg.add(["Flux", "MLUtils", "CSV", "DataFrames", "JSON", "Statistics",
          "StatsBase", "Plots", "ProgressMeter", "CUDA"])
 ```
 
-For Apple Silicon (Metal GPU):
+Apple Silicon 使用 Metal GPU 时：
+
 ```julia
 Pkg.add("Metal")
 ```
 
-## Known Issues
+## 已知问题
 
-### CPU Training
+### CPU 训练
 
-CPU training works reliably with the CustomAdaGrad optimizer (~8 seconds for 1000 epochs on small datasets). Use `--cpu` to force CPU mode:
+使用 CustomAdaGrad 优化器时，CPU 训练运行稳定；小数据集训练 1000 个 epoch 约需 8 秒。使用 `--cpu` 强制 CPU 模式：
 
 ```bash
 bash training/run.sh /path/to/latmodels/ --cpu
 ```
 
-GPU is still recommended for large datasets:
-- **NVIDIA GPU with CUDA** — fastest and most reliable
-- **Apple Silicon with Metal** — supported via `latmodel_temporal.jl`
-- M1 Pro with 16GB RAM is insufficient for larger datasets — consider M2 Pro/Max or better
+大型数据集仍建议使用 GPU：
+
+- **NVIDIA GPU + CUDA**：速度最快、稳定性最好
+- **Apple Silicon + Metal**：`latmodel_temporal.jl` 支持
+- 16 GB 内存的 M1 Pro 不适合较大的数据集，建议使用 M2 Pro/Max 或更高配置
 
 ### AMD GPU
 
-AMD GPU support via ROCm is not yet working with Julia's Flux. This is an open area of investigation — rgbacon has volunteered a 7900 XT for testing.
+目前 Julia Flux 的 AMD GPU/ROCm 支持尚未可用，仍在研究中。
 
-## Usage
+## 使用方法
 
 ```bash
-# 1. Extract training data with temporal features
+# 1. 提取包含时序特征的训练数据
 python -m nnlc_tools.extract_lateral_data /path/to/rlogs/ -o /path/to/latmodels/my_car.csv --temporal
 
-# 2. Run training (recommended — handles juliaup PATH automatically)
+# 2. 运行训练（推荐，会自动处理 juliaup PATH）
 bash training/run.sh /path/to/latmodels/
 
-# Or run Julia directly
+# 或直接运行 Julia
 cd training/
 julia latmodel_temporal.jl /path/to/latmodels/
 
-# Force CPU mode (no GPU required)
+# 强制 CPU 模式（不需要 GPU）
 bash training/run.sh /path/to/latmodels/ --cpu
 
-# 3. Deploy model
+# 3. 部署模型
 cp /path/to/latmodels/my_car_model.json \
    /path/to/openpilot/sunnypilot/neural_network_data/neural_network_lateral_control/
 ```
