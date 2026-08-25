@@ -49,4 +49,4 @@ Invoke-Python "pip install -e . pyinstaller"
 
 Write-Host "Building NNLC_Trainer.exe ..."
 Invoke-Python "PyInstaller --clean --noconfirm nnlc_windows.spec"
-Write-Host "Done: $ProjectDir\dist\NNLC_Trainer.exe"
+Write-Host "Done: $ProjectDir\dist\NNLC_Trainer\NNLC_Trainer.exe"

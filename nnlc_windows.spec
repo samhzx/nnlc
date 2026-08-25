@@ -1,7 +1,7 @@
 """PyInstaller spec for the self-contained Windows NNLC trainer.
 
 The build script stages a Windows Julia distribution and its package depot in
-the project root before invoking this file.  The resulting one-file exe is
+the project root before invoking this file.  The resulting one-dir bundle is
 large (Julia + Flux/Plots artifacts are intentionally included) but does not
 require Python, Julia, or any package installation on the target computer.
 """
@@ -94,9 +94,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="NNLC_Trainer",
     debug=False,
     bootloader_ignore_signals=False,
@@ -104,4 +103,12 @@ exe = EXE(
     upx=False,
     console=False,
     icon=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="NNLC_Trainer",
 )
