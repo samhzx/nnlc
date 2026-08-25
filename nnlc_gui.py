@@ -6,6 +6,7 @@ import contextlib
 import io
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -20,6 +21,9 @@ except ImportError:  # Some minimal Python builds (including CI macOS) omit Tk.
     filedialog = messagebox = ttk = None
 
 from nnlc_auto_train import auto_train
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class _QueueWriter(io.TextIOBase):
@@ -45,6 +49,8 @@ class NNLCApp:
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
         self.config_widgets = []
+        self.cancel_event = threading.Event()
+        self.process_holder = {}
 
         self.data_var = tk.StringVar()
         self.output_var = tk.StringVar(value=self._default_output())
@@ -130,7 +136,8 @@ class NNLCApp:
         ttk.Label(controls, textvariable=self.elapsed_var, width=13, anchor="e").grid(row=0, column=2)
         self.open_output_button = ttk.Button(controls, text="打开输出目录", command=self._open_output)
         self.open_output_button.grid(row=0, column=3, padx=(12, 0))
-        ttk.Button(controls, text="清空日志", command=self.clear_log).grid(row=0, column=4, padx=(8, 0))
+        self.clear_log_button = ttk.Button(controls, text="清空日志", command=self.clear_log)
+        self.clear_log_button.grid(row=0, column=4, padx=(8, 0))
 
         log_frame = ttk.LabelFrame(container, text="运行日志", style="Section.TLabelframe")
         log_frame.grid(row=5, column=0, sticky="nsew")
@@ -200,6 +207,7 @@ class NNLCApp:
         self.log.configure(state="disabled")
 
     def _append_log(self, text: str, tag: str | None = None) -> None:
+        text = _ANSI_ESCAPE_RE.sub("", text).replace("\r", "\n")
         self.log.configure(state="normal")
         self.log.insert("end", text, tag)
         self.log.see("end")
@@ -216,6 +224,8 @@ class NNLCApp:
             state="disabled" if running or self.auto_threshold_var.get() else "normal"
         )
         self.start_button.configure(state=state)
+        self.open_output_button.configure(state=state)
+        self.clear_log_button.configure(state=state)
         if running:
             self.progress.start(12)
         else:
@@ -246,6 +256,13 @@ class NNLCApp:
             )
             if not should_close:
                 return
+            self.cancel_event.set()
+            process = self.process_holder.get("process")
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
         self.root.destroy()
 
     def start(self) -> None:
@@ -269,7 +286,10 @@ class NNLCApp:
             try:
                 min_score = int(self.threshold_var.get().strip())
             except ValueError:
-                messagebox.showerror("参数错误", "路线阈值必须是整数，或勾选自动推荐。")
+                messagebox.showerror("参数错误", "路线阈值必须是 0-100 的整数，或勾选自动推荐。")
+                return
+            if not 0 <= min_score <= 100:
+                messagebox.showerror("参数错误", "路线阈值必须在 0-100 之间。")
                 return
 
         self.clear_log()
@@ -278,16 +298,28 @@ class NNLCApp:
         self.status_var.set("训练中，请保持窗口打开...")
         self.elapsed_var.set("00:00")
         self.started_at = time.monotonic()
+        self.cancel_event = threading.Event()
+        self.process_holder = {}
         skip_visualize = not self.skip_viz_var.get()
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(data_dir, output_dir, car, min_score, skip_visualize),
+            args=(data_dir, output_dir, car, min_score, skip_visualize,
+                  self.cancel_event, self.process_holder),
             daemon=True,
         )
         self.worker.start()
         self._update_elapsed()
 
-    def _run_worker(self, data_dir, output_dir, car, min_score, skip_visualize) -> None:
+    def _run_worker(
+        self,
+        data_dir,
+        output_dir,
+        car,
+        min_score,
+        skip_visualize,
+        cancel_event,
+        process_holder,
+    ) -> None:
         writer = _QueueWriter(self.messages)
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
@@ -298,6 +330,8 @@ class NNLCApp:
                     skip_visualize=skip_visualize,
                     output_dir=output_dir,
                     deploy_dir=output_dir,
+                    cancel_event=cancel_event,
+                    process_holder=process_holder,
                 )
             self.messages.put(("done", model_path))
         except BaseException as exc:

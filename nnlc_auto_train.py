@@ -246,6 +246,11 @@ def run_command(cmd, description, check=True):
     return result
 
 
+def _raise_if_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("训练已取消")
+
+
 def get_python_exe():
     """获取 Python 可执行文件路径。"""
     venv_python = os.path.join(NNLC_TOOLS_DIR, ".venv", "Scripts", "python.exe")
@@ -430,8 +435,9 @@ def step_visualize(input_csv, output_dir, python_exe):
     return output_png
 
 
-def step_train(input_csv, car_name, output_dir):
+def step_train(input_csv, car_name, output_dir, cancel_event=None, process_holder=None):
     """步骤6: Julia 训练模型。"""
+    _raise_if_cancelled(cancel_event)
     # 创建训练输入目录（只包含要训练的 CSV）
     train_input_dir = os.path.join(output_dir, "training_input")
     os.makedirs(train_input_dir, exist_ok=True)
@@ -475,10 +481,21 @@ def step_train(input_csv, car_name, output_dir):
         errors="replace",
         bufsize=1,
     )
-    if process.stdout is not None:
-        for line in process.stdout:
-            _emit("    " + line.rstrip())
-    result = subprocess.CompletedProcess(cmd, process.wait())
+    if process_holder is not None:
+        process_holder["process"] = process
+    if cancel_event is not None and cancel_event.is_set():
+        process.terminate()
+    try:
+        if process.stdout is not None:
+            for line in process.stdout:
+                _emit("    " + line.rstrip())
+        result = subprocess.CompletedProcess(cmd, process.wait())
+    finally:
+        if process_holder is not None:
+            process_holder["process"] = None
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("训练已取消")
 
     elapsed = time.time() - start_time
     print("-" * 60)
@@ -596,7 +613,8 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
 # ============================================================
 
 def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
-               skip_visualize=False, output_dir=None, deploy_dir=None):
+               skip_visualize=False, output_dir=None, deploy_dir=None,
+               cancel_event=None, process_holder=None):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -607,12 +625,15 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         skip_visualize: 是否跳过可视化
         output_dir: 中间文件和图表输出目录；不传则使用项目默认目录
         deploy_dir: 模型 JSON 部署目录；不传则使用项目同级 models 目录
+        cancel_event: 可选的训练取消事件
+        process_holder: 可选的当前子进程共享容器
 
     Returns:
         模型文件路径
     """
     total_steps = 8 if not skip_visualize else 7
     python_exe = get_python_exe()
+    _raise_if_cancelled(cancel_event)
 
     # 前置检查
     print(f"\n{Colors.HEADER}{'='*60}")
@@ -636,10 +657,12 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     start_time = time.time()
 
     # ---- 步骤 1: 提取数据 ----
+    _raise_if_cancelled(cancel_event)
     print_step(1, total_steps, "提取横向控制数据")
     lateral_csv = step_extract(data_dir, output_dir, python_exe)
 
     # ---- 步骤 2: 评估路线质量 ----
+    _raise_if_cancelled(cancel_event)
     print_step(2, total_steps, "评估路线质量")
     recommended_score = step_score(lateral_csv, python_exe)
     if min_score is None:
@@ -649,29 +672,41 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         print_info(f"使用指定阈值: min-score={min_score}")
 
     # ---- 步骤 3: 修剪路线 ----
+    _raise_if_cancelled(cancel_event)
     print_step(3, total_steps, "修剪低质量路线")
     pruned_csv = step_prune(lateral_csv, min_score, output_dir, python_exe)
 
     # ---- 步骤 4: 移除干预帧 ----
+    _raise_if_cancelled(cancel_event)
     print_step(4, total_steps, "移除干预帧")
     final_csv = step_interventions(pruned_csv, output_dir, python_exe)
 
     # ---- 步骤 5: 可视化覆盖度 ----
     if not skip_visualize:
+        _raise_if_cancelled(cancel_event)
         print_step(5, total_steps, "可视化数据覆盖度")
         step_visualize(final_csv, output_dir, python_exe)
 
     # ---- 步骤 6: 训练模型 ----
+    _raise_if_cancelled(cancel_event)
     train_step = 6 if not skip_visualize else 5
     print_step(train_step, total_steps, f"训练 {car_name} 模型")
-    model_json, train_results_dir = step_train(final_csv, car_name, output_dir)
+    model_json, train_results_dir = step_train(
+        final_csv,
+        car_name,
+        output_dir,
+        cancel_event=cancel_event,
+        process_holder=process_holder,
+    )
 
     # ---- 步骤 7: 验证模型 ----
+    _raise_if_cancelled(cancel_event)
     validate_step = train_step + 1
     print_step(validate_step, total_steps, "验证模型质量")
     quality_ok = step_validate(model_json, final_csv, output_dir, python_exe)
 
     # ---- 步骤 8: 部署 ----
+    _raise_if_cancelled(cancel_event)
     deploy_step = validate_step + 1
     print_step(deploy_step, total_steps, "部署模型")
     deployed_path = step_deploy(model_json, car_name, skip_deploy, deploy_dir=deploy_dir)
