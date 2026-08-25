@@ -28,11 +28,19 @@ packages = [
     "InvertedIndices",
     "JSON",
     "Dates",
-    "CUDA",
     "ArgParse",
-    "ModelingToolkit",
     "TeeStreams",
 ]
+
+# The packaged Windows GUI always runs the trainer in CPU mode.  CUDA pulls
+# several gigabytes of NVIDIA runtime artifacts into the depot, while the
+# training script already treats CUDA as an optional backend.  Keep the GPU
+# packages for normal/manual installs, but omit them for the Windows bundle.
+windows_cpu_build = get(ENV, "NNLC_WINDOWS_CPU_BUILD", "") == "1"
+if !windows_cpu_build
+    push!(packages, "CUDA")
+    push!(packages, "ModelingToolkit")
+end
 
 Pkg.add(packages)
 

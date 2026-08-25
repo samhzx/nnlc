@@ -36,11 +36,17 @@ if ($JuliaDepot) {
     New-Item -ItemType Directory -Force "julia-depot" | Out-Null
 }
 $env:JULIA_DEPOT_PATH = (Resolve-Path "julia-depot").Path
+$env:NNLC_WINDOWS_CPU_BUILD = "1"
 
 if (-not $JuliaDepot -and -not $SkipJuliaPackages) {
     Write-Host "Installing and precompiling Julia packages into $env:JULIA_DEPOT_PATH ..."
     & "julia-runtime\bin\julia.exe" --startup-file=no "training\install_packages.jl"
     if ($LASTEXITCODE -ne 0) { throw "Julia package installation failed ($LASTEXITCODE)" }
+}
+
+Write-Host "Removing Julia package-manager caches ..."
+foreach ($CacheDir in @("julia-depot\scratchspaces", "julia-depot\logs", "julia-depot\clones")) {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $CacheDir
 }
 
 Write-Host "Installing Python dependencies and PyInstaller ..."

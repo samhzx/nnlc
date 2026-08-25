@@ -53,6 +53,9 @@ jobs:
             "Files: $fileCount"
             "Executable: $bundleExe"
           ) | Set-Content (Join-Path $bundleDir "BUILD_INFO.txt") -Encoding UTF8
+          $bytes = (Get-ChildItem -Recurse -File $bundleDir | Measure-Object -Property Length -Sum).Sum
+          $sizeGb = [math]::Round($bytes / 1GB, 2)
+          Write-Host "Bundle size before artifact compression: $sizeGb GB"
           Get-ChildItem $bundleDir
 
       - name: Upload one-dir bundle

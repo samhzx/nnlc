@@ -29,13 +29,30 @@ def directory_datas(source_dir: Path, target_dir: str):
     PyInstaller executable.
     """
     def is_runtime_file(path: Path) -> bool:
-        relative_parts = {part.lower() for part in path.relative_to(source_dir).parts}
+        relative_path = path.relative_to(source_dir)
+        relative_parts = {part.lower() for part in relative_path.parts}
+        target_parts = {part.lower() for part in Path(target_dir).parts}
         if "cmake" in relative_parts:
             return False
         if path.name.lower() == "cmakelists.txt":
             return False
         if path.name.lower().endswith((".cmake", ".cmake.in")):
             return False
+        # Julia's runtime test suite and documentation are not needed by the
+        # trainer and account for many unnecessary files in the bundle.
+        if target_parts == {"julia-runtime"} and relative_parts.intersection(
+            {"test", "tests", "doc", "docs", "man"}
+        ):
+            return False
+        # Package tests/examples/benchmarks are development-only content.
+        if target_parts == {"julia-depot"} and relative_path.parts:
+            top_level = relative_path.parts[0].lower()
+            if top_level in {"scratchspaces", "logs", "clones"}:
+                return False
+            if top_level == "packages" and relative_parts.intersection(
+                {"test", "tests", "docs", "examples", "benchmark", "benchmarks"}
+            ):
+                return False
         return True
 
     return [
