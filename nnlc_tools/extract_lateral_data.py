@@ -23,6 +23,89 @@ from tqdm import tqdm
 PAST_TIMES = [-0.3, -0.2, -0.1]
 FUTURE_TIMES = [0.3, 0.6, 1.0, 1.5]
 
+# ---- friction_input 计算所需常量（与 latcontrol_torque_ext_base.py 一致） ----
+LAT_PLAN_MIN_IDX = 5
+LATERAL_LAG_MOD = 0.0
+LAT_JERK_FRICTION_FACTOR = 0.4
+LAT_ACCEL_FRICTION_FACTOR_DEFAULT = 0.7
+FRICTION_LOOK_AHEAD_V = [1.4, 2.0]
+FRICTION_LOOK_AHEAD_BP = [9.0, 30.0]
+LOW_SPEED_X = [0, 10, 20, 30]
+LOW_SPEED_Y = [12, 3, 1, 0]
+# ModelConstants.T_IDXS: 10.0 * (i/32)^2 for i in range(33)
+T_IDXS = [10.0 * (i / 32.0) ** 2 for i in range(33)]
+T_DIFFS = [T_IDXS[i+1] - T_IDXS[i] for i in range(len(T_IDXS) - 1)]
+
+
+def _sign(x):
+  """符号函数"""
+  return 1.0 if x > 0.0 else (-1.0 if x < 0.0 else 0.0)
+
+
+def _get_lookahead_value(future_vals, current_val):
+  """前瞻值选取：如果未来值中有反号的则返回0，否则返回绝对值最小的"""
+  if len(future_vals) == 0:
+    return current_val
+  same_sign_vals = [v for v in future_vals if _sign(v) == _sign(current_val)]
+  if len(same_sign_vals) < len(future_vals):
+    return 0.0
+  return min(same_sign_vals + [current_val], key=lambda x: abs(x))
+
+
+def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
+                              desired_curvature, actual_curvature,
+                              model_accels_y, steer_actuator_delay):
+  """精确计算 friction_input，与 nnlc.py 运行时 update_friction_input 逻辑一致
+
+  Args:
+    v_ego: 车速 m/s
+    desired_lat_accel: 期望横向加速度
+    actual_lat_accel: 实际横向加速度
+    desired_curvature: 期望曲率
+    actual_curvature: 实际曲率
+    model_accels_y: modelV2.acceleration.y 序列（33个值）
+    steer_actuator_delay: 转向执行器延迟（秒）
+
+  Returns:
+    friction_input 值
+  """
+  if model_accels_y is None or len(model_accels_y) < 2:
+    return 0.0
+
+  # low_speed_factor
+  low_speed_factor = float(np.interp(v_ego, LOW_SPEED_X, LOW_SPEED_Y)) ** 2
+
+  # setpoint 和 measurement
+  setpoint = desired_lat_accel + low_speed_factor * desired_curvature
+  measurement = actual_lat_accel + low_speed_factor * actual_curvature
+
+  # desired_lat_jerk_time
+  desired_lat_jerk_time = max(0.01, steer_actuator_delay) + LATERAL_LAG_MOD
+
+  # lookahead
+  lookahead = float(np.interp(v_ego, FRICTION_LOOK_AHEAD_BP, FRICTION_LOOK_AHEAD_V))
+  friction_upper_idx = next((i for i, t in enumerate(T_IDXS) if t > lookahead), 16)
+
+  # predicted_lateral_jerk
+  lat_accels = np.array(model_accels_y[:len(T_IDXS)])
+  predicted_lateral_jerk = np.diff(lat_accels) / np.array(T_DIFFS)
+
+  # desired_lateral_jerk
+  desired_lateral_jerk = (float(np.interp(desired_lat_jerk_time, T_IDXS, lat_accels)) - desired_lat_accel) / desired_lat_jerk_time
+
+  # lookahead_lateral_jerk
+  end_idx = min(friction_upper_idx, len(predicted_lateral_jerk))
+  lookahead_lateral_jerk = _get_lookahead_value(predicted_lateral_jerk[LAT_PLAN_MIN_IDX:end_idx].tolist(), desired_lateral_jerk)
+
+  # lat_accel_friction_factor
+  lat_accel_friction_factor = LAT_ACCEL_FRICTION_FACTOR_DEFAULT
+  if lookahead_lateral_jerk == 0.0:
+    lat_accel_friction_factor = 1.0
+
+  # friction_input
+  friction_input = lat_accel_friction_factor * (setpoint - measurement) + LAT_JERK_FRICTION_FACTOR * lookahead_lateral_jerk
+  return float(friction_input)
+
 COLUMNS = [
     "timestamp",
     "v_ego",
@@ -42,6 +125,7 @@ COLUMNS = [
     "saturated",
     "roll",
     "lane_change_state",
+    "friction_input",
 ]
 
 
@@ -65,6 +149,7 @@ def extract_segment(rlog_path):
 
     rows = []
     sm = {}
+    steer_actuator_delay = 0.1  # 默认值
 
     try:
         lr = LogReader(rlog_path, sort_by_time=True)
@@ -86,6 +171,11 @@ def extract_segment(rlog_path):
                 sm["liveParameters"] = msg.liveParameters
             elif msg_type == "modelV2":
                 sm["modelV2"] = msg.modelV2
+            elif msg_type == "carParams":
+                sm["carParams"] = msg.carParams
+                # 提取 steerActuatorDelay
+                cp = msg.carParams
+                steer_actuator_delay = float(getattr(cp, 'steerActuatorDelay', 0.1))
 
             # Emit a row on each controlsState when we have carState too
             if msg_type == "controlsState" and "carState" in sm:
@@ -107,7 +197,10 @@ def extract_segment(rlog_path):
                     ts = lat_state.torqueState
                     actual_lat_accel = ts.actualLateralAccel
                     desired_lat_accel = ts.desiredLateralAccel
-                    torque_output = ts.output
+                    # torqueState.output 记录的是 -output_torque（见 latcontrol_torque.py:157 pid_log.output = -output_torque）
+                    # nnlc 运行时 _ff 用的是未取反的内部 output_torque（与 desired_lateral_accel 同号）
+                    # 因此训练数据需取反，使模型学到与运行时 _ff 一致的符号
+                    torque_output = -ts.output
                     saturated = ts.saturated
                 elif lat_type == "pidState":
                     ps = lat_state.pidState
@@ -123,11 +216,27 @@ def extract_segment(rlog_path):
                 roll = sm["liveParameters"].roll if "liveParameters" in sm else float("nan")
 
                 lane_change_state = 0
+                model_accels_y = None
                 if "modelV2" in sm:
                     try:
                         lane_change_state = int(sm["modelV2"].meta.laneChangeState)
                     except (AttributeError, ValueError, TypeError):
                         pass
+                    try:
+                        model_accels_y = [float(v) for v in sm["modelV2"].acceleration.y]
+                    except (AttributeError, TypeError):
+                        pass
+
+                # 精确计算 friction_input（与 nnlc.py 运行时逻辑一致）
+                friction_input = calculate_friction_input(
+                    v_ego=cs.vEgo,
+                    desired_lat_accel=desired_lat_accel,
+                    actual_lat_accel=actual_lat_accel,
+                    desired_curvature=ctrl.desiredCurvature,
+                    actual_curvature=ctrl.curvature,
+                    model_accels_y=model_accels_y,
+                    steer_actuator_delay=steer_actuator_delay,
+                )
 
                 row = [
                     timestamp,
@@ -148,6 +257,7 @@ def extract_segment(rlog_path):
                     saturated,
                     roll,
                     lane_change_state,
+                    friction_input,
                 ]
                 rows.append(row)
     except Exception as e:

@@ -11,3 +11,5 @@ data/
 .venv/
 .pytest_cache/
 .DS_Store
+julia-runtime/
+julia-depot/

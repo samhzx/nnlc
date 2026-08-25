@@ -1,0 +1,42 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.10.11"
+          arch: x64
+
+      - name: Build self-contained executable
+        shell: pwsh
+        run: |
+          $juliaExe = (Get-Command julia).Source
+          $juliaDir = Split-Path (Split-Path $juliaExe -Parent) -Parent
+          .\build_windows.ps1 -JuliaDir $juliaDir
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: NNLC_Trainer-windows-x64
+          path: dist/NNLC_Trainer.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

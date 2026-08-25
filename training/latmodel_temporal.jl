@@ -142,17 +142,17 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
       println(out_streams, f"Filtered out {old_nrows - nrow(data)} standstill rows")
     end
     # Select only columns needed for training (extractor outputs many extra columns)
-    # Model inputs: v_ego, actual_lateral_accel, lateral_jerk (computed), roll, temporal lat accels, temporal rolls
+    # Model inputs: v_ego, desired_lateral_accel, friction_input, roll, temporal lat accels, temporal rolls
     # Target: torque_output
-    temporal_lat_accel_cols = filter(c -> occursin(r"^actual_lateral_accel_t[mp]\d+$", c), names(data))
+    # friction_input 由 extract_lateral_data.py 精确计算，与 nnlc.py 运行时 update_friction_input 逻辑一致
+    temporal_lat_accel_cols = filter(c -> occursin(r"^desired_lateral_accel_t[mp]\d+$", c), names(data))
     temporal_roll_cols = filter(c -> occursin(r"^roll_t[mp]\d+$", c), names(data))
-    keep_cols = vcat(["v_ego", "actual_lateral_accel", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols)
-    # Also keep actual_lateral_accel_tp03 for lateral_jerk computation (it's already in temporal cols)
+    keep_cols = vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols)
     select!(data, Symbol.(keep_cols))
 
-    # Compute lateral_jerk from temporal data (not output by extractor)
-    println(out_streams, "Computing lateral_jerk from temporal lateral accel")
-    data[!, :lateral_jerk] = @fastmath @. (data[!, :actual_lateral_accel_tp03] - data[!, :actual_lateral_accel]) / 0.03f0
+    # 重排列顺序：与 nnlc.py 运行时 feedforward (nn_input) 输入完全一致
+    # 列顺序：v_ego, desired_lateral_accel, friction_input, roll, torque_output, 时序desired_lat(7), 时序roll(7)
+    select!(data, vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols))
 
     println(out_streams, f"Loaded {nrow(data)} rows")
     println(out_streams, f"Data {data[sample(1:nrow(data), 20), :]}")
@@ -169,7 +169,7 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     mm_v_ego = [0.1, 45.0]
     mm_torque_output = [-2.0, 2.0]
     mm_lateral_accel = [-4.1, 4.1]
-    mm_lateral_jerk = [-5.0, 5.0]
+    mm_friction_input = [-5.0, 5.0]
     mm_roll = [-0.20, 0.20]
 
     # setup bins
@@ -179,7 +179,7 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     step_v_ego = (mm_v_ego[2] - mm_v_ego[1]) / nbins
     step_torque_output = (mm_torque_output[2] - mm_torque_output[1]) / nbins
     step_lateral_accel = (mm_lateral_accel[2] - mm_lateral_accel[1]) / nbins
-    step_lateral_jerk = (mm_lateral_jerk[2] - mm_lateral_jerk[1]) / nbins
+    step_friction_input = (mm_friction_input[2] - mm_friction_input[1]) / nbins
     step_roll = (mm_roll[2] - mm_roll[1]) / nbins
 
     function filter_columns(df::DataFrame, partial_match::String, tol)::DataFrame
@@ -192,9 +192,7 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
         return df
     end
 
-    # Drop actual_lateral_accel_tp03 now that lateral_jerk has been computed from it
-    # (the temporal columns actual_lateral_accel_t* are still kept as model features)
-    # Note: actual_lateral_accel_tp03 is kept since it's a temporal model input
+    # desired_lateral_accel_tp03 is kept as a temporal model input feature
 
     # filter data
     old_nrows = nrow(data)
@@ -208,8 +206,8 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     data = filter_columns(data, "lateral_accel", mm_lateral_accel[2])
     println(out_streams, f"Filtered out {old_nrows - nrow(data)} points with lateral_accel outside [{-mm_lateral_accel[2]}, {mm_lateral_accel[2]}]")
     old_nrows = nrow(data)
-    data = filter_columns(data, "lateral_jerk", mm_lateral_jerk[2])
-    println(out_streams, f"Filtered out {old_nrows - nrow(data)} points with lateral_jerk outside [{-mm_lateral_jerk[2]}, {mm_lateral_jerk[2]}]")
+    data = filter_columns(data, "friction_input", mm_friction_input[2])
+    println(out_streams, f"Filtered out {old_nrows - nrow(data)} points with friction_input outside [{-mm_friction_input[2]}, {mm_friction_input[2]}]")
     old_nrows = nrow(data)
     data = filter_columns(data, "roll", mm_roll[2])
     println(out_streams, f"Filtered out {old_nrows - nrow(data)} points with roll outside [{-mm_roll[2]}, {mm_roll[2]}]")
@@ -223,12 +221,12 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
 
     println(out_streams, f"Calculating bins")
     data[!, :v_ego_bins] = cut(data[!, :v_ego], mm_v_ego[1]:step_v_ego:mm_v_ego[2])
-    data[!, :actual_lateral_accel_bins] = cut(data[!, :actual_lateral_accel], mm_lateral_accel[1]:step_lateral_accel:mm_lateral_accel[2])
+    data[!, :desired_lateral_accel_bins] = cut(data[!, :desired_lateral_accel], mm_lateral_accel[1]:step_lateral_accel:mm_lateral_accel[2])
     data[!, :roll_bins] = cut(data[!, :roll], mm_roll[1]:step_roll:mm_roll[2])
-    data[!, :lateral_jerk_bins] = cut(data[!, :lateral_jerk], mm_lateral_jerk[1]:step_lateral_jerk:mm_lateral_jerk[2])
+    data[!, :friction_input_bins] = cut(data[!, :friction_input], mm_friction_input[1]:step_friction_input:mm_friction_input[2])
 
     # create a combined column for balancing
-    data[!,:combined_column] = string.(data[!,:v_ego_bins], "_", data[!,:actual_lateral_accel_bins])
+    data[!,:combined_column] = string.(data[!,:v_ego_bins], "_", data[!,:desired_lateral_accel_bins])
     
     # balance the data
     unique_bins = unique(data[!, :combined_column])
@@ -286,7 +284,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   train, test = stratifiedobs(row->row[:combined_column], data, p = 0.8)
 
   # remove columns used only for binning
-  select!(data, Not([:combined_column, :v_ego_bins, :actual_lateral_accel_bins, :lateral_jerk_bins, :roll_bins]))
+  select!(data, Not([:combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins]))
 
   # split into independent and dependent variables
   println(out_streams, select(data, Not([:torque_output]))[sample(1:nrow(data), 10), :])
@@ -297,7 +295,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   input_mean = mean(X, dims=1)
   input_std = std(X, dims=1)
 
-  # Create a copy of the DataFrames with the signs of torque_output, lateral_accel, lateral_jerk, and roll reversed to make the data symmetric
+  # Create a copy of the DataFrames with the signs of torque_output, lateral_accel, friction_input, and roll reversed to make the data symmetric
   old_size = size(train, 1)
   println(out_streams, "Training data before copying symmmetric data: $old_size")
   data_sym = deepcopy(train)
@@ -393,9 +391,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
                 end
                 
                 # Construct grid_tmp without intermediate allocations
+                # 列顺序与 nnlc.py 运行时 nn_input 完全一致：v_ego, desired_lateral_accel, friction_input, roll, 时序lat, 时序roll
                 grid_tmp[1] = v_ego
                 grid_tmp[2] = la
-                grid_tmp[3] = le + lj
+                # friction_input 近似：lat_accel_friction_factor*(setpoint-measurement) + lat_jerk_friction_factor*lookahead_lateral_jerk
+                # setpoint-measurement ≈ lateral_error(le)，lookahead_lateral_jerk ≈ lateral_jerk(lj)
+                # 系数 0.7/0.4 与 latcontrol_torque_ext_base.py 中 lat_accel_friction_factor/lat_jerk_friction_factor 一致
+                grid_tmp[3] = 0.7f0 * le + 0.4f0 * lj
                 grid_tmp[4] = roll
                 
                 @inbounds for idx in 1:length(t_list)
