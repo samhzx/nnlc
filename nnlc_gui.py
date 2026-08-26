@@ -65,9 +65,16 @@ class NNLCApp:
         self._poll_messages()
 
     @staticmethod
-    def _default_output() -> str:
+    def _normalize_path(path: str) -> str:
+        """Normalize user-visible paths using the current OS convention."""
+        path = path.strip()
+        return os.path.normpath(os.path.expanduser(path)) if path else ""
+
+    @classmethod
+    def _default_output(cls) -> str:
         documents = Path.home() / "Documents"
-        return str(documents / "NNLC_Output") if documents.exists() else str(Path.cwd() / "NNLC_Output")
+        default_path = documents / "NNLC_Output" if documents.exists() else Path.cwd() / "NNLC_Output"
+        return cls._normalize_path(str(default_path))
 
     def _build_widgets(self) -> None:
         root = self.root
@@ -179,12 +186,12 @@ class NNLCApp:
     def _choose_data(self) -> None:
         path = filedialog.askdirectory(title="选择包含 reallog/rlog 的目录")
         if path:
-            self.data_var.set(path)
+            self.data_var.set(self._normalize_path(path))
 
     def _choose_output(self) -> None:
         path = filedialog.askdirectory(title="选择输出目录")
         if path:
-            self.output_var.set(path)
+            self.output_var.set(self._normalize_path(path))
 
     def _open_output(self) -> None:
         output_dir = Path(self.output_var.get().strip())
@@ -268,8 +275,10 @@ class NNLCApp:
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
-        data_dir = self.data_var.get().strip()
-        output_dir = self.output_var.get().strip()
+        data_dir = self._normalize_path(self.data_var.get())
+        output_dir = self._normalize_path(self.output_var.get())
+        self.data_var.set(data_dir)
+        self.output_var.set(output_dir)
         car = self.car_var.get().strip()
         if not data_dir or not os.path.isdir(data_dir):
             messagebox.showerror("参数错误", "请选择有效的 reallog 目录。")
