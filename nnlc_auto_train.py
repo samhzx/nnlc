@@ -468,6 +468,10 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None, process_holde
     depot = get_julia_depot()
     if depot:
         env["JULIA_DEPOT_PATH"] = depot
+    # Keep Julia's GR/Plots backend headless.  The trainer writes plot files,
+    # so it must not try to launch gksqt or require a desktop Qt plugin.
+    env["GKSwstype"] = "100"
+    env["QT_QPA_PLATFORM"] = "offscreen"
     # Julia resolves relative package/artifact paths from its working tree;
     # use the extracted bundle root for the frozen app.
     process = subprocess.Popen(
