@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import queue
 import re
@@ -54,7 +55,7 @@ class NNLCApp:
 
         self.data_var = tk.StringVar()
         self.output_var = tk.StringVar(value=self._default_output())
-        self.car_var = tk.StringVar(value="BYD_TANG_DMI_24")
+        self.car_var = tk.StringVar(value=self._load_saved_car() or "BYD_TANG_DMI_24")
         self.threshold_var = tk.StringVar()
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
@@ -75,6 +76,42 @@ class NNLCApp:
         documents = Path.home() / "Documents"
         default_path = documents / "NNLC_Output" if documents.exists() else Path.cwd() / "NNLC_Output"
         return cls._normalize_path(str(default_path))
+
+    @staticmethod
+    def _preferences_path() -> Path:
+        """Return a per-user settings path that also works in a bundled exe."""
+        if os.name == "nt":
+            config_root = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
+        elif sys.platform == "darwin":
+            config_root = Path.home() / "Library" / "Application Support"
+        else:
+            config_root = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+        return Path(config_root) / "NNLC" / "settings.json"
+
+    @classmethod
+    def _load_saved_car(cls) -> str:
+        try:
+            with cls._preferences_path().open("r", encoding="utf-8") as handle:
+                value = json.load(handle).get("car", "")
+            return value.strip() if isinstance(value, str) else ""
+        except (OSError, ValueError, AttributeError):
+            return ""
+
+    def _save_preferences(self) -> None:
+        car = self.car_var.get().strip()
+        if not car:
+            return
+        path = self._preferences_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = path.with_suffix(".tmp")
+            with temporary_path.open("w", encoding="utf-8") as handle:
+                json.dump({"car": car}, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary_path, path)
+        except OSError:
+            # A read-only profile must not prevent the training task from starting.
+            pass
 
     def _build_widgets(self) -> None:
         root = self.root
@@ -255,6 +292,7 @@ class NNLCApp:
         self.status_var.set(status)
 
     def _on_close(self) -> None:
+        self._save_preferences()
         if self.worker and self.worker.is_alive():
             should_close = messagebox.askyesno(
                 "训练仍在进行",
@@ -289,6 +327,7 @@ class NNLCApp:
         if not car:
             messagebox.showerror("参数错误", "车型不能为空。")
             return
+        self._save_preferences()
 
         min_score = None
         if not self.auto_threshold_var.get():
