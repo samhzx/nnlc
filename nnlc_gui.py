@@ -25,6 +25,10 @@ from nnlc_auto_train import auto_train
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+TRAINING_MODES = {
+    "标准模式": 16384,
+    "低内存模式": 4096,
+}
 
 
 class _QueueWriter(io.TextIOBase):
@@ -57,6 +61,7 @@ class NNLCApp:
         self.output_var = tk.StringVar(value=self._default_output())
         self.car_var = tk.StringVar(value=self._load_saved_car() or "BYD_TANG_DMI_24")
         self.threshold_var = tk.StringVar()
+        self.training_mode_var = tk.StringVar(value="标准模式")
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
@@ -169,6 +174,18 @@ class NNLCApp:
         )
         self.visualize_check.pack(side="left", padx=(28, 0))
         self.config_widgets.extend((self.auto_threshold_check, self.visualize_check))
+
+        ttk.Label(options_frame, text="训练模式").grid(row=2, column=0, sticky="w", pady=6)
+        self.training_mode_combo = ttk.Combobox(
+            options_frame,
+            textvariable=self.training_mode_var,
+            values=tuple(TRAINING_MODES),
+            state="readonly",
+            width=16,
+        )
+        self.training_mode_combo.grid(row=2, column=1, sticky="w", padx=(12, 10), pady=6)
+        ttk.Label(options_frame, text="低内存模式使用更小批次").grid(row=2, column=2, sticky="w", pady=6)
+        self.config_widgets.append(self.training_mode_combo)
 
         controls = ttk.Frame(container)
         controls.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -348,10 +365,11 @@ class NNLCApp:
         self.started_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.process_holder = {}
+        batch_size = TRAINING_MODES[self.training_mode_var.get()]
         skip_visualize = not self.skip_viz_var.get()
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(data_dir, output_dir, car, min_score, skip_visualize,
+            args=(data_dir, output_dir, car, min_score, skip_visualize, batch_size,
                   self.cancel_event, self.process_holder),
             daemon=True,
         )
@@ -365,6 +383,7 @@ class NNLCApp:
         car,
         min_score,
         skip_visualize,
+        batch_size,
         cancel_event,
         process_holder,
     ) -> None:
@@ -378,6 +397,7 @@ class NNLCApp:
                     skip_visualize=skip_visualize,
                     output_dir=output_dir,
                     deploy_dir=output_dir,
+                    batch_size=batch_size,
                     cancel_event=cancel_event,
                     process_holder=process_holder,
                 )

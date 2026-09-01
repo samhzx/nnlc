@@ -11,6 +11,8 @@ Usage:
 """
 
 import argparse
+import csv
+from collections import deque
 import glob
 import os
 import sys
@@ -138,7 +140,7 @@ def find_rlogs(input_dir):
     return sorted(set(files))
 
 
-def extract_segment(rlog_path):
+def extract_segment(rlog_path, row_callback=None):
     """Extract lateral data rows from a single rlog file.
 
     Follows the message iteration pattern from openpilot's
@@ -147,7 +149,8 @@ def extract_segment(rlog_path):
     """
     from nnlc_tools.logreader import LogReader
 
-    rows = []
+    rows = [] if row_callback is None else None
+    emit_row = rows.append if row_callback is None else row_callback
     sm = {}
     steer_actuator_delay = 0.1  # 默认值
 
@@ -259,11 +262,99 @@ def extract_segment(rlog_path):
                     lane_change_state,
                     friction_input,
                 ]
-                rows.append(row)
+                emit_row(row)
     except Exception as e:
         print(f"  WARNING: Error processing {rlog_path}: {e}")
 
-    return rows
+    return rows if rows is not None else []
+
+
+def _temporal_column_specs():
+    """Return temporal output columns in the same order as add_temporal_columns."""
+    specs = []
+    for offset in PAST_TIMES + FUTURE_TIMES:
+        suffix = f"_t{offset:+.1f}".replace(".", "").replace("+", "p").replace("-", "m")
+        for column in ("actual_lateral_accel", "desired_lateral_accel", "roll"):
+            specs.append((int(round(offset / 0.01)), COLUMNS.index(column), f"{column}{suffix}"))
+    return specs
+
+
+class _StreamingCsvWriter:
+    """Write extracted rows while retaining only the temporal look-ahead window."""
+
+    _MAX_PAST = 30
+    _MAX_FUTURE = 150
+
+    def __init__(self, output_path, temporal=False, filter_overrides=False):
+        self.temporal = temporal
+        self.filter_overrides = filter_overrides
+        self.temporal_specs = _temporal_column_specs() if temporal else []
+        self.output_columns = COLUMNS + [spec[2] for spec in self.temporal_specs]
+        self.handle = open(output_path, "w", newline="", encoding="utf-8")
+        self.writer = csv.writer(self.handle, lineterminator="\n")
+        self.writer.writerow(self.output_columns)
+        self.pending = deque()
+        self.past = deque(maxlen=self._MAX_PAST)
+        self.rows_written = 0
+        self.rows_seen = 0
+        self.rows_filtered = 0
+
+    @staticmethod
+    def _csv_value(value):
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return value.item() if isinstance(value, np.generic) else value
+
+    def _row_at(self, offset):
+        if offset < 0:
+            index = len(self.past) + offset
+            return self.past[index] if 0 <= index < len(self.past) else None
+        return self.pending[offset] if offset < len(self.pending) else None
+
+    def _emit_ready(self):
+        center = self.pending[0]
+        output_row = list(center)
+        for offset, column_index, _ in self.temporal_specs:
+            source_row = self._row_at(offset)
+            output_row.append(None if source_row is None else source_row[column_index])
+
+        self.past.append(center)
+        self.pending.popleft()
+        self.writer.writerow([self._csv_value(value) for value in output_row])
+        self.rows_written += 1
+
+    def accept(self, row):
+        self.rows_seen += 1
+        if self.filter_overrides and bool(row[COLUMNS.index("steering_pressed")]):
+            self.rows_filtered += 1
+            return
+
+        if not self.temporal:
+            self.writer.writerow([self._csv_value(value) for value in row])
+            self.rows_written += 1
+            return
+
+        self.pending.append(row)
+        if len(self.pending) > self._MAX_FUTURE:
+            self._emit_ready()
+
+    def finish(self):
+        self.finish_segment()
+        self.handle.flush()
+
+    def finish_segment(self):
+        while self.pending:
+            self._emit_ready()
+        # Temporal context must not cross an rlog segment boundary.
+        self.past.clear()
+
+    def close(self):
+        self.handle.close()
 
 
 def add_temporal_columns(df):
@@ -312,28 +403,6 @@ def main():
 
     print(f"Found {len(rlog_files)} rlog files")
 
-    all_rows = []
-    for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-        rows = extract_segment(rlog_path)
-        all_rows.extend(rows)
-
-    if not all_rows:
-        print("ERROR: No data extracted from any rlog files")
-        sys.exit(1)
-
-    df = pd.DataFrame(all_rows, columns=COLUMNS)
-    print(f"Extracted {len(df)} rows")
-
-    if args.filter_overrides and "steering_pressed" in df.columns:
-        before = len(df)
-        df = df[~df["steering_pressed"].astype(bool)]
-        dropped = before - len(df)
-        print(f"Filtered {dropped} override rows ({dropped / before:.1%} of data)")
-
-    if args.temporal:
-        print("Adding temporal columns...")
-        df = add_temporal_columns(df)
-
     # Determine output format
     fmt = args.format
     if fmt is None:
@@ -342,10 +411,50 @@ def main():
         else:
             fmt = "csv"
 
-    if fmt == "parquet":
-        df.to_parquet(args.output, index=False)
+    if fmt == "csv":
+        # CSV is the pipeline's native format. Write rows as they arrive so
+        # memory usage is bounded by one rlog's parser state and the temporal
+        # look-ahead buffer instead of the complete dataset.
+        stream = _StreamingCsvWriter(args.output, temporal=args.temporal,
+                                     filter_overrides=args.filter_overrides)
+        try:
+            for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
+                extract_segment(rlog_path, row_callback=stream.accept)
+                stream.finish_segment()
+        finally:
+            stream.finish()
+            stream.close()
+
+        if stream.rows_written == 0:
+            print("ERROR: No data extracted from any rlog files")
+            sys.exit(1)
+        print(f"Extracted {stream.rows_written} rows")
+        if stream.rows_filtered:
+            ratio = stream.rows_filtered / max(stream.rows_seen, 1)
+            print(f"Filtered {stream.rows_filtered} override rows ({ratio:.1%} of data)")
+        if args.temporal:
+            print("Added temporal columns with per-segment streaming")
     else:
-        df.to_csv(args.output, index=False)
+        # Parquet append support depends on an optional engine. Keep the
+        # existing behavior for explicit parquet requests; the GUI uses CSV.
+        all_rows = []
+        for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
+            rows = extract_segment(rlog_path)
+            all_rows.extend(rows)
+        if not all_rows:
+            print("ERROR: No data extracted from any rlog files")
+            sys.exit(1)
+        df = pd.DataFrame(all_rows, columns=COLUMNS)
+        print(f"Extracted {len(df)} rows")
+        if args.filter_overrides and "steering_pressed" in df.columns:
+            before = len(df)
+            df = df[~df["steering_pressed"].astype(bool)]
+            dropped = before - len(df)
+            print(f"Filtered {dropped} override rows ({dropped / before:.1%} of data)")
+        if args.temporal:
+            print("Adding temporal columns...")
+            df = add_temporal_columns(df)
+        df.to_parquet(args.output, index=False)
 
     print(f"Saved to {args.output} ({fmt})")
 

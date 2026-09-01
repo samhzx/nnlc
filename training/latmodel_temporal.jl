@@ -277,39 +277,30 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
   return data
 end
 
-function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=false)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
+function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=false, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
   model_path = joinpath(working_dir, Base.basename(working_dir))
+
+  feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
+
+  # Compute normalization statistics column by column. This avoids another
+  # full-data matrix solely for mean/std and keeps only the final two vectors.
+  input_mean = Matrix{Float32}(undef, 1, length(feature_names))
+  input_std = Matrix{Float32}(undef, 1, length(feature_names))
+  for (index, column_name) in enumerate(feature_names)
+    column = Float32.(data[!, column_name])
+    input_mean[1, index] = mean(column)
+    input_std[1, index] = std(column)
+  end
 
   # split into train and test sets
   train, test = stratifiedobs(row->row[:combined_column], data, p = 0.8)
 
-  # remove columns used only for binning
-  select!(data, Not([:combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins]))
-
-  # split into independent and dependent variables
-  println(out_streams, select(data, Not([:torque_output]))[sample(1:nrow(data), 10), :])
-  X = Float32.(Matrix(select(data, Not([:torque_output]))))
-  y = Float32.(data[:, :torque_output];)
-
-  # Calculate the mean and standard deviation of the input features
-  input_mean = mean(X, dims=1)
-  input_std = std(X, dims=1)
-
-  # Create a copy of the DataFrames with the signs of torque_output, lateral_accel, friction_input, and roll reversed to make the data symmetric
-  old_size = size(train, 1)
-  println(out_streams, "Training data before copying symmmetric data: $old_size")
-  data_sym = deepcopy(train)
-  # symmetrize data by flipping the sign of all columns except v_ego and a_ego in one line
-  @views data_sym[!, Not([:v_ego])] = -1f0 .* data_sym[!, Not([:v_ego])]
-  train = vcat(train, data_sym)
-  println(out_streams, "Training data after copying symmmetric data: $(size(train,1))")
-
-  old_size = size(test, 1)
-  println(out_streams, "Test data before copying symmmetric data: $old_size")
-  data_sym = deepcopy(test)
-  @views data_sym[!, Not([:v_ego])] = -1f0 .* data_sym[!, Not([:v_ego])]
-  test = vcat(test, data_sym)
-  println(out_streams, "Test data after copying symmmetric data: $(size(test,1))")
+  # Keep only the numeric training columns. Symmetric examples are generated
+  # per batch below instead of duplicating both DataFrames in memory.
+  model_columns = vcat(feature_names, ["torque_output"])
+  select!(train, Symbol.(model_columns))
+  select!(test, Symbol.(model_columns))
+  println(out_streams, "Training rows: $(nrow(train)); test rows: $(nrow(test))")
 
   # Check for Metal first (Apple Silicon), then CUDA, then fall back to CPU
   if force_cpu
@@ -328,7 +319,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     println(out_streams, "Using device: CPU")
   end
 
-  # normalize the data - use @views to avoid unnecessary copies and convert directly to Float32
+  # Convert to Float32 before normalization so the retained arrays are compact.
   X_train = Matrix{Float32}(select(train, Not([:torque_output])))
   @fastmath @. X_train = (X_train - input_mean) / input_std
   X_train = X_train |> device
@@ -340,6 +331,12 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   X_test = X_test |> device
   
   y_test = Array{Float32}(test[:, "torque_output"]) |> device
+
+  # DataFrames are no longer needed after conversion to compact numeric arrays.
+  train = nothing
+  test = nothing
+  data = nothing
+  GC.gc()
 
   input_dim = size(X_train, 2)
 
@@ -433,10 +430,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   grid_odd_neg = prepare_test_grid(lj_func, v_ego_range, -lateral_acceleration_range, -lateral_jerk_range, -roll_range, -lateral_error_range, -roll_rate_range)
   grid_origin = prepare_test_grid(lj_func, v_ego_range, 0, 0, 0, 0, 0)
 
-  varnames = join(names(select(data, Not([:torque_output]))), ", ")
-
   # Cache for physical constraint losses (recomputed every N epochs)
   cached_constraint_loss = Ref(0f0)
+  cached_constraint_epoch = Ref(0)
   constraint_eval_interval = 10
 
   function physical_constraint_losses(x, y_pred, λ_monotonic::Float32, λ_odd::Float32, λ_origin::Float32) :: Float32
@@ -445,8 +441,8 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       end
 
       # Only recompute every N epochs and cache the result
-      if epoch % constraint_eval_interval != 0
-          return cached_constraint_loss[]
+      if epoch % constraint_eval_interval != 0 || cached_constraint_epoch[] == epoch
+        return cached_constraint_loss[]
       end
       
       monotonicity_loss = 0f0
@@ -482,6 +478,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
       result = @fastmath λ_monotonic * monotonicity_loss + λ_odd * odd_loss + λ_origin * origin_loss
       cached_constraint_loss[] = result
+      cached_constraint_epoch[] = epoch
       return result
   end
 
@@ -529,7 +526,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   opt = CustomAdaGrad(0.01f0, 1.0f-10)
   state_tree = Optimisers.setup(opt, model)
 
-  # train the model (with batches of shuffled data)
+  # Train with a fixed-size batch to bound reverse-mode autodiff memory.
   tol = log10(size(X_train, 1)) > 7 ? 1f-4 : 1f-6
   Δtol = log10(size(X_train, 1)) > 7 ? 1f-4 : 5f-5
   logstep = device == gpu ? 50 : log10(size(X_train, 1)) > 7 ? 3 : 10
@@ -546,10 +543,14 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   ilog = logstep + 1
   epoch_max = device == gpu ? 10000 : log10(size(X_train, 1)) > 6 ? 150 : 1000
   epoch_min = 25
-  batch_size = size(y_train, 1)
+  if requested_batch_size <= 0
+    error("batch size must be positive")
+  end
+  batch_size = min(requested_batch_size, size(y_train, 1))
 
   println(out_streams, size(X_train))
   println(out_streams, size(y_train))
+  println(out_streams, "Batch size: $batch_size; symmetric augmentation is generated per batch")
 
   if use_existing_model
       old_model = "$model_path.bson"
@@ -557,13 +558,19 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       @load old_model model
   else
 
-    for col in names(data)
-      if typeof(data[1, col]) == Float64
-        println(out_streams, "$col: $(describe(collect(data[:,col])))")
-      end
-    end
-
     train_data_loader = DataLoader((X_train', y_train), batchsize=batch_size, shuffle=true)
+    symmetry_signs = ones(Float32, input_dim)
+    symmetry_signs[2:end] .= -1f0
+    symmetry_signs = reshape(symmetry_signs, :, 1) |> device
+
+    train_batch! = function(x, y, lambda, monotonic_lambda, odd_lambda, origin_lambda)
+      batch_loss = 0f0
+      gs = Flux.gradient(model) do current_model
+        batch_loss = loss(x, y, current_model, lambda, monotonic_lambda, odd_lambda, origin_lambda)
+      end
+      state_tree, model = Optimisers.update!(state_tree, model, gs[1])
+      return batch_loss
+    end
 
     grid = grid |> device
     grid_da = grid_da |> device
@@ -600,10 +607,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         λ_origin = λ_originmax * min(1f0, max(0f0, epoch - epoch_max * λ_origin_start_epoch_fraction) / (epoch_max * 0.2f0))
         l = 0f0
         for (x, y) in train_data_loader
-          gs = Flux.gradient(model) do model
-            l = loss(x, y, model, λ, λ_monotonic, λ_odd, λ_origin)
-          end
-          state_tree, model = Optimisers.update!(state_tree, model, gs[1])
+          l = train_batch!(x, y, λ, λ_monotonic, λ_odd, λ_origin)
+        end
+
+        # Preserve the original sign-symmetry augmentation without retaining a
+        # second copy of the complete training set.
+        for (x, y) in train_data_loader
+          l = train_batch!(x .* symmetry_signs, -y, λ, λ_monotonic, λ_odd, λ_origin)
         end
 
         push!(losses, l)
@@ -819,7 +829,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       end
   end
 
-  export_model_params_to_json(model, Matrix{Float32}(input_mean), Matrix{Float32}(input_std), "$model_path.json", current_date_and_time, model_test_loss, names(select(data, Not([:torque_output]))))
+  export_model_params_to_json(model, Matrix{Float32}(input_mean), Matrix{Float32}(input_std), "$model_path.json", current_date_and_time, model_test_loss, feature_names)
 
 
   # Evaluate the model on the test set 
@@ -1272,7 +1282,7 @@ function multiline_string(strings::Vector{String}, n::Int; prefix="")::String
   return join(lines, ",\n")
 end
 
-function create_model(in_file, out_dir_base; force_cpu::Bool=false)
+function create_model(in_file, out_dir_base; force_cpu::Bool=false, requested_batch_size::Int=16384)
   carname = replace(Base.basename(in_file), ".csv" => "")
   outdir = create_folder_with_iterator(out_dir_base, carname, make_new=true)
   logfile = open(outdir * "/$(carname)_log.txt", "a")  # Open log file in append mode
@@ -1286,6 +1296,7 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=false)
   
   data = load_data(in_file, use_existing_input, outdir, out_streams)
 
+  feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
   model_file = "$outdir/$carname.bson"
   use_existing_input = false
   println(out_streams, "Model file: $model_file")
@@ -1295,13 +1306,13 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=false)
       # return
   end
 
-  model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(outdir, use_existing_input, data, out_streams; force_cpu=force_cpu)
+  model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(outdir, use_existing_input, data, out_streams; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
   
-  test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(names(select(data, Not([:torque_output]))), 60, prefix="Model input: "), out_streams, test_loss)
+  test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss)
   close(logfile)
 end
 
-function main(in_dir; force_cpu::Bool=false)
+function main(in_dir; force_cpu::Bool=false, requested_batch_size::Int=16384)
   # Get all CSV files that aren't balanced files
   csv_files = filter(file -> occursin(".csv", file) && !occursin("_balanced.csv", file), readdir(in_dir))
 
@@ -1311,21 +1322,47 @@ function main(in_dir; force_cpu::Bool=false)
   # Process each file
   for in_file in csv_files
       println("Processing $in_file")
-      create_model(joinpath(in_dir, in_file), results_dir; force_cpu=force_cpu)
+      create_model(joinpath(in_dir, in_file), results_dir; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
   end
 end
 
 # Accept data directory as command-line argument, or default to ~/Downloads/rlogs/output/GENESIS
 force_cpu = "--cpu" in ARGS
-positional_args = filter(a -> !startswith(a, "--"), ARGS)
+batch_size_arg = findfirst(a -> startswith(a, "--batch-size="), ARGS)
+batch_size_flag = findfirst(a -> a == "--batch-size", ARGS)
+requested_batch_size = 16384
+if batch_size_arg !== nothing
+  requested_batch_size = try
+    parse(Int, split(ARGS[batch_size_arg], "=", limit=2)[2])
+  catch
+    error("--batch-size must be a positive integer")
+  end
+elseif batch_size_flag !== nothing
+  if batch_size_flag == length(ARGS)
+    error("--batch-size must be followed by a positive integer")
+  end
+  requested_batch_size = try
+    parse(Int, ARGS[batch_size_flag + 1])
+  catch
+    error("--batch-size must be a positive integer")
+  end
+end
+if requested_batch_size <= 0
+  error("--batch-size must be a positive integer")
+end
+
+positional_args = [
+  argument for (index, argument) in enumerate(ARGS)
+  if !startswith(argument, "--") && !(batch_size_flag !== nothing && index == batch_size_flag + 1)
+]
 
 if force_cpu
   println("CPU mode forced via --cpu flag")
 end
 
 if length(positional_args) > 0
-  main(positional_args[1]; force_cpu=force_cpu)
+  main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
 else
   home_dir = ENV["HOME"]
-  main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu)
+  main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
 end

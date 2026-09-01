@@ -1,6 +1,6 @@
 # Windows 单文件程序
 
-`NNLC_Trainer.exe` 是 Tkinter 操作界面。双击后选择 reallog 目录、输出目录，填写车型；路线阈值保持“自动推荐”即可。训练中间 CSV、覆盖度图、验证图和最终车型 JSON 都会写到输出目录。
+`NNLC_Trainer.exe` 是 Tkinter 操作界面。双击后选择 reallog 目录、输出目录，填写车型；路线阈值保持“自动推荐”即可。训练模式可选“标准模式”或“低内存模式”，后者使用更小批次来降低内存峰值。训练中间 CSV、覆盖度图、验证图和最终车型 JSON 都会写到输出目录。
 
 ## 构建
 
@@ -23,4 +23,8 @@ cd C:\path\to\openpilot-nnlc-tools
 python nnlc_auto_train.py --data D:\rlogs --car BYD_TANG_DMI_24 --output D:\nnlc-output
 ```
 
-exe 的命令行模式也支持 `--data`、`--car`、`--min-score`、`--output`、`--skip-deploy` 和 `--skip-viz`；不带参数双击则启动界面。
+exe 的命令行模式也支持 `--data`、`--car`、`--min-score`、`--batch-size`、`--output`、`--skip-deploy` 和 `--skip-viz`；不带参数双击则启动界面。低内存命令行示例：
+
+```powershell
+python nnlc_auto_train.py --data D:\rlogs --car BYD_TANG_DMI_24 --batch-size 4096
+```

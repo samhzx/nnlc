@@ -435,7 +435,8 @@ def step_visualize(input_csv, output_dir, python_exe):
     return output_png
 
 
-def step_train(input_csv, car_name, output_dir, cancel_event=None, process_holder=None):
+def step_train(input_csv, car_name, output_dir, cancel_event=None,
+               process_holder=None, batch_size=16384):
     """步骤6: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
     # 创建训练输入目录（只包含要训练的 CSV）
@@ -457,8 +458,10 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None, process_holde
     script_root = RESOURCE_DIR if getattr(sys, "frozen", False) else NNLC_TOOLS_DIR
     script_path = os.path.join(script_root, TRAINING_SCRIPT)
     julia_exe = get_julia_exe()
-    cmd = [julia_exe, script_path, train_input_dir, "--cpu"]
-    print_info(f"Julia 训练中（CPU 模式）")
+    if not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    cmd = [julia_exe, script_path, train_input_dir, "--cpu", f"--batch-size={batch_size}"]
+    print_info(f"Julia 训练中（CPU 模式，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
     print_warn("Julia 首次运行需编译依赖（约 3-10 分钟无输出属正常），请耐心等待")
     print_info("训练日志会实时显示在下方:\n" + "-" * 60)
@@ -618,7 +621,7 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
 
 def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                skip_visualize=False, output_dir=None, deploy_dir=None,
-               cancel_event=None, process_holder=None):
+               cancel_event=None, process_holder=None, batch_size=16384):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -631,6 +634,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         deploy_dir: 模型 JSON 部署目录；不传则使用项目同级 models 目录
         cancel_event: 可选的训练取消事件
         process_holder: 可选的当前子进程共享容器
+        batch_size: Julia 训练批次大小，默认 16384；较小值可降低内存峰值
 
     Returns:
         模型文件路径
@@ -699,6 +703,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         final_csv,
         car_name,
         output_dir,
+        batch_size=batch_size,
         cancel_event=cancel_event,
         process_holder=process_holder,
     )
@@ -818,9 +823,14 @@ def main():
                         help="跳过可视化图表生成")
     parser.add_argument("--output", "-o", help="中间文件、图表和模型输出目录")
     parser.add_argument("--deploy-dir", help="模型 JSON 部署目录（默认项目同级 models）")
+    parser.add_argument("--batch-size", type=int, default=16384,
+                        help="Julia 训练批次大小（默认 16384；低内存可使用 4096）")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
 
     args = parser.parse_args()
+
+    if args.batch_size <= 0:
+        parser.error("--batch-size 必须是正整数")
 
     # Double-clicking the packaged exe opens the GUI.  Source users retain the
     # original terminal prompts unless they explicitly request ``--gui``.
@@ -846,6 +856,7 @@ def main():
         args.skip_viz,
         output_dir=args.output,
         deploy_dir=args.deploy_dir,
+        batch_size=args.batch_size,
     )
 
 
