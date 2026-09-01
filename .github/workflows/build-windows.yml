@@ -55,6 +55,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $trainingScript -PathType Leaf)) {
             throw "Bundled training script is missing or is not a file: $trainingScript"
           }
+          $socketExtensions = @(Get-ChildItem -LiteralPath (Join-Path $bundleDir "_internal") -Recurse -File -Filter "_socket*.pyd")
+          if ($socketExtensions.Count -eq 0) {
+            throw "Python _socket extension is missing from the one-dir bundle"
+          }
           $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
           if ($fileCount -lt 10) {
             throw "Bundle contains only $fileCount files; expected a one-dir dependency bundle"

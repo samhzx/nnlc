@@ -57,11 +57,20 @@ class NNLCApp:
         self.cancel_event = threading.Event()
         self.process_holder = {}
 
+        saved_preferences = self._load_preferences()
+        saved_mode = saved_preferences.get("training_mode")
+        if not isinstance(saved_mode, str) or saved_mode not in TRAINING_MODES:
+            saved_mode = "标准模式"
+
+        saved_car = saved_preferences.get("car")
+        if not isinstance(saved_car, str) or not saved_car.strip():
+            saved_car = "BYD_TANG_DMI_24"
+
         self.data_var = tk.StringVar()
         self.output_var = tk.StringVar(value=self._default_output())
-        self.car_var = tk.StringVar(value=self._load_saved_car() or "BYD_TANG_DMI_24")
+        self.car_var = tk.StringVar(value=saved_car)
         self.threshold_var = tk.StringVar()
-        self.training_mode_var = tk.StringVar(value="标准模式")
+        self.training_mode_var = tk.StringVar(value=saved_mode)
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
@@ -94,24 +103,35 @@ class NNLCApp:
         return Path(config_root) / "NNLC" / "settings.json"
 
     @classmethod
-    def _load_saved_car(cls) -> str:
+    def _load_preferences(cls) -> dict:
         try:
             with cls._preferences_path().open("r", encoding="utf-8") as handle:
-                value = json.load(handle).get("car", "")
-            return value.strip() if isinstance(value, str) else ""
-        except (OSError, ValueError, AttributeError):
-            return ""
+                preferences = json.load(handle)
+            if not isinstance(preferences, dict):
+                return {}
+            car = preferences.get("car")
+            if isinstance(car, str):
+                preferences["car"] = car.strip()
+            return preferences
+        except (OSError, ValueError, TypeError):
+            return {}
 
     def _save_preferences(self) -> None:
         car = self.car_var.get().strip()
-        if not car:
-            return
+        training_mode = self.training_mode_var.get()
+        if training_mode not in TRAINING_MODES:
+            training_mode = "标准模式"
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary_path = path.with_suffix(".tmp")
             with temporary_path.open("w", encoding="utf-8") as handle:
-                json.dump({"car": car}, handle, ensure_ascii=False, indent=2)
+                json.dump(
+                    {"car": car, "training_mode": training_mode},
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
                 handle.write("\n")
             os.replace(temporary_path, path)
         except OSError:
@@ -184,6 +204,7 @@ class NNLCApp:
             width=16,
         )
         self.training_mode_combo.grid(row=2, column=1, sticky="w", padx=(12, 10), pady=6)
+        self.training_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences())
         ttk.Label(options_frame, text="低内存模式使用更小批次").grid(row=2, column=2, sticky="w", pady=6)
         self.config_widgets.append(self.training_mode_combo)
 

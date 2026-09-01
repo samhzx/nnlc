@@ -79,6 +79,10 @@ $BundledTrainingScript = Join-Path $BundleDir "_internal\training\latmodel_tempo
 if (-not (Test-Path -LiteralPath $BundledTrainingScript -PathType Leaf)) {
     throw "one-dir build validation failed: training script is missing or is not a file: $BundledTrainingScript"
 }
+$BundledSocket = @(Get-ChildItem -LiteralPath (Join-Path $BundleDir "_internal") -Recurse -File -Filter "_socket*.pyd")
+if ($BundledSocket.Count -eq 0) {
+    throw "one-dir build validation failed: Python _socket extension is missing from the bundle"
+}
 Write-Host "Testing bundled Julia runtime ..."
 & $BundledJulia --version
 if ($LASTEXITCODE -ne 0) {

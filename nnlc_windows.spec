@@ -7,6 +7,8 @@ require Python, Julia, or any package installation on the target computer.
 """
 
 from pathlib import Path
+import sys
+import sysconfig
 
 from PyInstaller.building.build_main import Analysis, EXE, PYZ, COLLECT
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -62,14 +64,55 @@ def directory_datas(source_dir: Path, target_dir: str):
     ]
 
 
+def standard_library_extensions(module_name: str):
+    """Collect Windows stdlib extension modules used by runtime hooks.
+
+    PyInstaller normally discovers these through imports, but the
+    multiprocessing runtime hook can execute before the regular import graph
+    is restored. Explicitly bundling ``_socket.pyd`` prevents a one-dir build
+    from starting with ``No module named '_socket'``.
+    """
+    roots = set()
+    dest_shared = sysconfig.get_config_var("DESTSHARED")
+    platstdlib = sysconfig.get_path("platstdlib")
+    if dest_shared:
+        roots.add(Path(dest_shared))
+    if platstdlib:
+        roots.add(Path(platstdlib) / "lib-dynload")
+    roots.add(Path(sys.base_prefix) / "DLLs")
+    roots.add(Path(sys.executable).parent)
+    roots.add(Path(sys.executable).parent / "DLLs")
+    binaries = []
+    seen = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.glob(f"{module_name}*.pyd"):
+            resolved = path.resolve()
+            if resolved not in seen:
+                binaries.append((str(path), "."))
+                seen.add(resolved)
+    if not binaries:
+        raise SystemExit(
+            f"Could not locate {module_name}.pyd in the Python standard library; "
+            "the Windows bundle would be incomplete"
+        )
+    return binaries
+
+
 datas = [
     *directory_datas(PROJECT_DIR / "training", "training"),
     *directory_datas(PROJECT_DIR / "nnlc_tools" / "cereal", "nnlc_tools/cereal"),
     *directory_datas(JULIA_RUNTIME, "julia-runtime"),
     *directory_datas(JULIA_DEPOT, "julia-depot"),
 ]
-binaries = []
+binaries = standard_library_extensions("_socket")
 hiddenimports = [
+    "_socket",
+    "socket",
+    "multiprocessing",
+    "multiprocessing.context",
+    "multiprocessing.reduction",
     "nnlc_gui",
     "nnlc_tools",
     "nnlc_tools.logreader",

@@ -28,3 +28,5 @@ exe 的命令行模式也支持 `--data`、`--car`、`--min-score`、`--batch-si
 ```powershell
 python nnlc_auto_train.py --data D:\rlogs --car BYD_TANG_DMI_24 --batch-size 4096
 ```
+
+one-dir 产物必须整体解压和复制，运行 `NNLC_Trainer\NNLC_Trainer.exe`，不能只复制 exe 文件。`_internal` 目录中必须保留 Python 运行库（包括 `_socket.pyd`）；如果杀毒软件隔离该文件，请恢复文件并将整个目录加入信任列表后重新运行。
