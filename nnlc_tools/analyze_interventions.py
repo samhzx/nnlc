@@ -765,16 +765,19 @@ def main():
     events = segment_events(active_df, gap_frames=args.gap_frames)
     print(f"Segmented into {len(events):,} events (gap tolerance: {args.gap_frames} frames)")
 
-    if not events:
-        print("No override events found.")
-        return
+    # No override events is a valid dataset state. Keep the active driving
+    # rows unchanged so --prune-output still produces the training input.
+    if events:
+        events_df = classify_events_cascade(active_df, events, cfg=cfg)
+        print_summary(events_df, total_frames=len(active_df))
+    else:
+        events_df = pd.DataFrame()
+        print("No override events found; keeping all active driving frames.")
 
-    events_df = classify_events_cascade(active_df, events, cfg=cfg)
-
-    print_summary(events_df, total_frames=len(active_df))
-
-    if args.plot:
+    if args.plot and not events_df.empty:
         plot_interventions(events_df, args.output, cfg=cfg)
+    elif args.plot:
+        print("No override events; skipping intervention plot.")
 
     if args.scatter:
         import os
