@@ -38,6 +38,30 @@ import sys
 import time
 
 
+def _configure_console_encoding():
+    """Use UTF-8 when a Windows console is available.
+
+    The packaged executable has a GUI subsystem, but its ``--help`` command
+    is also used by the Windows build smoke test.  A runner using the legacy
+    cp1252 code page cannot print the Chinese argparse help text unless the
+    streams are explicitly configured as UTF-8.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, ValueError):
+            # A GUI launch can have detached streams. It must still be able
+            # to open the Tk interface without a console.
+            pass
+
+
+_configure_console_encoding()
+
+
 # ============================================================
 # 配置
 # ============================================================

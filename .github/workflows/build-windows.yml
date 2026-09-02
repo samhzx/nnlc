@@ -35,6 +35,7 @@ jobs:
       - name: Verify one-dir bundle
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $bundleDir = "dist\NNLC_Trainer"
           $bundleExe = Join-Path $bundleDir "NNLC_Trainer.exe"
           if (-not (Test-Path $bundleExe)) {
@@ -64,9 +65,11 @@ jobs:
           if ($socketExtensions.Count -eq 0) {
             throw "Python _socket extension is missing from the one-dir bundle"
           }
-          & $bundleExe --help
-          if ($LASTEXITCODE -ne 0) {
-            throw "Bundled NNLC_Trainer --help failed ($LASTEXITCODE)"
+          $helpOutput = (& $bundleExe --help 2>&1 | Out-String)
+          $helpExitCode = $LASTEXITCODE
+          Write-Host $helpOutput
+          if ($helpExitCode -ne 0 -or $helpOutput -match "Traceback|UnicodeEncodeError") {
+            throw "Bundled NNLC_Trainer --help failed or printed a Python traceback ($helpExitCode)"
           }
           $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
           if ($fileCount -lt 10) {
