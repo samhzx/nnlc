@@ -364,13 +364,17 @@ def validate_data_dir(data_dir):
 # 训练流程
 # ============================================================
 
-def step_extract(data_dir, output_dir, python_exe):
+def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False):
     """步骤1: 提取横向控制数据。"""
     output_csv = os.path.join(output_dir, "lateral_data.csv")
+    command = [python_exe, "-m", "nnlc_tools.extract_lateral_data", data_dir,
+               "-o", output_csv, "--temporal"]
+    if skip_corrupt_rlogs:
+        command.append("--skip-corrupt")
     run_command(
-        [python_exe, "-m", "nnlc_tools.extract_lateral_data", data_dir,
-         "-o", output_csv, "--temporal"],
-        "提取横向控制数据（含时序特征）",
+        command,
+        "提取横向控制数据（含时序特征，跳过损坏日志）"
+        if skip_corrupt_rlogs else "提取横向控制数据（含时序特征）",
     )
 
     # 验证输出
@@ -704,7 +708,7 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
 def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                skip_visualize=False, output_dir=None, deploy_dir=None,
                cancel_event=None, process_holder=None, batch_size=16384,
-               force_cpu=True):
+               force_cpu=True, skip_corrupt_rlogs=False):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -719,6 +723,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         process_holder: 可选的当前子进程共享容器
         batch_size: Julia 训练批次大小，默认 16384；较小值可降低内存峰值
         force_cpu: 兼容旧调用方的参数；当前训练始终使用 CPU
+        skip_corrupt_rlogs: 是否跳过无法解析的损坏 rlog 并继续提取
 
     Returns:
         模型文件路径
@@ -758,7 +763,10 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # ---- 步骤 1: 提取数据 ----
     _raise_if_cancelled(cancel_event)
     print_step(1, total_steps, "提取横向控制数据")
-    lateral_csv = step_extract(data_dir, output_dir, python_exe)
+    lateral_csv = step_extract(
+        data_dir, output_dir, python_exe,
+        skip_corrupt_rlogs=skip_corrupt_rlogs,
+    )
 
     # ---- 步骤 2: 评估路线质量 ----
     _raise_if_cancelled(cancel_event)
@@ -924,6 +932,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16384,
                         help="Julia 训练批次大小（默认 16384；低内存可使用 4096）")
     parser.add_argument("--cpu", action="store_true", help="兼容参数；训练始终使用 CPU")
+    parser.add_argument("--skip-corrupt", action="store_true",
+                        help="跳过无法解析的损坏 rlog 并继续提取")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
 
     args = parser.parse_args()
@@ -957,6 +967,7 @@ def main():
         deploy_dir=args.deploy_dir,
         batch_size=args.batch_size,
         force_cpu=True,
+        skip_corrupt_rlogs=args.skip_corrupt,
     )
 
 

@@ -296,14 +296,17 @@ cp my_car_model.json /path/to/openpilot/sunnypilot/neural_network_data/neural_ne
 ### extract_lateral_data
 
 ```
-python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] input
+python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] [--skip-corrupt] input
 
   input               包含 rlog 文件的目录
   -o, --output        输出文件路径（默认：lateral_data.csv）
   --format            输出格式（默认：根据扩展名推断）
   --temporal          添加 NNLC 训练所需的时序滞后/超前列
   --filter-overrides  删除驾驶员接管的行（steering_pressed=True）
+  --skip-corrupt      跳过无法解析的损坏 rlog，继续处理其他文件并在末尾列出
 ```
+
+提取器默认使用严格模式，遇到损坏日志会立即停止。确认部分日志可能在下载时仍处于写入状态时，可使用 `--skip-corrupt` 跳过这些文件；训练前应检查日志中的跳过清单，并确认剩余数据量充足。
 
 ### score_routes
 

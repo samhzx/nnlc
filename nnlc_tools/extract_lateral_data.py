@@ -411,6 +411,8 @@ def main():
                         help="Add temporal lag/lead columns for NNLC training")
     parser.add_argument("--filter-overrides", action="store_true",
                         help="Drop rows where driver overrides (steering_pressed=True)")
+    parser.add_argument("--skip-corrupt", action="store_true",
+                        help="Skip unreadable/corrupt rlog files and continue; report them at the end")
     args = parser.parse_args()
 
     if not os.path.isdir(args.input):
@@ -423,6 +425,26 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(rlog_files)} rlog files")
+    skipped_rlogs = []
+
+    def process_rlog(rlog_path, stream):
+        """Extract one file, optionally continuing after a corrupt segment."""
+        stream.route_id = extract_route_id(rlog_path)
+        try:
+            extract_segment(rlog_path, row_callback=stream.accept)
+        except Exception as exc:
+            if not args.skip_corrupt:
+                raise
+            skipped_rlogs.append((rlog_path, str(exc)))
+            print(f"WARNING: Skipping unreadable rlog: {rlog_path}")
+            print(f"  Reason: {exc}")
+            # Do not let a failed segment's temporal buffer affect the next
+            # segment. Construction-time parse failures normally have no
+            # pending rows, while this also handles iteration-time failures.
+            stream.pending.clear()
+            stream.past.clear()
+            return
+        stream.finish_segment()
 
     # Determine output format
     fmt = args.format
@@ -440,14 +462,16 @@ def main():
                                      filter_overrides=args.filter_overrides)
         try:
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-                stream.route_id = extract_route_id(rlog_path)
-                extract_segment(rlog_path, row_callback=stream.accept)
-                stream.finish_segment()
+                process_rlog(rlog_path, stream)
         finally:
             stream.finish()
             stream.close()
 
         if stream.rows_written == 0:
+            if skipped_rlogs:
+                print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
+                for path, reason in skipped_rlogs:
+                    print(f"  - {path}: {reason}")
             print("ERROR: No data extracted from any rlog files")
             sys.exit(1)
         print(f"Extracted {stream.rows_written} rows")
@@ -468,11 +492,13 @@ def main():
                                      filter_overrides=args.filter_overrides)
         try:
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-                stream.route_id = extract_route_id(rlog_path)
-                extract_segment(rlog_path, row_callback=stream.accept)
-                stream.finish_segment()
+                process_rlog(rlog_path, stream)
             stream.finish()
             if stream.rows_written == 0:
+                if skipped_rlogs:
+                    print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
+                    for path, reason in skipped_rlogs:
+                        print(f"  - {path}: {reason}")
                 print("ERROR: No data extracted from any rlog file")
                 sys.exit(1)
             df = pd.read_csv(temp_path)
@@ -485,6 +511,10 @@ def main():
             except FileNotFoundError:
                 pass
 
+    if skipped_rlogs:
+        print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
+        for path, reason in skipped_rlogs:
+            print(f"  - {path}: {reason}")
     print(f"Saved to {args.output} ({fmt})")
 
 
