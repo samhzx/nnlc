@@ -409,6 +409,15 @@ def plot_intervention_scatter(df, output_path, max_points=None):
 
     MS_TO_MPH = 2.23694
 
+    def save_empty_plot(message):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.text(0.5, 0.5, message, ha="center", va="center")
+        ax.set_axis_off()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved intervention scatter to {output_path}")
+        plt.close()
+
     lat_accel_col = None
     for col in ["actual_lateral_accel", "desired_lateral_accel"]:
         if col in df.columns and df[col].notna().sum() > 0:
@@ -417,10 +426,12 @@ def plot_intervention_scatter(df, output_path, max_points=None):
 
     if lat_accel_col is None:
         print("WARNING: No lateral acceleration data found for scatter plot.")
+        save_empty_plot("No lateral acceleration data")
         return
 
     if "torque_output" not in df.columns:
         print("WARNING: No torque_output column. Skipping intervention scatter.")
+        save_empty_plot("No torque output data")
         return
 
     valid = df[[lat_accel_col, "torque_output", "v_ego", "_intervention"]].dropna(
@@ -558,6 +569,18 @@ def plot_interventions(events_df, output_path, cfg=None):
     if cfg is None:
         from nnlc_tools.steering_classifier.config import ClassifierConfig
         cfg = ClassifierConfig()
+
+    if events_df.empty:
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle("Driver Intervention Classification", fontsize=13, fontweight="bold")
+        for ax in axes.flat:
+            ax.text(0.5, 0.5, "No override events", ha="center", va="center")
+            ax.set_axis_off()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved interventions plot to {output_path}")
+        plt.close()
+        return
 
     driver = events_df[events_df["classification"] == "driver"]
     mechanical = events_df[events_df["classification"] == "mechanical"]
@@ -774,10 +797,8 @@ def main():
         events_df = pd.DataFrame()
         print("No override events found; keeping all active driving frames.")
 
-    if args.plot and not events_df.empty:
+    if args.plot:
         plot_interventions(events_df, args.output, cfg=cfg)
-    elif args.plot:
-        print("No override events; skipping intervention plot.")
 
     if args.scatter:
         import os

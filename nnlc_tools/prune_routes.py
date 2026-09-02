@@ -19,6 +19,17 @@ import pandas as pd
 from nnlc_tools.score_routes import score_route
 
 
+def parse_score_threshold(value):
+    """Parse a route score threshold in the valid 0-100 range."""
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("--min-score must be an integer from 0 to 100") from exc
+    if not 0 <= threshold <= 100:
+        raise argparse.ArgumentTypeError("--min-score must be an integer from 0 to 100")
+    return threshold
+
+
 def _infer_route_col(df):
     """Return name of route column, or None if absent."""
     if "route_id" in df.columns:
@@ -86,7 +97,7 @@ def main():
     parser.add_argument("input", help="CSV/Parquet file from nnlc-extract")
     parser.add_argument("-o", "--output", default="pruned_routes.csv",
                         help="Output path (default: pruned_routes.csv)")
-    parser.add_argument("--min-score", type=int, default=0,
+    parser.add_argument("--min-score", type=parse_score_threshold, default=0,
                         help="Exclude routes scoring below this value (default: 0, no exclusion)")
     parser.add_argument("--keep-saturated", action="store_true",
                         help="Do not drop saturated frames")

@@ -81,6 +81,18 @@ def plot_features(feat_df, output_path, cfg):
     """Generate 3×3 diagnostic plot of cascade features."""
     import matplotlib.pyplot as plt
 
+    if feat_df.empty:
+        fig, axes = plt.subplots(3, 3, figsize=(15, 13))
+        fig.suptitle("Steering Classifier — Feature Diagnostics", fontsize=13, fontweight="bold")
+        for ax in axes.flat:
+            ax.text(0.5, 0.5, "No override events", ha="center", va="center")
+            ax.set_axis_off()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved feature plot to {output_path}")
+        plt.close()
+        return
+
     driver = feat_df[feat_df["label"] == "driver"]
     mechanical = feat_df[feat_df["label"] == "mechanical"]
 
@@ -303,6 +315,7 @@ def main():
 
     if not events:
         print("No override events found.")
+        plot_features(pd.DataFrame(), args.output, cfg)
         return
 
     feat_df = build_features_df(active_df, events, cfg)

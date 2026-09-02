@@ -26,8 +26,10 @@
 
 import argparse
 import contextlib
+import csv
 import io
 import json
+import math
 import os
 import runpy
 import shutil
@@ -246,6 +248,33 @@ def run_command(cmd, description, check=True):
     return result
 
 
+def count_data_rows(path):
+    """Count non-empty data records in the CSV files used by the pipeline."""
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle)
+        next(reader, None)  # header
+        return sum(1 for row in reader if row)
+
+
+def parse_score_threshold(value):
+    """Parse a route score threshold accepted by CLI arguments."""
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("阈值必须是 0-100 的整数") from exc
+    if not 0 <= threshold <= 100:
+        raise argparse.ArgumentTypeError("阈值必须在 0-100 之间")
+    return threshold
+
+
+def validate_score_threshold(value):
+    """Validate a route score threshold supplied by a Python caller."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+        raise ValueError("min_score 必须是 0-100 的整数")
+
+
 def _raise_if_cancelled(cancel_event):
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("训练已取消")
@@ -325,9 +354,11 @@ def step_extract(data_dir, output_dir, python_exe):
         raise RuntimeError(f"提取数据失败，输出文件未生成: {output_csv}")
 
     # 统计行数
-    with open(output_csv, "r", encoding="utf-8") as f:
-        row_count = sum(1 for _ in f) - 1  # 减去表头
+    row_count = count_data_rows(output_csv)
     print_ok(f"提取 {row_count:,} 行数据")
+
+    if row_count <= 0:
+        raise RuntimeError(f"提取数据为空，无法继续训练: {output_csv}")
 
     if row_count < 10000:
         print_warn(f"数据量偏少 ({row_count:,} 行)，建议补充采集")
@@ -389,9 +420,14 @@ def step_prune(input_csv, min_score, output_dir, python_exe):
     if not os.path.exists(output_csv):
         raise RuntimeError(f"修剪路线失败，输出文件未生成: {output_csv}")
 
-    with open(output_csv, "r", encoding="utf-8") as f:
-        row_count = sum(1 for _ in f) - 1
+    row_count = count_data_rows(output_csv)
     print_ok(f"修剪后 {row_count:,} 行")
+
+    if row_count <= 0:
+        raise RuntimeError(
+            f"路线剪枝后没有剩余数据: {output_csv}。"
+            "请降低路线阈值或检查 rlog 数据。"
+        )
 
     if row_count < 5000:
         print_warn(f"修剪后数据量严重不足 ({row_count:,} 行)，考虑降低 min-score 或补充数据")
@@ -413,9 +449,14 @@ def step_interventions(input_csv, output_dir, python_exe):
     if not os.path.exists(output_csv):
         raise RuntimeError(f"移除干预帧失败，输出文件未生成: {output_csv}")
 
-    with open(output_csv, "r", encoding="utf-8") as f:
-        row_count = sum(1 for _ in f) - 1
+    row_count = count_data_rows(output_csv)
     print_ok(f"最终训练数据 {row_count:,} 行")
+
+    if row_count <= 0:
+        raise RuntimeError(
+            f"移除干预帧后没有剩余数据: {output_csv}。"
+            "请检查有效驾驶数据或减少剪枝范围。"
+        )
 
     return output_csv
 
@@ -536,8 +577,12 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe):
     if input_size != REQUIRED_INPUT_SIZE:
         issues.append(f"input_size={input_size} (应为 {REQUIRED_INPUT_SIZE})")
 
-    test_loss = params.get("model_test_loss", float("inf"))
-    if test_loss > MAX_TEST_LOSS:
+    raw_test_loss = params.get("model_test_loss", float("inf"))
+    try:
+        test_loss = float(raw_test_loss)
+    except (TypeError, ValueError):
+        test_loss = float("inf")
+    if not math.isfinite(test_loss) or test_loss > MAX_TEST_LOSS:
         issues.append(f"model_test_loss={test_loss:.6f} (应 < {MAX_TEST_LOSS})")
 
     # 检查 input_vars 顺序
@@ -567,12 +612,22 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe):
     viz_data = balanced_csv if os.path.exists(balanced_csv) else train_data_csv
 
     try:
-        run_command(
+        validation_result = run_command(
             [python_exe, "-m", "nnlc_tools.visualize_model", model_json,
              viz_data, "-o", validation_dir],
             "生成模型验证图表",
             check=False,
         )
+        if validation_result.returncode != 0:
+            print_warn("模型验证图表生成失败，但不影响模型质量判定。")
+        else:
+            expected_plots = ("lat_accel_vs_torque.png", "torque_vs_speed.png")
+            missing_plots = [
+                name for name in expected_plots
+                if not os.path.isfile(os.path.join(validation_dir, name))
+            ]
+            if missing_plots:
+                print_warn(f"模型验证图表缺失: {', '.join(missing_plots)}")
     except Exception as e:
         print_warn(f"验证图表生成失败: {e}")
 
@@ -642,6 +697,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     total_steps = 8 if not skip_visualize else 7
     python_exe = get_python_exe()
     _raise_if_cancelled(cancel_event)
+    validate_score_threshold(min_score)
 
     # 前置检查
     print(f"\n{Colors.HEADER}{'='*60}")
@@ -714,6 +770,9 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     print_step(validate_step, total_steps, "验证模型质量")
     quality_ok = step_validate(model_json, final_csv, output_dir, python_exe)
 
+    if not quality_ok:
+        raise RuntimeError("模型质量验证未通过，已停止部署；请调整参数或补充数据后重试。")
+
     # ---- 步骤 8: 部署 ----
     _raise_if_cancelled(cancel_event)
     deploy_step = validate_step + 1
@@ -729,7 +788,10 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # 读取模型质量数据
     with open(model_json, "r", encoding="utf-8") as f:
         params = json.load(f)
-    test_loss = params.get("model_test_loss", float("inf"))
+    try:
+        test_loss = float(params.get("model_test_loss", float("inf")))
+    except (TypeError, ValueError):
+        test_loss = float("inf")
 
     print(f"  车型:        {car_name}")
     print(f"  数据目录:    {data_dir}")
@@ -770,8 +832,8 @@ def interactive_mode():
     min_score = None
     if min_score_input:
         try:
-            min_score = int(min_score_input)
-        except ValueError:
+            min_score = parse_score_threshold(min_score_input)
+        except argparse.ArgumentTypeError:
             print_warn("阈值输入无效，将使用自动推荐值")
 
     # 是否跳过部署
@@ -815,7 +877,7 @@ def main():
     )
     parser.add_argument("--data", "-d", help="rlog 数据目录")
     parser.add_argument("--car", "-c", help="车型名称 (carFingerprint)")
-    parser.add_argument("--min-score", type=int, default=None,
+    parser.add_argument("--min-score", type=parse_score_threshold, default=None,
                         help="路线修剪阈值 (默认自动推荐)")
     parser.add_argument("--skip-deploy", action="store_true",
                         help="跳过部署到 openpilot 项目")

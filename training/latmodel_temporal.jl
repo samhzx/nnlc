@@ -154,8 +154,12 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     # 列顺序：v_ego, desired_lateral_accel, friction_input, roll, torque_output, 时序desired_lat(7), 时序roll(7)
     select!(data, vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols))
 
+    if nrow(data) == 0
+      error("No valid training rows remain after active/standstill filtering")
+    end
+
     println(out_streams, f"Loaded {nrow(data)} rows")
-    println(out_streams, f"Data {data[sample(1:nrow(data), 20), :]}")
+    println(out_streams, f"Data {data[sample(1:nrow(data), min(20, nrow(data))), :]}")
     for col in names(data)
       if typeof(data[1, col]) == Float64
         println(out_streams, "$col: $(describe(collect(data[:,col])))")
@@ -213,6 +217,10 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     println(out_streams, f"Filtered out {old_nrows - nrow(data)} points with roll outside [{-mm_roll[2]}, {mm_roll[2]}]")
     println(out_streams, f"{nrow(data)} rows after filtering")
 
+    if nrow(data) == 0
+      error("No training rows remain after range filtering")
+    end
+
     for col in names(data)
       if typeof(data[1, col]) == Float64
         println(out_streams, "$col: $(describe(collect(data[:,col])))")
@@ -230,6 +238,9 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     
     # balance the data
     unique_bins = unique(data[!, :combined_column])
+    if isempty(unique_bins)
+      error("No training bins remain after preprocessing")
+    end
     prog = ProgressMeter.Progress(length(unique_bins), 1, "Balancing bins:")
     println(out_streams, f"Balancing data into {length(unique_bins)} bins")
 
@@ -280,6 +291,10 @@ end
 function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=false, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
   model_path = joinpath(working_dir, Base.basename(working_dir))
 
+  if nrow(data) < 2
+    error("At least two training rows are required")
+  end
+
   feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
 
   # Compute normalization statistics column by column. This avoids another
@@ -289,11 +304,15 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   for (index, column_name) in enumerate(feature_names)
     column = Float32.(data[!, column_name])
     input_mean[1, index] = mean(column)
-    input_std[1, index] = std(column)
+    column_std = std(column)
+    input_std[1, index] = isfinite(column_std) && column_std > 0f0 ? Float32(column_std) : 1f0
   end
 
   # split into train and test sets
   train, test = stratifiedobs(row->row[:combined_column], data, p = 0.8)
+  if nrow(train) == 0 || nrow(test) == 0
+    error("Training/test split produced an empty partition; provide more varied data")
+  end
 
   # Keep only the numeric training columns. Symmetric examples are generated
   # per batch below instead of duplicating both DataFrames in memory.

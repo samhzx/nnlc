@@ -26,6 +26,17 @@ CRITERIA = [
 ]
 
 
+def parse_score_threshold(value):
+    """Parse a route score threshold in the valid 0-100 range."""
+    try:
+        threshold = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("--min-score must be an integer from 0 to 100") from exc
+    if not 0 <= threshold <= 100:
+        raise argparse.ArgumentTypeError("--min-score must be an integer from 0 to 100")
+    return threshold
+
+
 def extract_route_id(path):
     """Extract route ID from rlog path by stripping --segment_num suffix.
 
@@ -112,11 +123,15 @@ def main():
         description="Score route quality for NNLC training data.",
     )
     parser.add_argument("input", help="CSV/Parquet file or directory of rlogs")
-    parser.add_argument("--min-score", type=int, default=0,
+    parser.add_argument("--min-score", type=parse_score_threshold, default=0,
                         help="Only show routes with score >= this value")
     args = parser.parse_args()
 
     df, route_col = load_data_with_routes(args.input)
+
+    if df.empty:
+        print("ERROR: Input contains no data rows")
+        sys.exit(1)
 
     if route_col is None:
         # CSV/Parquet without route_id — try to infer from timestamp gaps

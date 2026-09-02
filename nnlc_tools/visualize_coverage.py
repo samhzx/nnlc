@@ -227,6 +227,17 @@ def plot_torque_scatter(df, output_path, max_points=None):
     """Generate lat_accel vs torque scatter plots split by speed bin (10 mph steps)."""
     import math
 
+    import matplotlib.pyplot as plt
+
+    def save_empty_plot(message):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.text(0.5, 0.5, message, ha="center", va="center")
+        ax.set_axis_off()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved torque scatter plot to {output_path}")
+        plt.close()
+
     # Determine lateral accel column
     lat_accel_col = None
     for col in ["actual_lateral_accel", "desired_lateral_accel"]:
@@ -236,10 +247,12 @@ def plot_torque_scatter(df, output_path, max_points=None):
 
     if lat_accel_col is None:
         print("WARNING: No lateral acceleration data found for torque scatter.")
+        save_empty_plot("No lateral acceleration data")
         return
 
     if "torque_output" not in df.columns:
         print("WARNING: No torque_output column found. Skipping torque scatter plot.")
+        save_empty_plot("No torque output data")
         return
 
     # Filter to active driving only

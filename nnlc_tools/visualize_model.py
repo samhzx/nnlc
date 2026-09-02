@@ -110,13 +110,57 @@ def filter_active(df):
 MS_TO_MPH = 2.23694
 
 
+def save_placeholder_plot(output_path, title, message):
+    """Write a diagnostic image even when the input data cannot be plotted."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.set_title(title)
+    ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
+    ax.set_axis_off()
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved placeholder plot to {output_path}")
+
+
+def resolve_lateral_columns(model, df):
+    """Resolve the observed and model lateral-acceleration columns.
+
+    New temporal models use ``desired_lateral_accel`` as the base feature,
+    while older models may use ``actual_lateral_accel``.  Keep the plotted
+    data and model sweep aligned with whichever base feature the model has.
+    """
+    data_candidates = ["actual_lateral_accel", "desired_lateral_accel"]
+    available_data = [column for column in data_candidates if column in df.columns]
+    if not available_data:
+        return None, None
+
+    for column in data_candidates:
+        if column in df.columns and column in model.input_vars:
+            return column, column
+    for column in data_candidates:
+        if column in model.input_vars:
+            return available_data[0], column
+    return available_data[0], None
+
+
 def plot_lat_accel_vs_torque(model, df, output_path):
     """Generate per-speed-bin plots: lat_accel (x) vs torque (y)."""
     df = filter_active(df)
 
-    lat_col = "actual_lateral_accel" if "actual_lateral_accel" in df.columns else "desired_lateral_accel"
-    if lat_col not in df.columns or "torque_output" not in df.columns:
-        print("WARNING: Missing required columns for lat_accel_vs_torque plot.")
+    lat_col, model_lat_col = resolve_lateral_columns(model, df)
+    required = ["v_ego", "torque_output"]
+    missing = [column for column in required if column not in df.columns]
+    if lat_col is None:
+        missing.append("actual_lateral_accel or desired_lateral_accel")
+    if model_lat_col is None:
+        missing.append("matching lateral acceleration input in model")
+    if "v_ego" not in model.input_vars:
+        missing.append("v_ego input in model")
+    if missing:
+        message = "Missing required columns: " + ", ".join(missing)
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "Lateral Accel vs Torque", message)
         return
 
     valid = df[["v_ego", lat_col, "torque_output"]].dropna()
@@ -133,7 +177,8 @@ def plot_lat_accel_vs_torque(model, df, output_path):
     fig.suptitle("Lateral Accel vs Torque by Speed Bin", fontsize=14, fontweight="bold")
 
     lat_sweep = np.linspace(-3.5, 3.5, 200)
-    lat_idx = model.var_index(lat_col) if lat_col in model.input_vars else model.var_index("actual_lateral_accel")
+    lat_idx = model.var_index(model_lat_col)
+    speed_idx = model.var_index("v_ego")
 
     for i, speed_lo in enumerate(speed_bins):
         speed_hi = speed_lo + 10
@@ -149,7 +194,7 @@ def plot_lat_accel_vs_torque(model, df, output_path):
         # Model prediction curve at bin midpoint speed
         mid_speed_ms = (speed_lo + speed_hi) / 2.0 / MS_TO_MPH
         x_input = model.make_input_at_means(len(lat_sweep))
-        x_input[:, model.var_index("v_ego")] = mid_speed_ms
+        x_input[:, speed_idx] = mid_speed_ms
         x_input[:, lat_idx] = lat_sweep
         # Set temporal lat_accel vars to the sweep value too
         for var in model.input_vars:
@@ -180,9 +225,19 @@ def plot_torque_vs_speed(model, df, output_path):
     """Generate per-lat_accel-bin plots: speed (x) vs torque (y)."""
     df = filter_active(df)
 
-    lat_col = "actual_lateral_accel" if "actual_lateral_accel" in df.columns else "desired_lateral_accel"
-    if lat_col not in df.columns or "torque_output" not in df.columns:
-        print("WARNING: Missing required columns for torque_vs_speed plot.")
+    lat_col, model_lat_col = resolve_lateral_columns(model, df)
+    required = ["v_ego", "torque_output"]
+    missing = [column for column in required if column not in df.columns]
+    if lat_col is None:
+        missing.append("actual_lateral_accel or desired_lateral_accel")
+    if model_lat_col is None:
+        missing.append("matching lateral acceleration input in model")
+    if "v_ego" not in model.input_vars:
+        missing.append("v_ego input in model")
+    if missing:
+        message = "Missing required columns: " + ", ".join(missing)
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "Torque vs Speed", message)
         return
 
     valid = df[["v_ego", lat_col, "torque_output"]].dropna()
@@ -202,7 +257,8 @@ def plot_torque_vs_speed(model, df, output_path):
 
     speed_sweep_mph = np.linspace(0, 90, 200)
     speed_sweep_ms = speed_sweep_mph / MS_TO_MPH
-    lat_idx = model.var_index(lat_col) if lat_col in model.input_vars else model.var_index("actual_lateral_accel")
+    lat_idx = model.var_index(model_lat_col)
+    speed_idx = model.var_index("v_ego")
 
     for i in range(n_bins):
         lat_lo = lat_bin_edges[i]
@@ -219,7 +275,7 @@ def plot_torque_vs_speed(model, df, output_path):
         # Model prediction curve at bin midpoint lat_accel
         mid_lat = (lat_lo + lat_hi) / 2.0
         x_input = model.make_input_at_means(len(speed_sweep_ms))
-        x_input[:, model.var_index("v_ego")] = speed_sweep_ms
+        x_input[:, speed_idx] = speed_sweep_ms
         x_input[:, lat_idx] = mid_lat
         for var in model.input_vars:
             if var.startswith("actual_lateral_accel_t") or var.startswith("desired_lateral_accel_t"):

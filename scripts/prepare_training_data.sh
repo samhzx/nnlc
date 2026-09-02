@@ -39,6 +39,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$MIN_SCORE" ]] && {
+  ! [[ "$MIN_SCORE" =~ ^[0-9]+$ ]] || (( MIN_SCORE < 0 || MIN_SCORE > 100 ));
+}; then
+  echo "Error: --min-score must be an integer from 0 to 100" >&2
+  exit 1
+fi
+
 banner() {
   echo ""
   echo "════════════════════════════════════════════════════════════"
@@ -76,9 +83,11 @@ uv run nnlc-score "${SCORE_ARGS[@]}"
 
 # Step 4: Prune routes
 banner "Step 4/6: Pruning routes"
-uv run nnlc-prune-routes "$RUN_DIR/lateral_data.csv" \
-    -o "$RUN_DIR/lateral_data_routes_pruned.csv" \
-    ${MIN_SCORE:+--min-score "$MIN_SCORE"}
+PRUNE_ARGS=("$RUN_DIR/lateral_data.csv" -o "$RUN_DIR/lateral_data_routes_pruned.csv")
+if [[ -n "$MIN_SCORE" ]]; then
+  PRUNE_ARGS+=(--min-score "$MIN_SCORE")
+fi
+uv run nnlc-prune-routes "${PRUNE_ARGS[@]}"
 
 # Step 5: Visualize coverage
 banner "Step 5/6: Visualizing data coverage"

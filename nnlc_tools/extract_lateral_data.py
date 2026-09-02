@@ -157,8 +157,7 @@ def extract_segment(rlog_path, row_callback=None):
     try:
         lr = LogReader(rlog_path, sort_by_time=True)
     except Exception as e:
-        print(f"  WARNING: Could not open {rlog_path}: {e}")
-        return rows
+        raise RuntimeError(f"Could not open {rlog_path}: {e}") from e
 
     try:
         for msg in lr:
@@ -264,7 +263,7 @@ def extract_segment(rlog_path, row_callback=None):
                 ]
                 emit_row(row)
     except Exception as e:
-        print(f"  WARNING: Error processing {rlog_path}: {e}")
+        raise RuntimeError(f"Error processing {rlog_path}: {e}") from e
 
     return rows if rows is not None else []
 
