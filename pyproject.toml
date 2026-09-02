@@ -13,16 +13,14 @@ dependencies = [
     "matplotlib>=3.7,<4.0",
     "tqdm>=4.65",
     "zstandard>=0.21",
-    "paramiko>=3.0",
     "pycapnp>=2.0",
     "scipy>=1.10",
 ]
 
 [project.urls]
-Repository = "https://github.com/amzoo/openpilot-nnlc-tools"
+Repository = "https://github.com/samhzx/nnlc"
 
 [project.scripts]
-nnlc-sync = "nnlc_tools.sync_rlogs:main"
 nnlc-extract = "nnlc_tools.extract_lateral_data:main"
 nnlc-score = "nnlc_tools.score_routes:main"
 nnlc-visualize = "nnlc_tools.visualize_coverage:main"

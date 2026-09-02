@@ -701,6 +701,10 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     """
     # GPU training is intentionally not exposed by this application.
     force_cpu = True
+    # Coverage and validation charts are generated from the worker thread in
+    # the Tk GUI.  Force a non-interactive backend so matplotlib never tries
+    # to create a second Tk event loop on Windows.
+    os.environ["MPLBACKEND"] = "Agg"
     total_steps = 8 if not skip_visualize else 7
     python_exe = get_python_exe()
     _raise_if_cancelled(cancel_event)

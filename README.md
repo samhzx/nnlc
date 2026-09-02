@@ -140,19 +140,14 @@ NNLC 使用针对每辆车的神经网络替代标准扭矩横向控制器，学
 ## 安装
 
 ```bash
-git clone https://github.com/amzoo/openpilot-nnlc-tools.git
-cd openpilot-nnlc-tools
+git clone https://github.com/samhzx/nnlc.git
+cd nnlc
 
 # 使用 uv 创建虚拟环境（推荐）
 uv venv
 uv pip install -e .
 # 仅在需要读写 Parquet 时额外安装：
 # uv pip install -e ".[parquet]"
-```
-
-也可以使用安装脚本（包括安装 uv 在内会自动处理所有步骤）：
-```bash
-bash scripts/setup.sh
 ```
 
 所有命令行工具都可以通过 `uv run` 运行（会自动发现 `.venv`，无需手动激活）：
@@ -162,43 +157,11 @@ uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
 
 ## 快速开始
 
-完整流程：**同步 → 提取 → 评分 → 剪枝路线 → 可视化 → 分类并剪枝 → 训练 → 部署**
-
-### 一条命令运行完整流程
-
-`scripts/prepare_training_data.sh` chains steps 1-6 into a single command:
-
-```bash
-# 包含设备同步的完整流程
-bash scripts/prepare_training_data.sh -d 192.168.1.161
-
-# 不同步（rlogs 已位于 ./data）
-bash scripts/prepare_training_data.sh
-
-# 自定义输出目录和最低评分筛选
-bash scripts/prepare_training_data.sh -o ./my_output --min-score 70
-```
+完整流程：**提取 → 评分 → 剪枝路线 → 可视化 → 分类并剪枝 → 训练 → 部署**。请先将设备中的 rlog 文件复制到本地目录，再从下面的第 1 步开始。
 
 也可以逐步运行：
 
-### 1. 从设备同步 rlogs
-
-**Mac 桌面快捷方式：** 将 `scripts/sync_device.command` 复制到桌面并双击，弹窗会提示输入设备 IP（预填 `192.168.1.161`），随后同步到 `./data/`。
-
-```bash
-cp scripts/sync_device.command ~/Desktop/
-```
-
-也可以直接运行：
-
-```bash
-python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data
-
-# 先执行试运行，查看将要同步的内容
-python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data --dry-run
-```
-
-### 2. 提取横向数据
+### 1. 提取横向数据
 
 ```bash
 # 基本提取
@@ -211,7 +174,7 @@ python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv -
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parquet --format parquet
 ```
 
-### 3. 评估路线质量
+### 2. 评估路线质量
 
 ```bash
 python3 -m nnlc_tools.score_routes ./data
@@ -223,7 +186,7 @@ python3 -m nnlc_tools.score_routes ./output/lateral_data.csv
 python3 -m nnlc_tools.score_routes ./output/lateral_data.csv --min-score 70
 ```
 
-### 4. 剪枝路线
+### 3. 剪枝路线
 
 ```bash
 # 删除饱和帧和变道帧，不排除路线（默认）
@@ -236,7 +199,7 @@ uv run nnlc-prune-routes ./output/lateral_data.csv --min-score 60 -o ./output/la
 uv run nnlc-prune-routes ./output/lateral_data.csv --keep-saturated -o ./output/lateral_data_routes_pruned.csv
 ```
 
-### 5. 可视化数据覆盖度
+### 4. 可视化数据覆盖度
 
 ```bash
 python3 -m nnlc_tools.visualize_coverage ./output/lateral_data_routes_pruned.csv -o ./output/coverage.png
@@ -250,7 +213,7 @@ python3 -m nnlc_tools.visualize_coverage ./output/lateral_data_routes_pruned.csv
 - **接管密度热力图** — 接管事件在车速 × 横向加速度上的分布
 - **接管期间的扭矩幅值** — `steering_pressed` 时驾驶员扭矩输入的分布
 
-### 6. 分类并剪枝干预事件
+### 5. 分类并剪枝干预事件
 
 ```bash
 # 剪除所有接管帧（驾驶员 + 机械干扰）——默认
@@ -272,14 +235,14 @@ uv run nnlc-sc-visualize ./output/lateral_data_routes_pruned.csv -o ./output/sc_
 
 级联分类器会将每个 `steering_pressed` 事件标记为**驾驶员**干预或**机械**干扰（坑洼/颠簸）。`--prune-output` 会将删除所选事件类型后的有效帧写入文件。默认值为 `both`，即删除所有接管帧，以获得最干净的训练信号；使用 `--prune mechanical` 可在数据中保留驾驶员修正。
 
-### 7. 检查覆盖度并迭代
+### 6. 检查覆盖度并迭代
 
 检查第 4 步生成的覆盖度图。如果看到红色区间（样本少于 50 的缺口），请在训练前针对这些条件继续采集驾驶数据。常见缺口包括：
 - 低速急转弯（城市驾驶）
 - 高速缓弯（高速公路）
 - 某一侧转向数据明显多于另一侧
 
-### 8. 训练模型
+### 7. 训练模型
 
 Julia 配置和训练说明请参见 [training/README.md](training/README.md)。
 
@@ -297,7 +260,7 @@ julia latmodel_temporal.jl ../output/latmodels
 bash training/run.sh ./output/latmodels --cpu
 ```
 
-### 9. 部署模型
+### 8. 部署模型
 
 将输出的 JSON 复制到 openpilot 安装目录：
 
@@ -329,19 +292,6 @@ cp my_car_model.json /path/to/openpilot/sunnypilot/neural_network_data/neural_ne
 - 停车场（低速且经常在静止状态转向）
 
 ## 工具参考
-
-### sync_rlogs
-
-```
-python -m nnlc_tools.sync_rlogs [-h] -d DEVICE -o OUTPUT [-u USER] [-p PATH] [--dry-run] [--no-rsync]
-
-  -d, --device     设备 IP 地址
-  -o, --output     本地输出目录
-  -u, --user       SSH 用户名（默认：comma）
-  -p, --path       设备 rlog 路径（默认：/data/media/0/realdata/）
-  --dry-run        显示将要同步的内容
-  --no-rsync       强制使用 SFTP 模式
-```
 
 ### extract_lateral_data
 
@@ -460,13 +410,6 @@ nnlc-sc-visualize [-h] [-o OUTPUT] [--gap-frames GAP_FRAMES]
 
 CSV 提取器会逐段处理 rlog，内存峰值主要由当前 rlog 和时序窗口决定。Parquet 输出仍需由 pandas 读取最终 DataFrame，超大数据集建议优先使用 CSV 或分批处理。
 
-### rsync 连接被拒绝
-
-comma 设备可能没有安装 rsync。使用 `--no-rsync` 回退到 SFTP：
-```bash
-python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data --no-rsync
-```
-
 ### 未找到 rlog 文件
 
 检查 rlog 是否位于预期的目录结构中：
@@ -503,15 +446,14 @@ bash training/run.sh /path/to/latmodels/ --cpu
 - [x] **论坛文档** — 已在 Sunnypilot 论坛发布指南
 - [x] **规范仓库** — 将 3 个分散仓库中的工具整合到本仓库
 - [x] **简化 rlog 处理** — 重构为接收单个输入目录，移除多服务器逻辑
-- [x] **rlog 同步** — `nnlc-sync` 以 rsync 为主，并提供 SFTP 回退和增量同步
 - [x] **依赖管理** — `pyproject.toml` 固定版本并内置 cereal schema（无需检出 openpilot）
 - [x] **CPU 训练** — 使用 `CustomAdaGrad` 优化器并固定 CPU 设备
 - [x] **覆盖度可视化** — `nnlc-visualize` 生成三面板覆盖度图（热力图、直方图、接管率）
 - [x] **路线质量评分** — `nnlc-score` 使用六项标准评分（百分制）
 - [x] **路线剪枝** — 删除饱和帧和变道帧，并可在训练前排除低评分路线
 - [x] **驾驶指南** — README 已记录数据采集建议和应避免的场景
-- [x] **端到端指南** — README 覆盖完整流程：同步 → 提取 → 评分 → 可视化 → 训练 → 部署
-- [x] **故障排查** — 已记录常见问题（OOM、rsync、rlog、CPU 训练）
+- [x] **端到端指南** — README 覆盖完整流程：提取 → 评分 → 可视化 → 训练 → 部署
+- [x] **故障排查** — 已记录常见问题（OOM、rlog、CPU 训练）
 - [x] **HKG 兼容性** — 修复 Hyundai/Kia/Genesis 的 rlog 解析失败
 - [x] **模型验证图** — `nnlc-validate` 生成带模型曲线的 lat_accel_vs_torque 和 torque_vs_speed 图
 - [x] **转向输入筛选** — 三级级联分类器（`nnlc-interventions`）区分驾驶员修正和机械干扰；`--prune-output` 可在训练前删除不需要的帧
