@@ -26,8 +26,12 @@ from nnlc_auto_train import auto_train
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 TRAINING_MODES = {
-    "标准模式": 16384,
-    "低内存模式": 4096,
+    "CPU 标准模式": 16384,
+    "CPU 低内存模式": 4096,
+}
+LEGACY_TRAINING_MODES = {
+    "标准模式": "CPU 标准模式",
+    "低内存模式": "CPU 低内存模式",
 }
 
 
@@ -59,8 +63,9 @@ class NNLCApp:
 
         saved_preferences = self._load_preferences()
         saved_mode = saved_preferences.get("training_mode")
+        saved_mode = LEGACY_TRAINING_MODES.get(saved_mode, saved_mode)
         if not isinstance(saved_mode, str) or saved_mode not in TRAINING_MODES:
-            saved_mode = "标准模式"
+            saved_mode = "CPU 标准模式"
 
         saved_car = saved_preferences.get("car")
         if not isinstance(saved_car, str) or not saved_car.strip():
@@ -119,8 +124,9 @@ class NNLCApp:
     def _save_preferences(self) -> None:
         car = self.car_var.get().strip()
         training_mode = self.training_mode_var.get()
+        training_mode = LEGACY_TRAINING_MODES.get(training_mode, training_mode)
         if training_mode not in TRAINING_MODES:
-            training_mode = "标准模式"
+            training_mode = "CPU 标准模式"
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,7 +211,7 @@ class NNLCApp:
         )
         self.training_mode_combo.grid(row=2, column=1, sticky="w", padx=(12, 10), pady=6)
         self.training_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences())
-        ttk.Label(options_frame, text="低内存模式使用更小批次").grid(row=2, column=2, sticky="w", pady=6)
+        ttk.Label(options_frame, text="仅使用 CPU；低内存模式使用更小批次").grid(row=2, column=2, sticky="w", pady=6)
         self.config_widgets.append(self.training_mode_combo)
 
         controls = ttk.Frame(container)
@@ -312,6 +318,9 @@ class NNLCApp:
             self.progress.start(12)
         else:
             self.progress.stop()
+            # Comboboxes are intentionally readonly; restoring every widget
+            # to ``normal`` would let an invalid training mode be typed in.
+            self.training_mode_combo.configure(state="readonly")
 
     def _update_elapsed(self) -> None:
         if not self.worker or not self.worker.is_alive() or self.started_at is None:
@@ -386,7 +395,12 @@ class NNLCApp:
         self.started_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.process_holder = {}
-        batch_size = TRAINING_MODES[self.training_mode_var.get()]
+        training_mode = self.training_mode_var.get().strip()
+        batch_size = TRAINING_MODES.get(training_mode)
+        if batch_size is None:
+            messagebox.showerror("参数错误", "请选择有效的训练模式。")
+            self._set_running(False)
+            return
         skip_visualize = not self.skip_viz_var.get()
         self.worker = threading.Thread(
             target=self._run_worker,

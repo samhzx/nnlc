@@ -9,7 +9,7 @@ NNLC 使用针对每辆车的神经网络替代标准扭矩横向控制器，学
 ## 前置条件
 
 - **Python 3.11+**
-- **Julia 1.9+** — 用于模型训练（建议使用 CUDA 或 Metal GPU）
+- **Julia 1.9+** — 用于 CPU 模型训练
 - **comma 设备** — 用于采集驾驶数据（comma 3/3X）
 
 ## 现有车型 NNLC 模型
@@ -146,6 +146,8 @@ cd openpilot-nnlc-tools
 # 使用 uv 创建虚拟环境（推荐）
 uv venv
 uv pip install -e .
+# 仅在需要读写 Parquet 时额外安装：
+# uv pip install -e ".[parquet]"
 ```
 
 也可以使用安装脚本（包括安装 uv 在内会自动处理所有步骤）：
@@ -283,14 +285,16 @@ Julia 配置和训练说明请参见 [training/README.md](training/README.md)。
 
 ```bash
 # 推荐方式——自动处理 juliaup PATH
-bash training/run.sh ./output/lateral_data_pruned.csv
+mkdir -p ./output/latmodels
+cp ./output/lateral_data_pruned.csv ./output/latmodels/YOUR_CAR.csv
+bash training/run.sh ./output/latmodels
 
 # 或直接运行 Julia
 cd training/
-julia latmodel_temporal.jl ../output/lateral_data_pruned.csv
+julia latmodel_temporal.jl ../output/latmodels
 
-# 强制 CPU 模式（不需要 GPU，大型数据集速度较慢）
-bash training/run.sh ./output/lateral_data_pruned.csv --cpu
+# CPU 训练（低内存时可将训练模式切换为 CPU 低内存模式）
+bash training/run.sh ./output/latmodels --cpu
 ```
 
 ### 9. 部署模型
@@ -454,7 +458,7 @@ nnlc-sc-visualize [-h] [-o OUTPUT] [--gap-frames GAP_FRAMES]
 
 ### 提取时内存不足
 
-一次处理更少的 rlog，或使用更节省内存的 `--format parquet`。提取器会逐段处理数据，但最终拼接的 DataFrame 可能很大。
+CSV 提取器会逐段处理 rlog，内存峰值主要由当前 rlog 和时序窗口决定。Parquet 输出仍需由 pandas 读取最终 DataFrame，超大数据集建议优先使用 CSV 或分批处理。
 
 ### rsync 连接被拒绝
 
@@ -476,13 +480,13 @@ python3 -m nnlc_tools.sync_rlogs -d 192.168.1.161 -o ./data --no-rsync
 
 ### 使用 CPU 进行 Julia 训练
 
-CPU 训练可以正常工作，小型数据集运行 1000 个 epoch 预计需要约 8 秒。使用 `--cpu` 强制 CPU 模式：
+CPU 训练可以正常工作，小型数据集运行 1000 个 epoch 预计需要约 8 秒。项目当前固定使用 CPU；`--cpu` 参数仅为兼容旧命令保留：
 
 ```bash
 bash training/run.sh /path/to/latmodels/ --cpu
 ```
 
-由于速度原因，大型数据集仍建议使用 GPU（CUDA 或 Metal）。参见 [training/README.md](training/README.md)。
+当前项目固定使用 CPU 训练，不会自动探测或启用 GPU。
 
 ## 来源致谢
 
@@ -501,7 +505,7 @@ bash training/run.sh /path/to/latmodels/ --cpu
 - [x] **简化 rlog 处理** — 重构为接收单个输入目录，移除多服务器逻辑
 - [x] **rlog 同步** — `nnlc-sync` 以 rsync 为主，并提供 SFTP 回退和增量同步
 - [x] **依赖管理** — `pyproject.toml` 固定版本并内置 cereal schema（无需检出 openpilot）
-- [x] **CPU 训练** — 使用 `CustomAdaGrad` 优化器和 `--cpu` 参数修复
+- [x] **CPU 训练** — 使用 `CustomAdaGrad` 优化器并固定 CPU 设备
 - [x] **覆盖度可视化** — `nnlc-visualize` 生成三面板覆盖度图（热力图、直方图、接管率）
 - [x] **路线质量评分** — `nnlc-score` 使用六项标准评分（百分制）
 - [x] **路线剪枝** — 删除饱和帧和变道帧，并可在训练前排除低评分路线
@@ -513,6 +517,5 @@ bash training/run.sh /path/to/latmodels/ --cpu
 - [x] **转向输入筛选** — 三级级联分类器（`nnlc-interventions`）区分驾驶员修正和机械干扰；`--prune-output` 可在训练前删除不需要的帧
 - [ ] **NNLC 开启时的数据质量** — 研究采集数据时启用已有 NNLC 模型是否会降低下一模型的训练质量
 - [ ] **时序信号对齐** — 验证每个训练行中的信号是否共享同一时间戳，以及滞后/超前列是否正确偏移
-- [ ] **AMD GPU 支持** — 移植训练流程以支持 ROCm（有社区成员提供 7900 XT 测试）
 - [ ] **Honda/Acura EPS 筛选** — 评估并集成 `Micim987/opendbc` 的信号筛选
 - [ ] **Mazda 兼容性** — 调查信号兼容性问题，并确认上述 HKG 修复是否也能解决

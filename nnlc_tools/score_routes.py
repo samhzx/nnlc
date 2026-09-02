@@ -25,6 +25,10 @@ CRITERIA = [
     ("too_short",        lambda df: df["active"].astype(bool).sum() * 0.01 < 120,                  -20, "<2 min active driving"),
 ]
 
+REQUIRED_SCORE_COLUMNS = {
+    "steering_pressed", "saturated", "active", "standstill", "lane_change_state"
+}
+
 
 def parse_score_threshold(value):
     """Parse a route score threshold in the valid 0-100 range."""
@@ -63,6 +67,12 @@ def extract_route_id(path):
 
 def score_route(df):
     """Score a single route's data. Returns (score, list of triggered flags)."""
+    missing = sorted(REQUIRED_SCORE_COLUMNS.difference(df.columns))
+    if df.empty:
+        return 0, ["empty route"]
+    if missing:
+        return 0, [f"missing fields: {', '.join(missing)}"]
+
     score = 100
     flags = []
 
@@ -72,7 +82,10 @@ def score_route(df):
                 score += penalty  # penalty is negative
                 flags.append(desc)
         except (KeyError, TypeError, ZeroDivisionError):
-            pass
+            # A malformed criterion must never leave a route at a misleading
+            # perfect score.  Mark it unusable and retain the reason.
+            score = 0
+            flags.append(f"unable to evaluate {name}")
 
     return max(0, score), flags
 
@@ -85,34 +98,39 @@ def load_data_with_routes(input_path):
         if df is None:
             print(f"ERROR: Input not found: {input_path}")
             sys.exit(1)
-        return df, None
+        return df, "route_id" if "route_id" in df.columns else None
 
     if os.path.isdir(input_path):
         # Process rlogs directly — need per-file tracking for route grouping
-        from nnlc_tools.extract_lateral_data import find_rlogs, extract_segment, COLUMNS
+        import tempfile
+        from nnlc_tools.extract_lateral_data import (
+            find_rlogs, extract_segment, _StreamingCsvWriter, extract_route_id,
+        )
         rlog_files = find_rlogs(input_path)
         if not rlog_files:
             print(f"ERROR: No rlog files found in {input_path}")
             sys.exit(1)
 
-        # Build DataFrame with source file info for route grouping
-        all_rows = []
-        file_map = []  # (start_idx, end_idx, rlog_path)
-        for rlog_path in rlog_files:
-            rows = extract_segment(rlog_path)
-            start = len(all_rows)
-            all_rows.extend(rows)
-            file_map.append((start, len(all_rows), rlog_path))
-
-        df = pd.DataFrame(all_rows, columns=COLUMNS)
-
-        # Add route_id column based on file paths
-        df["route_id"] = "unknown"
-        for start, end, path in file_map:
-            if start < end:
-                df.loc[start:end - 1, "route_id"] = extract_route_id(path)
-
-        return df, "route_id"
+        temp_file = tempfile.NamedTemporaryFile(prefix="nnlc_score_", suffix=".csv", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+        stream = _StreamingCsvWriter(temp_path)
+        try:
+            for rlog_path in rlog_files:
+                stream.route_id = extract_route_id(rlog_path)
+                extract_segment(rlog_path, row_callback=stream.accept)
+                stream.finish_segment()
+            stream.finish()
+            if stream.rows_written == 0:
+                print(f"ERROR: No data extracted from {input_path}")
+                sys.exit(1)
+            return pd.read_csv(temp_path), "route_id"
+        finally:
+            stream.close()
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
     print(f"ERROR: Input not found: {input_path}")
     sys.exit(1)

@@ -51,6 +51,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Bundled Julia failed to start ($LASTEXITCODE)"
           }
+          $env:JULIA_DEPOT_PATH = (Resolve-Path (Join-Path $bundleDir "_internal\julia-depot")).Path
+          & $bundledJulia --startup-file=no -e 'using CSV, DataFrames, Flux, Plots, BSON, JSON, ArgParse'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled Julia package import smoke test failed ($LASTEXITCODE)"
+          }
           $trainingScript = Join-Path $bundleDir "_internal\training\latmodel_temporal.jl"
           if (-not (Test-Path -LiteralPath $trainingScript -PathType Leaf)) {
             throw "Bundled training script is missing or is not a file: $trainingScript"
@@ -58,6 +63,10 @@ jobs:
           $socketExtensions = @(Get-ChildItem -LiteralPath (Join-Path $bundleDir "_internal") -Recurse -File -Filter "_socket*.pyd")
           if ($socketExtensions.Count -eq 0) {
             throw "Python _socket extension is missing from the one-dir bundle"
+          }
+          & $bundleExe --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "Bundled NNLC_Trainer --help failed ($LASTEXITCODE)"
           }
           $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
           if ($fileCount -lt 10) {

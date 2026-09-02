@@ -33,6 +33,7 @@ nnlc-sc-visualize = "nnlc_tools.steering_classifier.visualize:main"
 
 [project.optional-dependencies]
 train = ["scikit-learn>=1.3"]
+parquet = ["pyarrow>=14"]
 
 [tool.setuptools.packages.find]
 include = ["nnlc_tools*"]

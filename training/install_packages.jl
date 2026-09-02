@@ -46,13 +46,19 @@ Pkg.add(packages)
 
 # Trigger precompilation
 println("Precompiling all packages...")
+failed = String[]
 for pkg in packages
     try
         Core.eval(Main, Meta.parse("using $pkg"))
         println("  ✓ $pkg")
     catch e
+        push!(failed, pkg)
         println("  ⚠ $pkg ($(typeof(e)) — may work at runtime)")
     end
+end
+
+if !isempty(failed)
+    error("Julia package precompilation failed for: $(join(failed, ", "))")
 end
 
 println("Package installation complete.")

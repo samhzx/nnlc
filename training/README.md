@@ -55,34 +55,22 @@ CSV 文件路径应类似 `/path/to/latmodels/YOUR_CAR_NAME.csv`。
 ```julia
 using Pkg
 Pkg.add(["Flux", "MLUtils", "CSV", "DataFrames", "JSON", "Statistics",
-         "StatsBase", "Plots", "ProgressMeter", "CUDA"])
+         "StatsBase", "Plots", "ProgressMeter"])
 ```
 
-Apple Silicon 使用 Metal GPU 时：
-
-```julia
-Pkg.add("Metal")
-```
+训练脚本固定使用 CPU，不需要安装 CUDA 或 Metal GPU 软件包。
 
 ## 已知问题
 
 ### CPU 训练
 
-使用 CustomAdaGrad 优化器时，CPU 训练运行稳定；小数据集训练 1000 个 epoch 约需 8 秒。使用 `--cpu` 强制 CPU 模式：
+使用 CustomAdaGrad 优化器时，CPU 训练运行稳定；小数据集训练 1000 个 epoch 约需 8 秒。训练脚本固定使用 CPU：
 
 ```bash
 bash training/run.sh /path/to/latmodels/ --cpu
 ```
 
-大型数据集仍建议使用 GPU：
-
-- **NVIDIA GPU + CUDA**：速度最快、稳定性最好
-- **Apple Silicon + Metal**：`latmodel_temporal.jl` 支持
-- 16 GB 内存的 M1 Pro 不适合较大的数据集，建议使用 M2 Pro/Max 或更高配置
-
-### AMD GPU
-
-目前 Julia Flux 的 AMD GPU/ROCm 支持尚未可用，仍在研究中。
+大型数据集建议使用“CPU 低内存模式”并适当减小批次大小，以控制内存峰值。
 
 ## 使用方法
 
@@ -90,14 +78,14 @@ bash training/run.sh /path/to/latmodels/ --cpu
 # 1. 提取包含时序特征的训练数据
 python -m nnlc_tools.extract_lateral_data /path/to/rlogs/ -o /path/to/latmodels/my_car.csv --temporal
 
-# 2. 运行训练（推荐，会自动处理 juliaup PATH）
+# 2. 运行 CPU 训练（推荐，会自动处理 juliaup PATH）
 bash training/run.sh /path/to/latmodels/
 
 # 或直接运行 Julia
 cd training/
 julia latmodel_temporal.jl /path/to/latmodels/
 
-# 强制 CPU 模式（不需要 GPU）
+# CPU 训练（--cpu 为兼容旧命令保留）
 bash training/run.sh /path/to/latmodels/ --cpu
 
 # 3. 部署模型

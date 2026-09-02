@@ -15,6 +15,7 @@ import csv
 from collections import deque
 import glob
 import os
+import re
 import sys
 
 import numpy as np
@@ -71,7 +72,7 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
   Returns:
     friction_input 值
   """
-  if model_accels_y is None or len(model_accels_y) < 2:
+  if model_accels_y is None or len(model_accels_y) < len(T_IDXS):
     return 0.0
 
   # low_speed_factor
@@ -140,6 +141,22 @@ def find_rlogs(input_dir):
     return sorted(set(files))
 
 
+def extract_route_id(path):
+    """Return the route ID represented by an openpilot rlog path."""
+    parts = os.fspath(path).replace("\\", "/").split("/")
+    pattern = re.compile(r"^(?:[0-9a-fA-F]+\|)?\d{4}-\d{2}-\d{2}--\d{2}-\d{2}-\d{2}$")
+    for part in reversed(parts):
+        if pattern.fullmatch(part):
+            return part
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] in {"rlog", "rlog.zst", "rlog.bz2"}:
+            if index >= 2:
+                return parts[index - 2]
+            if index >= 1:
+                return parts[index - 1]
+    return "unknown"
+
+
 def extract_segment(rlog_path, row_callback=None):
     """Extract lateral data rows from a single rlog file.
 
@@ -154,6 +171,7 @@ def extract_segment(rlog_path, row_callback=None):
     sm = {}
     steer_actuator_delay = 0.1  # 默认值
 
+    lr = None
     try:
         lr = LogReader(rlog_path, sort_by_time=True)
     except Exception as e:
@@ -264,6 +282,9 @@ def extract_segment(rlog_path, row_callback=None):
                 emit_row(row)
     except Exception as e:
         raise RuntimeError(f"Error processing {rlog_path}: {e}") from e
+    finally:
+        if lr is not None:
+            lr.close()
 
     return rows if rows is not None else []
 
@@ -284,11 +305,12 @@ class _StreamingCsvWriter:
     _MAX_PAST = 30
     _MAX_FUTURE = 150
 
-    def __init__(self, output_path, temporal=False, filter_overrides=False):
+    def __init__(self, output_path, temporal=False, filter_overrides=False, route_id="unknown"):
         self.temporal = temporal
         self.filter_overrides = filter_overrides
+        self.route_id = route_id or "unknown"
         self.temporal_specs = _temporal_column_specs() if temporal else []
-        self.output_columns = COLUMNS + [spec[2] for spec in self.temporal_specs]
+        self.output_columns = COLUMNS + [spec[2] for spec in self.temporal_specs] + ["route_id"]
         self.handle = open(output_path, "w", newline="", encoding="utf-8")
         self.writer = csv.writer(self.handle, lineterminator="\n")
         self.writer.writerow(self.output_columns)
@@ -324,7 +346,7 @@ class _StreamingCsvWriter:
 
         self.past.append(center)
         self.pending.popleft()
-        self.writer.writerow([self._csv_value(value) for value in output_row])
+        self.writer.writerow([self._csv_value(value) for value in output_row] + [self.route_id])
         self.rows_written += 1
 
     def accept(self, row):
@@ -334,7 +356,7 @@ class _StreamingCsvWriter:
             return
 
         if not self.temporal:
-            self.writer.writerow([self._csv_value(value) for value in row])
+            self.writer.writerow([self._csv_value(value) for value in row] + [self.route_id])
             self.rows_written += 1
             return
 
@@ -418,6 +440,7 @@ def main():
                                      filter_overrides=args.filter_overrides)
         try:
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
+                stream.route_id = extract_route_id(rlog_path)
                 extract_segment(rlog_path, row_callback=stream.accept)
                 stream.finish_segment()
         finally:
@@ -434,26 +457,33 @@ def main():
         if args.temporal:
             print("Added temporal columns with per-segment streaming")
     else:
-        # Parquet append support depends on an optional engine. Keep the
-        # existing behavior for explicit parquet requests; the GUI uses CSV.
-        all_rows = []
-        for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-            rows = extract_segment(rlog_path)
-            all_rows.extend(rows)
-        if not all_rows:
-            print("ERROR: No data extracted from any rlog files")
-            sys.exit(1)
-        df = pd.DataFrame(all_rows, columns=COLUMNS)
-        print(f"Extracted {len(df)} rows")
-        if args.filter_overrides and "steering_pressed" in df.columns:
-            before = len(df)
-            df = df[~df["steering_pressed"].astype(bool)]
-            dropped = before - len(df)
-            print(f"Filtered {dropped} override rows ({dropped / before:.1%} of data)")
-        if args.temporal:
-            print("Adding temporal columns...")
-            df = add_temporal_columns(df)
-        df.to_parquet(args.output, index=False)
+        # Parquet engines require a DataFrame, but rows are first streamed to
+        # a temporary CSV so extraction does not accumulate a second list of
+        # every row in memory.
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(prefix="nnlc_extract_", suffix=".csv", delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
+        stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
+                                     filter_overrides=args.filter_overrides)
+        try:
+            for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
+                stream.route_id = extract_route_id(rlog_path)
+                extract_segment(rlog_path, row_callback=stream.accept)
+                stream.finish_segment()
+            stream.finish()
+            if stream.rows_written == 0:
+                print("ERROR: No data extracted from any rlog file")
+                sys.exit(1)
+            df = pd.read_csv(temp_path)
+            print(f"Extracted {len(df)} rows")
+            df.to_parquet(args.output, index=False)
+        finally:
+            stream.close()
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
     print(f"Saved to {args.output} ({fmt})")
 

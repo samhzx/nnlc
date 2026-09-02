@@ -24,8 +24,6 @@
 #     "JSON",
 #     # "Feather",  # No longer needed, using CSV
 #     "Dates",
-#     "Metal",
-#     "CUDA",
 #     "ArgParse",
 #     "ModelingToolkit",
 #     "TeeStreams"
@@ -63,8 +61,6 @@ using InvertedIndices
 using JSON
 
 using Dates
-try using Metal catch end
-try using CUDA; using CUDA: CuIterator catch end
 using ArgParse
 using Optim
 
@@ -258,10 +254,13 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     bin_min_size = minimum(bin_sizes)
     bin_max_size = maximum(bin_sizes)
     bin_mean_size = mean(bin_sizes)
-    bin_std_size = std(bin_sizes)
+    bin_std_size = length(bin_sizes) > 1 ? std(bin_sizes) : 0.0
     println(out_streams, f"Bin sizes: min={bin_min_size}, max={bin_max_size}, mean={bin_mean_size}, std={bin_std_size}")
 
-    new_bin_size = Int(round(max((bin_min_size + bin_mean_size)/2, mean(bin_sizes) - bin_std_size/2), digits=0))
+    requested_bin_size = Int(round(max((bin_min_size + bin_mean_size)/2, mean(bin_sizes) - bin_std_size/2), digits=0))
+    # Sampling is without replacement; never ask a sparse bin for more rows
+    # than it contains (and keep the one-bin case finite).
+    new_bin_size = clamp(requested_bin_size, 1, bin_min_size)
     println(out_streams, f"Shrinking bins to {new_bin_size} points")
     
     # Pre-allocate for better performance
@@ -288,7 +287,7 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
   return data
 end
 
-function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=false, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
+function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
   model_path = joinpath(working_dir, Base.basename(working_dir))
 
   if nrow(data) < 2
@@ -321,22 +320,10 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   select!(test, Symbol.(model_columns))
   println(out_streams, "Training rows: $(nrow(train)); test rows: $(nrow(test))")
 
-  # Check for Metal first (Apple Silicon), then CUDA, then fall back to CPU
-  if force_cpu
-    device = cpu
-    println(out_streams, "Using device: CPU (forced)")
-  elseif @isdefined(Metal) && Metal.functional()
-    device = gpu
-    Metal.allowscalar(false)
-    println(out_streams, "Using device: Metal GPU")
-  elseif @isdefined(CUDA) && CUDA.functional()
-    device = gpu
-    CUDA.allowscalar(false)
-    println(out_streams, "Using device: CUDA GPU")
-  else
-    device = cpu
-    println(out_streams, "Using device: CPU")
-  end
+  # The packaged trainer intentionally supports CPU only.  Keeping this
+  # decision explicit makes results and memory usage deterministic.
+  device = cpu
+  println(out_streams, "Using device: CPU")
 
   # Convert to Float32 before normalization so the retained arrays are compact.
   X_train = Matrix{Float32}(select(train, Not([:torque_output])))
@@ -447,7 +434,11 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   grid_dg = prepare_test_grid(lj_func, v_ego_range, lateral_acceleration_range, lateral_jerk_range, roll_range_hi, lateral_error_range, roll_rate_range)
   grid_dg_rate = prepare_test_grid(lj_func, v_ego_range, lateral_acceleration_range, lateral_jerk_range, roll_range_hi, lateral_error_range, roll_rate_range_hi)
   grid_odd_neg = prepare_test_grid(lj_func, v_ego_range, -lateral_acceleration_range, -lateral_jerk_range, -roll_range, -lateral_error_range, -roll_rate_range)
-  grid_origin = prepare_test_grid(lj_func, v_ego_range, 0, 0, 0, 0, 0)
+  # prepare_test_grid iterates over every range; wrap the origin values so
+  # scalar zero values do not trigger a MethodError before training starts.
+  grid_origin = prepare_test_grid(
+    lj_func, v_ego_range, [0f0], [0f0], [0f0], [0f0], [0f0]
+  )
 
   # Cache for physical constraint losses (recomputed every N epochs)
   cached_constraint_loss = Ref(0f0)
@@ -917,17 +908,30 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
   lat_accels = Vector{Float32}(undef, length(t_list))
   rolls = Vector{Float32}(undef, length(t_list))
 
+  # Some speed bins can legitimately contain no samples.  Keep the empty
+  # bin visible in the plot, but do not index an empty matrix at 1:end.
+  function scatter_filtered!(plt, X_filtered, y_filtered, target_count; kwargs...)
+    n = size(X_filtered, 1)
+    if n > 0
+      step = max(1, round(Int, n / target_count))
+      indices = 1:step:n
+      scatter!(plt, X_filtered[indices, 2], y_filtered[indices]; kwargs...)
+    end
+  end
+
   # Iterate over the speed range and create a plot for each speed
   for (si, speed) in enumerate(speed_range)
     # Plot the training data
     X_train_filtered, y_train_filtered = filter_data_by_speed(X_train_rescaled, y_train, speed, speed_step/2, no_roll=true)
-    plot_scatter_step = round(Int, max(1, size(X_train_filtered, 1) / scatter_points_desired / 2))
-    scatter!(p[si,plot_col_num], X_train_filtered[1:plot_scatter_step:end, 2], y_train_filtered[1:plot_scatter_step:end], label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_train_filtered, y_train_filtered, scatter_points_desired / 2,
+      label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     # Plot the test data
     X_test_filtered, y_test_filtered = filter_data_by_speed(X_test_rescaled, y_test, speed, speed_step/2, no_roll=true)
-    plot_scatter_step = round(Int, max(1, size(X_test_filtered, 1) / scatter_points_desired))
-    scatter!(p[si,plot_col_num], X_test_filtered[1:plot_scatter_step:end, 2], y_test_filtered[1:plot_scatter_step:end], label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_test_filtered, y_test_filtered, scatter_points_desired,
+      label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     vline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
     hline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
@@ -976,13 +980,15 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
 
     # Plot the training data
     X_train_filtered, y_train_filtered = filter_data_by_speed(X_train_rescaled, y_train, speed, speed_step/2, no_roll=true)
-    plot_scatter_step = round(Int, max(1, size(X_train_filtered, 1) / scatter_points_desired / 2))
-    scatter!(p[si,plot_col_num], X_train_filtered[1:plot_scatter_step:end, 2], y_train_filtered[1:plot_scatter_step:end], label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_train_filtered, y_train_filtered, scatter_points_desired / 2,
+      label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     # Plot the test data
     X_test_filtered, y_test_filtered = filter_data_by_speed(X_test_rescaled, y_test, speed, speed_step/2, no_roll=true)
-    plot_scatter_step = round(Int, max(1, size(X_test_filtered, 1) / scatter_points_desired))
-    scatter!(p[si,plot_col_num], X_test_filtered[1:plot_scatter_step:end, 2], y_test_filtered[1:plot_scatter_step:end], label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_test_filtered, y_test_filtered, scatter_points_desired,
+      label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     vline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
     hline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
@@ -1033,13 +1039,15 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
 
     # Plot the training data
     X_train_filtered, y_train_filtered = filter_data_by_speed(X_train_rescaled, y_train, speed, speed_step/2, no_jerk=true)
-    plot_scatter_step = round(Int, max(1, size(X_train_filtered, 1) / scatter_points_desired / 2))
-    scatter!(p[si,plot_col_num], X_train_filtered[1:plot_scatter_step:end, 2], y_train_filtered[1:plot_scatter_step:end], label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_train_filtered, y_train_filtered, scatter_points_desired / 2,
+      label="Training Data", markersize=2, markercolor=train_color, markeralpha=marker_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     # Plot the test data
     X_test_filtered, y_test_filtered = filter_data_by_speed(X_test_rescaled, y_test, speed, speed_step/2, no_jerk=true)
-    plot_scatter_step = round(Int, max(1, size(X_test_filtered, 1) / scatter_points_desired))
-    scatter!(p[si,plot_col_num], X_test_filtered[1:plot_scatter_step:end, 2], y_test_filtered[1:plot_scatter_step:end], label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha, xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
+    scatter_filtered!(p[si,plot_col_num], X_test_filtered, y_test_filtered, scatter_points_desired,
+      label="Test Data", markersize=2, markercolor=test_color, markeralpha=test_alpha,
+      xlims=(-3.5, 3.5), ylims=(-1.4,1.4), markerstrokewidths=0)
 
     vline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
     hline!(p[si,plot_col_num], [0.0], color=:black, linewidth=1, label="")
@@ -1301,7 +1309,7 @@ function multiline_string(strings::Vector{String}, n::Int; prefix="")::String
   return join(lines, ",\n")
 end
 
-function create_model(in_file, out_dir_base; force_cpu::Bool=false, requested_batch_size::Int=16384)
+function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_batch_size::Int=16384)
   carname = replace(Base.basename(in_file), ".csv" => "")
   outdir = create_folder_with_iterator(out_dir_base, carname, make_new=true)
   logfile = open(outdir * "/$(carname)_log.txt", "a")  # Open log file in append mode
@@ -1331,7 +1339,7 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=false, requested_ba
   close(logfile)
 end
 
-function main(in_dir; force_cpu::Bool=false, requested_batch_size::Int=16384)
+function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384)
   # Get all CSV files that aren't balanced files
   csv_files = filter(file -> occursin(".csv", file) && !occursin("_balanced.csv", file), readdir(in_dir))
 
@@ -1346,7 +1354,9 @@ function main(in_dir; force_cpu::Bool=false, requested_batch_size::Int=16384)
 end
 
 # Accept data directory as command-line argument, or default to ~/Downloads/rlogs/output/GENESIS
-force_cpu = "--cpu" in ARGS
+# GPU training is intentionally unsupported by this trainer.  Keep accepting
+# --cpu for compatibility with existing scripts, but always select CPU.
+force_cpu = true
 batch_size_arg = findfirst(a -> startswith(a, "--batch-size="), ARGS)
 batch_size_flag = findfirst(a -> a == "--batch-size", ARGS)
 requested_batch_size = 16384
@@ -1375,9 +1385,7 @@ positional_args = [
   if !startswith(argument, "--") && !(batch_size_flag !== nothing && index == batch_size_flag + 1)
 ]
 
-if force_cpu
-  println("CPU mode forced via --cpu flag")
-end
+println("CPU mode enabled")
 
 if length(positional_args) > 0
   main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size)

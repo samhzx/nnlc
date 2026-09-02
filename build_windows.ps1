@@ -23,6 +23,17 @@ $JuliaDepotSource = ""
 if ($JuliaDepot) {
     $JuliaDepotSource = (Resolve-Path $JuliaDepot).Path
 }
+$RuntimeTarget = [IO.Path]::GetFullPath((Join-Path $ProjectDir "julia-runtime"))
+$DepotTarget = [IO.Path]::GetFullPath((Join-Path $ProjectDir "julia-depot"))
+if ([IO.Path]::GetFullPath($JuliaDir) -eq $RuntimeTarget) {
+    throw "JuliaDir cannot be the build output directory: $RuntimeTarget"
+}
+if ($JuliaDepotSource -and [IO.Path]::GetFullPath($JuliaDepotSource) -eq $DepotTarget) {
+    throw "JuliaDepot cannot be the build output directory: $DepotTarget"
+}
+if ($SkipJuliaPackages -and -not $JuliaDepotSource) {
+    throw "-SkipJuliaPackages requires -JuliaDepot containing preinstalled packages"
+}
 if (-not (Test-Path (Join-Path $JuliaDir "bin\julia.exe"))) {
     throw "JuliaDir must point to a Julia installation containing bin\julia.exe"
 }

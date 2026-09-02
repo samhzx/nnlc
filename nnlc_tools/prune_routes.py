@@ -54,15 +54,19 @@ def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
     # 1. Route-level: filter by score
     if min_score > 0:
         route_col = _infer_route_col(df)
-        if route_col is not None:
-            keep_routes = {
-                route_id
-                for route_id, group in df.groupby(route_col)
-                if score_route(group)[0] >= min_score
-            }
-            before = len(df)
-            df = df[df[route_col].isin(keep_routes)].copy()
-            route_rows_dropped = before - len(df)
+        if route_col is None:
+            raise ValueError(
+                "--min-score requires a route_id or timestamp column; "
+                "cannot safely infer route boundaries"
+            )
+        keep_routes = {
+            route_id
+            for route_id, group in df.groupby(route_col)
+            if score_route(group)[0] >= min_score
+        }
+        before = len(df)
+        df = df[df[route_col].isin(keep_routes)].copy()
+        route_rows_dropped = before - len(df)
 
     # 2. Frame-level: drop saturated frames
     if drop_saturated and "saturated" in df.columns:
@@ -113,6 +117,8 @@ def main():
 
     # Count routes before pruning
     route_col = _infer_route_col(df)
+    if args.min_score > 0 and route_col is None:
+        parser.error("--min-score requires route_id or timestamp column")
     n_routes_initial = df[route_col].nunique() if route_col else 1
 
     print(f"Loaded {len(df):,} rows across {n_routes_initial} routes")

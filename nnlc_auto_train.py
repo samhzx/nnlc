@@ -477,7 +477,7 @@ def step_visualize(input_csv, output_dir, python_exe):
 
 
 def step_train(input_csv, car_name, output_dir, cancel_event=None,
-               process_holder=None, batch_size=16384):
+               process_holder=None, batch_size=16384, force_cpu=True):
     """步骤6: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
     # 创建训练输入目录（只包含要训练的 CSV）
@@ -501,6 +501,9 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     julia_exe = get_julia_exe()
     if not isinstance(batch_size, int) or batch_size <= 0:
         raise ValueError("batch_size must be a positive integer")
+    # The supported application mode is CPU-only.  Keep the argument for API
+    # compatibility with older callers, but never allow a GPU path here.
+    force_cpu = True
     cmd = [julia_exe, script_path, train_input_dir, "--cpu", f"--batch-size={batch_size}"]
     print_info(f"Julia 训练中（CPU 模式，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
@@ -676,7 +679,8 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
 
 def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                skip_visualize=False, output_dir=None, deploy_dir=None,
-               cancel_event=None, process_holder=None, batch_size=16384):
+               cancel_event=None, process_holder=None, batch_size=16384,
+               force_cpu=True):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -690,10 +694,13 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         cancel_event: 可选的训练取消事件
         process_holder: 可选的当前子进程共享容器
         batch_size: Julia 训练批次大小，默认 16384；较小值可降低内存峰值
+        force_cpu: 兼容旧调用方的参数；当前训练始终使用 CPU
 
     Returns:
         模型文件路径
     """
+    # GPU training is intentionally not exposed by this application.
+    force_cpu = True
     total_steps = 8 if not skip_visualize else 7
     python_exe = get_python_exe()
     _raise_if_cancelled(cancel_event)
@@ -760,6 +767,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         car_name,
         output_dir,
         batch_size=batch_size,
+        force_cpu=force_cpu,
         cancel_event=cancel_event,
         process_holder=process_holder,
     )
@@ -887,6 +895,7 @@ def main():
     parser.add_argument("--deploy-dir", help="模型 JSON 部署目录（默认项目同级 models）")
     parser.add_argument("--batch-size", type=int, default=16384,
                         help="Julia 训练批次大小（默认 16384；低内存可使用 4096）")
+    parser.add_argument("--cpu", action="store_true", help="兼容参数；训练始终使用 CPU")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
 
     args = parser.parse_args()
@@ -919,6 +928,7 @@ def main():
         output_dir=args.output,
         deploy_dir=args.deploy_dir,
         batch_size=args.batch_size,
+        force_cpu=True,
     )
 
 
