@@ -1,7 +1,18 @@
 name: Build Windows EXE
 
+# Push-triggered runs use the Git commit subject as their title.  For the
+# current manual workflow, GitHub does not include a commit message in the
+# workflow_dispatch payload, so ``run_name`` is available as an optional
+# fallback in the Actions form.
+run-name: ${{ inputs.run_name || github.event.head_commit.message || format('Build Windows EXE ({0})', github.ref_name) }}
+
 on:
   workflow_dispatch:
+    inputs:
+      run_name:
+        description: "运行标题（可填写本次 Git 提交标题）"
+        required: false
+        type: string
 
 permissions:
   contents: read
