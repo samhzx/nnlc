@@ -25,6 +25,20 @@ from nnlc_auto_train import auto_train
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_COLOR_TAGS = {
+    31: "error",
+    32: "success",
+    33: "warning",
+    34: "info",
+    35: "heading",
+    36: "step",
+    91: "error",
+    92: "success",
+    93: "warning",
+    94: "info",
+    95: "heading",
+    96: "step",
+}
 TRAINING_MODES = {
     "CPU 标准模式": 16384,
     "CPU 低内存模式": 4096,
@@ -62,6 +76,7 @@ class NNLCApp:
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
         self.config_widgets = []
+        self._ansi_log_tag: str | None = None
         self.cancel_event = threading.Event()
         self.process_holder = {}
 
@@ -275,7 +290,10 @@ class NNLCApp:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.tag_configure("info", foreground="#2563a6")
         self.log.tag_configure("success", foreground="#16803a")
+        self.log.tag_configure("warning", foreground="#a15c00")
         self.log.tag_configure("error", foreground="#c62828")
+        self.log.tag_configure("heading", foreground="#7a3e9d")
+        self.log.tag_configure("step", foreground="#007c91")
 
         ttk.Label(container, textvariable=self.status_var, relief="sunken", anchor="w", padding=(8, 5)).grid(
             row=6, column=0, sticky="ew", pady=(10, 0)
@@ -322,11 +340,32 @@ class NNLCApp:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        self._ansi_log_tag = None
 
     def _append_log(self, text: str, tag: str | None = None) -> None:
-        text = _ANSI_ESCAPE_RE.sub("", text).replace("\r", "\n")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         self.log.configure(state="normal")
-        self.log.insert("end", text, tag)
+        if tag is not None:
+            self.log.insert("end", _ANSI_ESCAPE_RE.sub("", text), tag)
+        else:
+            current_tag = self._ansi_log_tag
+            position = 0
+            for match in _ANSI_ESCAPE_RE.finditer(text):
+                if match.start() > position:
+                    self.log.insert("end", text[position:match.start()], current_tag)
+                sequence = match.group()
+                if sequence.endswith("m"):
+                    parameters = sequence[2:-1]
+                    codes = [int(value) if value.isdecimal() else 0 for value in parameters.split(";")]
+                    for code in codes:
+                        if code in (0, 39):
+                            current_tag = None
+                        elif code in _ANSI_COLOR_TAGS:
+                            current_tag = _ANSI_COLOR_TAGS[code]
+                position = match.end()
+            if position < len(text):
+                self.log.insert("end", text[position:], current_tag)
+            self._ansi_log_tag = current_tag
         self.log.see("end")
         self.log.configure(state="disabled")
 
