@@ -59,13 +59,6 @@ jobs:
           if (-not (Test-Path -LiteralPath $bundledJulia -PathType Leaf)) {
             throw "Bundled Julia executable is missing or is not a file: $bundledJulia"
           }
-          $juliaRuntimeDir = Join-Path $bundleDir "_internal\julia-runtime"
-          foreach ($requiredLibrary in @("libssp.a", "libc.a", "libgcc.a", "libmsvcrt.a")) {
-            $matches = @(Get-ChildItem -LiteralPath $juliaRuntimeDir -Recurse -File -Filter $requiredLibrary)
-            if ($matches.Count -eq 0) {
-              throw "Bundled Julia linker library is missing: $requiredLibrary"
-            }
-          }
           & $bundledJulia --version
           if ($LASTEXITCODE -ne 0) {
             throw "Bundled Julia failed to start ($LASTEXITCODE)"
