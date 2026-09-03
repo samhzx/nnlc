@@ -44,7 +44,7 @@ Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命�
 
 车型、训练模式和日志处理模式会自动记住上次选择。覆盖度图默认生成，也可以在界面中取消。
 
-one-dir 程序无需安装目标电脑上的 Python、Julia 或依赖包，但必须整体保留 `NNLC_Trainer` 文件夹，不能只复制 `NNLC_Trainer.exe`。
+one-dir 程序无需安装目标电脑上的 Python、Julia 或依赖包，但必须整体保留 `NNLC_Trainer` 文件夹，不能只复制 `NNLC_Trainer.exe`。GitHub Actions 会将它打包为 `NNLC_Trainer-windows-x64-onedir.7z`；下载后使用 7-Zip、WinRAR 等工具完整解压，再运行 `NNLC_Trainer\NNLC_Trainer.exe`。
 
 ## 现有车型 NNLC 模型
 

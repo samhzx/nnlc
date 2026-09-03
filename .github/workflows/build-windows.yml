@@ -99,15 +99,45 @@ jobs:
           ) | Set-Content (Join-Path $bundleDir "BUILD_INFO.txt") -Encoding UTF8
           $bytes = (Get-ChildItem -Recurse -File $bundleDir | Measure-Object -Property Length -Sum).Sum
           $sizeGb = [math]::Round($bytes / 1GB, 2)
-          Write-Host "Bundle size before artifact compression: $sizeGb GB"
+          Write-Host "Bundle size before archive compression: $sizeGb GB"
           Get-ChildItem $bundleDir
 
-      - name: Upload one-dir bundle
+      - name: Compress one-dir bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) {
+            $sevenZip = Join-Path ${env:ProgramFiles} "7-Zip\7z.exe"
+          }
+          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
+            throw "7-Zip was not found on the Windows runner"
+          }
+          $archivePath = Join-Path $PWD "dist\NNLC_Trainer-windows-x64-onedir.7z"
+          Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+          # Julia's compiled files and artifacts are already numerous binary
+          # files.  A solid LZMA2 archive improves cross-file compression and
+          # avoids GitHub's per-file ZIP overhead.
+          & $sevenZip a -t7z -mx=9 -m0=lzma2 -ms=on $archivePath "dist\NNLC_Trainer" | Write-Host
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+            throw "Failed to create the compressed one-dir archive ($LASTEXITCODE)"
+          }
+          & $sevenZip t $archivePath | Write-Host
+          if ($LASTEXITCODE -ne 0) {
+            throw "Compressed one-dir archive failed integrity verification ($LASTEXITCODE)"
+          }
+          $archiveBytes = (Get-Item -LiteralPath $archivePath).Length
+          $archiveMb = [math]::Round($archiveBytes / 1MB, 1)
+          Write-Host "Compressed archive size: $archiveMb MB"
+          Get-Item -LiteralPath $archivePath
+
+      - name: Upload compressed one-dir bundle
         uses: actions/upload-artifact@v4
         with:
-          name: NNLC_Trainer-windows-x64-onedir
-          path: dist/NNLC_Trainer
+          name: NNLC_Trainer-windows-x64-onedir-7z
+          path: dist/NNLC_Trainer-windows-x64-onedir.7z
           if-no-files-found: error
-          # Use stronger compression to reduce the large one-dir download.
-          compression-level: 8
+          # The payload is already solid-compressed by 7-Zip.  Avoid wrapping
+          # it in another expensive ZIP compression pass.
+          compression-level: 0
           retention-days: 14

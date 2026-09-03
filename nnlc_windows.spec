@@ -38,13 +38,20 @@ def directory_datas(source_dir: Path, target_dir: str):
         relative_parts = {part.lower() for part in relative_path.parts}
         target_parts = {part.lower() for part in Path(target_dir).parts}
 
+        # Debug symbols and static-linker metadata are not loaded by the
+        # bundled Julia process.  They can be large and are only useful when
+        # debugging Julia itself.
+        if path.suffix.lower() in {".pdb", ".a", ".la"}:
+            return False
+
         # Keep the Julia runtime and package depot intact.  Only transient
         # depot caches are removed by the build script before this runs.
         if target_parts == {"julia-runtime"}:
-            return True
+            return not path.name.lower().endswith((".cmake", ".cmake.in")) and "cmake" not in relative_parts
         if target_parts == {"julia-depot"}:
             top_level = relative_path.parts[0].lower() if relative_path.parts else ""
-            return top_level not in {"scratchspaces", "logs", "clones"}
+            if top_level in {"scratchspaces", "logs", "clones"}:
+                return False
 
         if "cmake" in relative_parts:
             return False
@@ -62,6 +69,26 @@ def directory_datas(source_dir: Path, target_dir: str):
         for path in source_dir.rglob("*")
         if path.is_file() and is_runtime_file(path)
     ]
+
+
+def filter_python_dev_files(entries):
+    """Drop package tests/examples from PyInstaller-collected files.
+
+    ``collect_all`` intentionally collects broad package data.  The trainer
+    never imports these development-only trees, so excluding them keeps the
+    Windows bundle smaller without affecting runtime modules or plotting data.
+    """
+    excluded_parts = {
+        "test", "tests", "testing", "example", "examples",
+        "benchmark", "benchmarks",
+    }
+    filtered = []
+    for entry in entries:
+        source = Path(str(entry[0]))
+        if any(part.lower() in excluded_parts for part in source.parts):
+            continue
+        filtered.append(entry)
+    return filtered
 
 
 def standard_library_extensions(module_name: str):
@@ -128,9 +155,13 @@ hiddenimports = [
 for package in ("numpy", "pandas", "matplotlib", "scipy", "zstandard", "capnp", "tqdm"):
     try:
         d, b, h = collect_all(package)
-        datas += d
-        binaries += b
-        hiddenimports += h
+        datas += filter_python_dev_files(d)
+        binaries += filter_python_dev_files(b)
+        hiddenimports += [
+            module for module in h
+            if not any(part.lower() in {"test", "tests", "testing", "example", "examples", "benchmark", "benchmarks"}
+                       for part in module.split("."))
+        ]
     except Exception:
         # Some package names differ between import name and distribution name;
         # PyInstaller's normal analysis will still report a useful error.
