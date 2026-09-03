@@ -50,7 +50,10 @@ class NNModel:
     """Lightweight NN model loaded from JSON for inference."""
 
     def __init__(self, params_file):
-        with open(params_file) as f:
+        # Julia writes model JSON as UTF-8.  Do not use the Windows locale
+        # encoding here: on Simplified Chinese systems, "σ" would otherwise
+        # be decoded as "蟽" and the sigmoid activation would not be found.
+        with open(params_file, "r", encoding="utf-8") as f:
             params = json.load(f)
 
         self.input_size = params["input_size"]

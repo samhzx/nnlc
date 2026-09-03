@@ -119,8 +119,8 @@ def main():
     print(f"\nSaved model to {out}")
 
     imp_path = out.with_suffix(".importances.json")
-    with open(imp_path, "w") as f:
-        json.dump(dict(importances), f, indent=2)
+    with open(imp_path, "w", encoding="utf-8") as f:
+        json.dump(dict(importances), f, ensure_ascii=False, indent=2)
     print(f"Saved importances to {imp_path}")
 
 
