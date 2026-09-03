@@ -12,6 +12,40 @@ NNLC 使用针对每辆车的神经网络替代标准扭矩横向控制器，学
 - **Julia 1.9+** — 用于 CPU 模型训练
 - **comma 设备** — 用于采集驾驶数据（comma 3/3X）
 
+如果只使用 Windows 发布包，不需要在目标电脑安装 Python、Julia 或项目依赖；请直接阅读下方的 [Windows 图形界面](#windows-图形界面) 章节。命令行开发和从源码训练仍需要安装 Python 与 Julia。
+
+## 项目结构
+
+```text
+nnlc/
+├── nnlc_gui.py                 # Tkinter 图形界面入口
+├── nnlc_auto_train.py          # 提取、评分、剪枝、训练和验证的一键流程
+├── nnlc_tools/                 # rlog 处理、评分、可视化和干预分类工具
+├── training/
+│   ├── latmodel_temporal.jl   # 主训练脚本（GUI 和自动流程使用）
+│   ├── run.sh                 # Julia 训练启动脚本
+│   └── 其他 *.jl              # 实验或对比模型，不参与默认流程
+├── build_windows.ps1          # Windows one-dir 构建脚本
+└── nnlc_windows.spec          # PyInstaller 配置
+```
+
+默认训练只使用 `training/latmodel_temporal.jl`。`latmodel.jl`、`latmodel_temporal_steer_angle.jl` 和 `latmodel_NeuralPDE.jl` 保留用于实验或结果对比，不会被 GUI 自动调用。
+
+## Windows 图形界面
+
+Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命令行的场景。启动后按以下顺序填写：
+
+1. 选择包含 `reallog`/`rlog` 文件的输入目录。
+2. 选择输出目录；中间 CSV、覆盖度图、模型验证图和最终 JSON 会保存在这里。
+3. 输入车型 `carFingerprint`，例如 `BYD_TANG_DMI_24`。车型仅要求非空，不做额外格式限制。
+4. 路线阈值保持“自动推荐”，或取消勾选后填写 `0-100` 的整数。
+5. 训练模式选择“CPU 标准模式”或“CPU 低内存模式”。项目固定使用 CPU，不会启用 GPU；低内存模式使用更小批次，适合内存较小的电脑。
+6. 日志处理模式默认是严格模式。若设备下载日志时可能仍在写入，可选择“容错模式（跳过损坏日志）”；被跳过的文件会写入运行日志，训练前应确认剩余数据量足够。
+
+车型、训练模式和日志处理模式会自动记住上次选择。覆盖度图默认生成，也可以在界面中取消。
+
+one-dir 程序无需安装目标电脑上的 Python、Julia 或依赖包，但必须整体保留 `NNLC_Trainer` 文件夹，不能只复制 `NNLC_Trainer.exe`。
+
 ## 现有车型 NNLC 模型
 
 截至 2026 年 2 月，共有 113 个 NNLC 模型。作者不了解这些模型目前各自的状态。
