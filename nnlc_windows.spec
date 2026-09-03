@@ -38,10 +38,9 @@ def directory_datas(source_dir: Path, target_dir: str):
         relative_parts = {part.lower() for part in relative_path.parts}
         target_parts = {part.lower() for part in Path(target_dir).parts}
 
-        # Debug symbols and static-linker metadata are not loaded by the
-        # bundled Julia process.  They can be large and are only useful when
-        # debugging Julia itself.
-        if path.suffix.lower() in {".pdb", ".a", ".la"}:
+        # Debug symbols are not loaded by the bundled Julia process.  They are
+        # only useful when debugging Julia itself.
+        if path.suffix.lower() == ".pdb":
             return False
 
         # Keep the Julia runtime and package depot intact.  Only transient
@@ -51,6 +50,10 @@ def directory_datas(source_dir: Path, target_dir: str):
         if target_parts == {"julia-depot"}:
             top_level = relative_path.parts[0].lower() if relative_path.parts else ""
             if top_level in {"scratchspaces", "logs", "clones"}:
+                return False
+            # Static archives in package artifacts are not loaded at runtime
+            # and can be omitted from the depot copy.
+            if path.suffix.lower() in {".a", ".la"}:
                 return False
 
         if "cmake" in relative_parts:
