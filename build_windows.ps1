@@ -50,9 +50,16 @@ $env:JULIA_DEPOT_PATH = (Resolve-Path "julia-depot").Path
 $env:NNLC_WINDOWS_CPU_BUILD = "1"
 
 if (-not $JuliaDepot -and -not $SkipJuliaPackages) {
-    Write-Host "Installing and precompiling Julia packages into $env:JULIA_DEPOT_PATH ..."
-    & "julia-runtime\bin\julia.exe" --startup-file=no "training\install_packages.jl"
-    if ($LASTEXITCODE -ne 0) { throw "Julia package installation failed ($LASTEXITCODE)" }
+    Write-Host "Installing Julia packages into $env:JULIA_DEPOT_PATH ..."
+    $env:JULIA_PKG_PRECOMPILE_AUTO = "0"
+    $env:NNLC_SKIP_PRECOMPILE = "1"
+    try {
+        & "julia-runtime\bin\julia.exe" --startup-file=no "training\install_packages.jl"
+        if ($LASTEXITCODE -ne 0) { throw "Julia package installation failed ($LASTEXITCODE)" }
+    } finally {
+        Remove-Item Env:\JULIA_PKG_PRECOMPILE_AUTO -ErrorAction SilentlyContinue
+        Remove-Item Env:\NNLC_SKIP_PRECOMPILE -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "Removing Julia package-manager caches ..."

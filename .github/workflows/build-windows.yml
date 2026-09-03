@@ -53,9 +53,25 @@ jobs:
             throw "Bundled Julia failed to start ($LASTEXITCODE)"
           }
           $env:JULIA_DEPOT_PATH = (Resolve-Path (Join-Path $bundleDir "_internal\julia-depot")).Path
-          & $bundledJulia --startup-file=no -e 'using CSV, DataFrames, Flux, Plots, BSON, JSON, ArgParse'
+          $compiledCache = Join-Path $env:JULIA_DEPOT_PATH "compiled"
+          $oldCacheBytes = 0
+          if (Test-Path -LiteralPath $compiledCache) {
+            $oldCacheBytes = (Get-ChildItem -LiteralPath $compiledCache -Recurse -File | Measure-Object -Property Length -Sum).Sum
+            Remove-Item -LiteralPath $compiledCache -Recurse -Force
+          }
+          Write-Host "Removed relocated Julia compiled cache: $([math]::Round($oldCacheBytes / 1MB, 1)) MB"
+          $env:NNLC_WINDOWS_CPU_BUILD = "1"
+          $env:NNLC_PRECOMPILE_ONLY = "1"
+          $precompileScript = Join-Path $bundleDir "_internal\training\install_packages.jl"
+          & $bundledJulia --startup-file=no $precompileScript
           if ($LASTEXITCODE -ne 0) {
-            throw "Bundled Julia package import smoke test failed ($LASTEXITCODE)"
+            throw "Bundled Julia package precompile test failed ($LASTEXITCODE)"
+          }
+          Remove-Item Env:\NNLC_PRECOMPILE_ONLY -ErrorAction SilentlyContinue
+          $newCacheBytes = (Get-ChildItem -LiteralPath $compiledCache -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host "Final-location Julia compiled cache: $([math]::Round($newCacheBytes / 1MB, 1)) MB"
+          foreach ($cacheDirName in @("scratchspaces", "logs", "clones")) {
+            Remove-Item -LiteralPath (Join-Path $env:JULIA_DEPOT_PATH $cacheDirName) -Recurse -Force -ErrorAction SilentlyContinue
           }
           $trainingScript = Join-Path $bundleDir "_internal\training\latmodel_temporal.jl"
           if (-not (Test-Path -LiteralPath $trainingScript -PathType Leaf)) {

@@ -42,23 +42,32 @@ if !windows_cpu_build
     push!(packages, "ModelingToolkit")
 end
 
-Pkg.add(packages)
+precompile_only = get(ENV, "NNLC_PRECOMPILE_ONLY", "") == "1"
+if !precompile_only
+    Pkg.add(packages)
+end
 
-# Trigger precompilation
-println("Precompiling all packages...")
-failed = String[]
-for pkg in packages
-    try
-        Core.eval(Main, Meta.parse("using $pkg"))
-        println("  ✓ $pkg")
-    catch e
-        push!(failed, pkg)
-        println("  ⚠ $pkg ($(typeof(e)) — may work at runtime)")
+# Trigger precompilation unless the build is staging packages for a final
+# relocatable bundle.  Those packages are precompiled after they reach their
+# final path so Julia does not retain a second set of path-dependent caches.
+skip_precompile = get(ENV, "NNLC_SKIP_PRECOMPILE", "") == "1"
+if skip_precompile
+    println("Package installation complete; final-location precompilation deferred.")
+else
+    println("Precompiling all packages...")
+    failed = String[]
+    for pkg in packages
+        try
+            Core.eval(Main, Meta.parse("using $pkg"))
+            println("  ✓ $pkg")
+        catch e
+            push!(failed, pkg)
+            println("  ⚠ $pkg ($(typeof(e)) — may work at runtime)")
+        end
     end
-end
 
-if !isempty(failed)
-    error("Julia package precompilation failed for: $(join(failed, ", "))")
+    if !isempty(failed)
+        error("Julia package precompilation failed for: $(join(failed, ", "))")
+    end
+    println("Package precompilation complete.")
 end
-
-println("Package installation complete.")
