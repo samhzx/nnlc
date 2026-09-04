@@ -17,10 +17,13 @@ import glob
 import os
 import re
 import sys
+import tempfile
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+from nnlc_tools.bool_utils import parse_bool
 
 # Temporal offsets matching nnlc.py's past_times and future_times
 PAST_TIMES = [-0.3, -0.2, -0.1]
@@ -356,7 +359,7 @@ class _StreamingCsvWriter:
 
     def accept(self, row):
         self.rows_seen += 1
-        if self.filter_overrides and bool(row[COLUMNS.index("steering_pressed")]):
+        if self.filter_overrides and parse_bool(row[COLUMNS.index("steering_pressed")]):
             self.rows_filtered += 1
             return
 
@@ -483,15 +486,36 @@ def main():
     if fmt == "csv":
         # CSV is the pipeline's native format. Write rows as they arrive so
         # memory usage is bounded by one rlog's parser state and the temporal
-        # look-ahead buffer instead of the complete dataset.
-        stream = _StreamingCsvWriter(args.output, temporal=args.temporal,
-                                     filter_overrides=args.filter_overrides)
+        # look-ahead buffer instead of the complete dataset.  Use a temporary
+        # sibling file so a strict-mode failure can never replace a valid
+        # existing output with a partial CSV.
+        output_dir = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(output_dir, exist_ok=True)
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix=f".{os.path.basename(args.output)}.", suffix=".tmp",
+            dir=output_dir, delete=False,
+        )
+        temp_path = temp_file.name
+        temp_file.close()
+        success = False
+        stream = None
         try:
+            stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
+                                         filter_overrides=args.filter_overrides)
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
                 process_rlog(rlog_path, stream)
-        finally:
             stream.finish()
-            stream.close()
+            if stream.rows_written > 0:
+                os.replace(temp_path, args.output)
+                success = True
+        finally:
+            if stream is not None:
+                stream.close()
+            if not success:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
 
         if stream.rows_written == 0:
             if skipped_rlogs:
@@ -510,32 +534,58 @@ def main():
         # Parquet engines require a DataFrame, but rows are first streamed to
         # a temporary CSV so extraction does not accumulate a second list of
         # every row in memory.
-        import tempfile
         temp_file = tempfile.NamedTemporaryFile(prefix="nnlc_extract_", suffix=".csv", delete=False)
         temp_path = temp_file.name
         temp_file.close()
-        stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
-                                     filter_overrides=args.filter_overrides)
+        extraction_success = False
+        stream = None
         try:
+            stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
+                                         filter_overrides=args.filter_overrides)
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
                 process_rlog(rlog_path, stream)
             stream.finish()
-            if stream.rows_written == 0:
-                if skipped_rlogs:
-                    print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
-                    for path, reason in skipped_rlogs:
-                        print(f"  - {path}: {reason}")
-                print("ERROR: No data extracted from any rlog file")
-                sys.exit(1)
-            df = pd.read_csv(temp_path)
-            print(f"Extracted {len(df)} rows")
-            df.to_parquet(args.output, index=False)
+            extraction_success = stream.rows_written > 0
         finally:
-            stream.close()
+            if stream is not None:
+                stream.close()
+            if not extraction_success:
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+
+        if not extraction_success:
             try:
                 os.unlink(temp_path)
             except FileNotFoundError:
                 pass
+            if skipped_rlogs:
+                print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
+                for path, reason in skipped_rlogs:
+                    print(f"  - {path}: {reason}")
+            print("ERROR: No data extracted from any rlog file")
+            sys.exit(1)
+
+        parquet_dir = os.path.dirname(os.path.abspath(args.output))
+        os.makedirs(parquet_dir, exist_ok=True)
+        parquet_temp = tempfile.NamedTemporaryFile(
+            prefix=f".{os.path.basename(args.output)}.", suffix=".tmp",
+            dir=parquet_dir, delete=False,
+        )
+        parquet_temp_path = parquet_temp.name
+        parquet_temp.close()
+        try:
+            df = pd.read_csv(temp_path)
+            print(f"Extracted {len(df)} rows")
+            df.to_parquet(parquet_temp_path, index=False)
+            os.replace(parquet_temp_path, args.output)
+        finally:
+            for path in (temp_path, parquet_temp_path):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
 
     if skipped_rlogs:
         print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")

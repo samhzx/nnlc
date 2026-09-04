@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LogNorm
 
+from nnlc_tools.bool_utils import parse_bool_series
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
 
 
@@ -32,6 +33,19 @@ def load_data_for_viz(input_path):
     return df
 
 
+def save_placeholder_plot(output_path, title, message):
+    """Write a diagnostic image when required plotting columns are absent."""
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.set_title(title)
+    ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved placeholder coverage plot to {output_path}")
+
+
 def plot_coverage(df, output_path, gap_threshold=50):
     """Generate coverage visualization with 6 subplots (2 rows × 3 columns).
 
@@ -39,6 +53,16 @@ def plot_coverage(df, output_path, gap_threshold=50):
     Bottom row: intervention analysis — override rate by lat accel, override density
     heatmap, torque magnitude distribution during overrides.
     """
+    df = df.copy()
+
+    # All coverage panels use vehicle speed.  Return a useful diagnostic image
+    # instead of raising KeyError when a hand-written or partial CSV is used.
+    if "v_ego" not in df.columns:
+        message = "Missing required column: v_ego"
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "NNLC Training Data Coverage", message)
+        return
+
     # Determine lateral accel column
     lat_accel_col = None
     for col in ["actual_lateral_accel", "desired_lateral_accel"]:
@@ -47,6 +71,11 @@ def plot_coverage(df, output_path, gap_threshold=50):
             break
 
     if lat_accel_col is None:
+        if "desired_curvature" not in df.columns:
+            message = "Missing lateral acceleration data and desired_curvature"
+            print(f"WARNING: {message}")
+            save_placeholder_plot(output_path, "NNLC Training Data Coverage", message)
+            return
         print("WARNING: No lateral acceleration data found. Using desired_curvature * v_ego^2.")
         df["_lat_accel"] = df["desired_curvature"] * df["v_ego"] ** 2
         lat_accel_col = "_lat_accel"
@@ -54,10 +83,13 @@ def plot_coverage(df, output_path, gap_threshold=50):
     # Filter to active driving only
     mask = pd.Series(True, index=df.index)
     if "active" in df.columns:
-        mask &= df["active"].astype(bool)
+        mask &= parse_bool_series(df["active"])
     if "standstill" in df.columns:
-        mask &= ~df["standstill"].astype(bool)
+        mask &= ~parse_bool_series(df["standstill"])
     active_df = df[mask].copy()
+    if "steering_pressed" in active_df.columns:
+        # Keep rates numerically meaningful when CSV flags are strings.
+        active_df["steering_pressed"] = parse_bool_series(active_df["steering_pressed"])
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle("NNLC Training Data Coverage", fontsize=14, fontweight="bold")
@@ -148,7 +180,7 @@ def plot_coverage(df, output_path, gap_threshold=50):
     # 4. Override Density Heatmap (speed × lat_accel)
     ax4 = axes[1, 0]
     if has_overrides:
-        override_df = active_df[active_df["steering_pressed"].astype(bool)]
+        override_df = active_df[parse_bool_series(active_df["steering_pressed"])]
         if len(override_df) > 0:
             valid_ov = override_df[["v_ego", lat_accel_col]].dropna()
             h_ov, xedges_ov, yedges_ov = np.histogram2d(
@@ -195,7 +227,7 @@ def plot_coverage(df, output_path, gap_threshold=50):
     # 6. Torque Magnitude During Overrides
     ax6 = axes[1, 1]
     if has_overrides:
-        override_df = active_df[active_df["steering_pressed"].astype(bool)]
+        override_df = active_df[parse_bool_series(active_df["steering_pressed"])]
         if "steering_torque" in df.columns and len(override_df) > 0:
             torque_mag = override_df["steering_torque"].abs().dropna()
             ax6.hist(torque_mag, bins=40, color="coral", edgecolor="none", alpha=0.8)
@@ -227,11 +259,21 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
                          chunksize=DEFAULT_CHUNK_ROWS):
     """Generate coverage plots from bounded CSV chunks."""
     header = pd.read_csv(input_path, nrows=0)
+    if "v_ego" not in header.columns:
+        message = "Missing required column: v_ego"
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "NNLC Training Data Coverage", message)
+        return
     lat_accel_col = next(
         (col for col in ("actual_lateral_accel", "desired_lateral_accel")
          if col in header.columns),
         None,
     )
+    if lat_accel_col is None and "desired_curvature" not in header.columns:
+        message = "Missing lateral acceleration data and desired_curvature"
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "NNLC Training Data Coverage", message)
+        return
     speed_bins = np.linspace(0, 40, 41)
     lat_bins = np.linspace(-3, 3, 61)
     h = np.zeros((40, 60), dtype=np.int64)
@@ -248,9 +290,9 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
     for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
         mask = pd.Series(True, index=chunk.index)
         if "active" in chunk:
-            mask &= chunk["active"].astype(bool)
+            mask &= parse_bool_series(chunk["active"])
         if "standstill" in chunk:
-            mask &= ~chunk["standstill"].astype(bool)
+            mask &= ~parse_bool_series(chunk["standstill"])
         active = chunk.loc[mask]
         if lat_accel_col is None:
             if not {"desired_curvature", "v_ego"}.issubset(active.columns):
@@ -272,7 +314,7 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
         lat_idx = np.clip(((lat + 3) // .2).astype(int), 0, 29)
         lat_total += np.bincount(lat_idx, minlength=30)
         if "steering_pressed" in active:
-            override = active.loc[valid.index, "steering_pressed"].astype(bool).to_numpy()
+            override = parse_bool_series(active.loc[valid.index, "steering_pressed"]).to_numpy()
             h_override += np.histogram2d(
                 np.clip(speed[override], 0, 40), np.clip(lat[override], -3, 3),
                 bins=[speed_bins, lat_bins],
@@ -372,10 +414,16 @@ def plot_torque_scatter(df, output_path, max_points=None):
     # Filter to active driving only
     mask = pd.Series(True, index=df.index)
     if "active" in df.columns:
-        mask &= df["active"].astype(bool)
+        mask &= parse_bool_series(df["active"])
     if "standstill" in df.columns:
-        mask &= ~df["standstill"].astype(bool)
+        mask &= ~parse_bool_series(df["standstill"])
     active_df = df[mask].copy()
+
+    if "v_ego" not in active_df.columns:
+        message = "Missing required column: v_ego"
+        print(f"WARNING: {message}")
+        save_placeholder_plot(output_path, "Lateral Accel vs Torque", message)
+        return
 
     valid = active_df[[lat_accel_col, "torque_output", "v_ego"]].dropna()
     valid = valid.copy()

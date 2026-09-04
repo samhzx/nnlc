@@ -17,6 +17,7 @@ import sys
 
 import pandas as pd
 
+from nnlc_tools.bool_utils import parse_bool_series
 from nnlc_tools.score_routes import score_route
 from nnlc_tools.streaming_data import (
     DEFAULT_CHUNK_ROWS,
@@ -77,7 +78,7 @@ def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
     # 2. Frame-level: drop saturated frames
     if drop_saturated and "saturated" in df.columns:
         before = len(df)
-        df = df[~df["saturated"].astype(bool)]
+        df = df[~parse_bool_series(df["saturated"])]
         saturated_dropped = before - len(df)
 
     # 3. Frame-level: drop lane-change frames
@@ -155,7 +156,7 @@ def prune_csv_stream(input_path, output_path, min_score=0,
                     route_rows_dropped += before - len(chunk)
                 if drop_saturated and "saturated" in chunk.columns:
                     before = len(chunk)
-                    chunk = chunk[~chunk["saturated"].astype(bool)]
+                    chunk = chunk[~parse_bool_series(chunk["saturated"])]
                     saturated_dropped += before - len(chunk)
                 if drop_lane_change and "lane_change_state" in chunk.columns:
                     before = len(chunk)

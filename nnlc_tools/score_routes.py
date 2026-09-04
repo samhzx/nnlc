@@ -16,6 +16,7 @@ import sys
 
 import pandas as pd
 
+from nnlc_tools.bool_utils import parse_bool_series
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
 
 CRITERIA = [
@@ -24,7 +25,7 @@ CRITERIA = [
     ("low_active",       lambda df: df["active"].mean() < 0.80,                                    -25, "<80% active"),
     ("high_standstill",  lambda df: df["standstill"].mean() > 0.30,                                -15, ">30% standstill"),
     ("high_lane_change", lambda df: (df["lane_change_state"] != 0).mean() > 0.10,                  -10, ">10% lane change"),
-    ("too_short",        lambda df: df["active"].astype(bool).sum() * 0.01 < 120,                  -20, "<2 min active driving"),
+    ("too_short",        lambda df: df["active"].sum() * 0.01 < 120,                              -20, "<2 min active driving"),
 ]
 
 REQUIRED_SCORE_COLUMNS = {
@@ -74,6 +75,12 @@ def score_route(df):
         return 0, ["empty route"]
     if missing:
         return 0, [f"missing fields: {', '.join(missing)}"]
+
+    # Normalize flags before calculating means.  In particular,
+    # bool("False") is True and would otherwise corrupt every criterion.
+    df = df.copy()
+    for column in ("steering_pressed", "saturated", "active", "standstill"):
+        df[column] = parse_bool_series(df[column])
 
     score = 100
     flags = []
@@ -167,6 +174,8 @@ def score_csv_stream(input_path, chunksize=DEFAULT_CHUNK_ROWS):
         missing = sorted(REQUIRED_SCORE_COLUMNS.difference(chunk.columns))
         if missing:
             return None, f"missing fields: {', '.join(missing)}"
+        for column in ("steering_pressed", "saturated", "active", "standstill"):
+            chunk[column] = parse_bool_series(chunk[column])
         for route_id, group in chunk.groupby("route_id", sort=False, dropna=False):
             key = str(route_id)
             state = aggregates.setdefault(key, {
@@ -174,10 +183,10 @@ def score_csv_stream(input_path, chunksize=DEFAULT_CHUNK_ROWS):
                 "active": 0, "standstill": 0, "lane_change": 0,
             })
             state["rows"] += len(group)
-            state["override"] += int(group["steering_pressed"].astype(bool).sum())
-            state["saturated"] += int(group["saturated"].astype(bool).sum())
-            state["active"] += int(group["active"].astype(bool).sum())
-            state["standstill"] += int(group["standstill"].astype(bool).sum())
+            state["override"] += int(group["steering_pressed"].sum())
+            state["saturated"] += int(group["saturated"].sum())
+            state["active"] += int(group["active"].sum())
+            state["standstill"] += int(group["standstill"].sum())
             state["lane_change"] += int((group["lane_change_state"] != 0).sum())
 
     results = []

@@ -127,6 +127,18 @@ function describe(arr)::String
 
 end
 
+function parse_bool_value(value)
+  if value === missing || value === nothing
+    return false
+  elseif value isa Bool
+    return value
+  elseif value isa Real
+    return isfinite(value) && value != 0
+  end
+  normalized = lowercase(strip(string(value)))
+  return normalized in ("true", "1", "yes", "on", "t", "y")
+end
+
 function load_data(infile::String, use_existing_data::Bool, outdir::String, out_streams)::DataFrame
   # Load the data into a DataFrame
   if use_existing_data
@@ -142,11 +154,13 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
 
     # Filter out inactive and standstill rows (extractor outputs all rows)
     if "active" in names(data)
+      data[!, :active] = parse_bool_value.(data[!, :active])
       old_nrows = nrow(data)
       data = filter(row -> row.active == true, data)
       println(out_streams, f"Filtered out {old_nrows - nrow(data)} inactive rows")
     end
     if "standstill" in names(data)
+      data[!, :standstill] = parse_bool_value.(data[!, :standstill])
       old_nrows = nrow(data)
       data = filter(row -> row.standstill == false, data)
       println(out_streams, f"Filtered out {old_nrows - nrow(data)} standstill rows")
@@ -317,12 +331,7 @@ function validate_stream_columns(row)
 end
 
 function stream_bool(row, column::String)
-  value = stream_cell(row, column)
-  if value isa Bool
-    return value
-  end
-  normalized = lowercase(strip(string(value)))
-  return normalized in ("true", "1", "yes", "on")
+  return parse_bool_value(stream_cell(row, column))
 end
 
 function stream_parse_row(row, feature_buffer::Union{Nothing, Vector{Float32}}=nothing)
@@ -1028,17 +1037,31 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         epoch_loss_sum = 0f0
         epoch_sample_count = 0
         for (x, y) in train_data_loader
-          epoch_loss_sum += Float32(train_batch!(x, y, λ, λ_monotonic, λ_odd, λ_origin)) * length(y)
+          batch_loss = Float32(train_batch!(x, y, λ, λ_monotonic, λ_odd, λ_origin))
+          if !isfinite(batch_loss)
+            error("训练过程中检测到非有限 loss（标准批次，epoch=$epoch）")
+          end
+          epoch_loss_sum += batch_loss * length(y)
           epoch_sample_count += length(y)
         end
 
         # Preserve the original sign-symmetry augmentation without retaining a
         # second copy of the complete training set.
         for (x, y) in train_data_loader
-          epoch_loss_sum += Float32(train_batch!(x .* symmetry_signs, -y, λ, λ_monotonic, λ_odd, λ_origin)) * length(y)
+          batch_loss = Float32(train_batch!(x .* symmetry_signs, -y, λ, λ_monotonic, λ_odd, λ_origin))
+          if !isfinite(batch_loss)
+            error("训练过程中检测到非有限 loss（对称增强批次，epoch=$epoch）")
+          end
+          epoch_loss_sum += batch_loss * length(y)
           epoch_sample_count += length(y)
         end
+        if epoch_sample_count == 0
+          error("训练数据加载器没有产生任何样本")
+        end
         l = epoch_loss_sum / epoch_sample_count
+        if !isfinite(l)
+          error("训练过程中检测到非有限 loss（epoch=$epoch）")
+        end
 
         push!(losses, l)
         push!(lambdas, (λ, λ_monotonic, λ_odd, λ_origin))
@@ -1091,6 +1114,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         ilog += 1
     end
     loss_cur = loss(X_train', y_train, model)
+    if !isfinite(loss_cur)
+      error("训练结束时检测到非有限训练 loss")
+    end
     Δloss = loss_cur - loss_last
     cur_time = Dates.format(now(), "HH:MM:SS")
     println(out_streams, f"round 1 {cur_time} Epoch: {epoch:3d} (of {epoch_max}; Loss: {loss_cur:.6f}, ΔLoss: {Δloss:.7f}, ΔΔLoss: {ΔΔloss:.9f}")
@@ -1115,30 +1141,27 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
     @save "$model_path.bson" model
 
-    # Create and save plot of training
-
-    # x value is just the epoch number
-    x = 1:length(losses)
-
-    mean_loss = mean(losses)
-    std_loss = std(losses)
-
-    # Plot the loss values with a black line on the left axis
-    p = plot(x, losses, label="Loss", color=:black, ylabel="Loss", xlabel="Epoch", yscale=:log10, legend=:topleft)
-
-    # Iterate through each lamda and plot it with different colors
-    colors = [:red, :blue, :green, :orange]
-    loss_names = ["λ_l2_regularization", "λ_monotonic", "λ_odd", "λ_origin"]
-    for i in 1:4
-        lambda = [l[i] for l in lambdas]
-        l_max = maximum(lambda)
-        if l_max == 0f0
-            continue
-        end
-        normalized_lambda = lambda ./ l_max
-        plot!(twinx(), normalized_lambda, label=loss_names[i], color=colors[i], ylabel="Normalized Lamda",xticks=:none, legend=:bottomright)
+    # Create and save the training plot after the BSON checkpoint.  Plotting is
+    # diagnostic only: a missing plotting backend or an unwritable directory
+    # must not invalidate an otherwise successful model training run.
+    try
+      x = 1:length(losses)
+      p = plot(x, losses, label="Loss", color=:black, ylabel="Loss", xlabel="Epoch", yscale=:log10, legend=:topleft)
+      colors = [:red, :blue, :green, :orange]
+      loss_names = ["λ_l2_regularization", "λ_monotonic", "λ_odd", "λ_origin"]
+      for i in 1:4
+          lambda = [l[i] for l in lambdas]
+          l_max = maximum(lambda)
+          if l_max == 0f0
+              continue
+          end
+          normalized_lambda = lambda ./ l_max
+          plot!(twinx(), normalized_lambda, label=loss_names[i], color=colors[i], ylabel="Normalized Lamda",xticks=:none, legend=:bottomright)
+      end
+      savefig(p, "$model_path.training.png")
+    catch e
+      println(out_streams, "WARNING: 训练曲线生成失败，继续导出模型：$(sprint(showerror, e))")
     end
-    savefig(p, "$model_path.training.png")
     
     println(out_streams, "Finished after $epoch epochs, Loss: $loss_cur, ΔLoss: $Δloss, Test loss: $(loss(X_test', y_test, model))")
 
@@ -1237,6 +1260,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   current_date_and_time = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
 
   model_test_loss = loss(X_test', y_test, model)
+  if !isfinite(model_test_loss)
+      error("模型测试 loss 为 NaN 或 Inf，拒绝导出模型")
+  end
 
   # save model to json for Python import
   function export_model_params_to_json(model::Chain, input_mean::Matrix{Float32}, input_std::Matrix{Float32}, filename::String, current_date_and_time, model_test_loss, input_vars)
@@ -1266,6 +1292,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
   # Evaluate the model on the test set 
   test_loss = loss(X_test', y_test, model)
+  if !isfinite(test_loss)
+    error("模型测试 loss 为 NaN 或 Inf，拒绝完成训练")
+  end
   println(out_streams, "Test loss (MSE): ", test_loss)
 
   return (model=model, input_mean=input_mean, input_std=input_std, X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test, test_loss=test_loss)
@@ -1736,40 +1765,49 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
   outdir = create_folder_with_iterator(out_dir_base, carname, make_new=true)
   logfile = open(outdir * "/$(carname)_log.txt", "a")  # Open log file in append mode
   out_streams = TeeStream(stdout, logfile)  # Create a Tee output stream
-  preprocess_infile = replace(in_file, ".csv" => "_balanced.csv")
-  use_existing_input = false
-  if isfile(preprocess_infile) # && stat(in_file).mtime < stat(preprocess_infile).mtime
-      #use_existing_input = true
-      # return
-  end
-  
-  prepared_test = nothing
-  if streaming
-    println(out_streams, "使用两遍扫描的流式低内存预处理")
-    data, prepared_test = load_data_streaming(in_file, out_streams)
-  else
-    data = load_data(in_file, use_existing_input, outdir, out_streams)
-  end
+  try
+    preprocess_infile = replace(in_file, ".csv" => "_balanced.csv")
+    use_existing_input = false
+    if isfile(preprocess_infile) # && stat(in_file).mtime < stat(preprocess_infile).mtime
+        #use_existing_input = true
+        # return
+    end
 
-  feature_names = model_feature_names(data)
-  model_file = "$outdir/$carname.bson"
-  use_existing_input = false
-  println(out_streams, "Model file: $model_file")
-  if isfile(model_file) && stat(in_file).mtime < stat(model_file).mtime
-      use_existing_input = true
-      println(out_streams, "Using existing model file: $model_file")
-      # return
-  end
+    prepared_test = nothing
+    if streaming
+      println(out_streams, "使用两遍扫描的流式低内存预处理")
+      data, prepared_test = load_data_streaming(in_file, out_streams)
+    else
+      data = load_data(in_file, use_existing_input, outdir, out_streams)
+    end
 
-  model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(
-    outdir, use_existing_input, data, out_streams;
-    force_cpu=force_cpu,
-    requested_batch_size=requested_batch_size,
-    prepared_test=prepared_test,
-  )
-  
-  test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss)
-  close(logfile)
+    feature_names = model_feature_names(data)
+    model_file = "$outdir/$carname.bson"
+    use_existing_input = false
+    println(out_streams, "Model file: $model_file")
+    if isfile(model_file) && stat(in_file).mtime < stat(model_file).mtime
+        use_existing_input = true
+        println(out_streams, "Using existing model file: $model_file")
+        # return
+    end
+
+    model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(
+      outdir, use_existing_input, data, out_streams;
+      force_cpu=force_cpu,
+      requested_batch_size=requested_batch_size,
+      prepared_test=prepared_test,
+    )
+
+    # Validation plots are optional diagnostics.  Keep a valid exported JSON
+    # model usable even when plotting fails on a headless/minimal environment.
+    try
+      test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss)
+    catch e
+      println(out_streams, "WARNING: 模型验证图生成失败，模型文件仍然有效：$(sprint(showerror, e))")
+    end
+  finally
+    close(logfile)
+  end
 end
 
 function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false)

@@ -26,6 +26,7 @@ class LogReader:
         self._mapping = None
         self._temporary_file = False
         self._ents = []
+        source = None
         target = None
 
         try:
@@ -63,11 +64,15 @@ class LogReader:
             if sort_by_time:
                 self._ents = sorted(self._ents, key=lambda e: e.logMonoTime)
         except Exception:
-            if target is not None and target is not self._file:
-                try:
-                    target.close()
-                except OSError:
-                    pass
+            # Decompression or mmap setup may fail before ``source`` is
+            # transferred to ``self._file``.  Close both handles explicitly;
+            # otherwise repeated corrupt rlogs can exhaust file descriptors.
+            for handle in (target, source):
+                if handle is not None and handle is not self._file:
+                    try:
+                        handle.close()
+                    except OSError:
+                        pass
             self.close()
             raise
 

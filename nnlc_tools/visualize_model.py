@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from nnlc_tools.bool_utils import parse_bool_series
+
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, sample_csv
 
 
@@ -106,9 +108,9 @@ def filter_active(df):
     """Filter to active, non-standstill rows."""
     mask = pd.Series(True, index=df.index)
     if "active" in df.columns:
-        mask &= df["active"].astype(bool)
+        mask &= parse_bool_series(df["active"])
     if "standstill" in df.columns:
-        mask &= ~df["standstill"].astype(bool)
+        mask &= ~parse_bool_series(df["standstill"])
     return df[mask]
 
 

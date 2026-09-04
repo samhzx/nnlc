@@ -302,12 +302,15 @@ def main():
     # Filter to active, non-standstill frames
     mask = pd.Series(True, index=df.index)
     if "active" in df.columns:
-        mask &= df["active"].astype(bool)
+        from nnlc_tools.bool_utils import parse_bool_series
+        mask &= parse_bool_series(df["active"])
     if "standstill" in df.columns:
-        mask &= ~df["standstill"].astype(bool)
+        from nnlc_tools.bool_utils import parse_bool_series
+        mask &= ~parse_bool_series(df["standstill"])
     active_df = df[mask].reset_index(drop=True)
 
-    n_override = active_df["steering_pressed"].astype(bool).sum()
+    from nnlc_tools.bool_utils import parse_bool_series
+    n_override = parse_bool_series(active_df["steering_pressed"]).sum()
     print(f"Active frames: {len(active_df):,}  |  Override frames: {n_override:,} ({n_override / max(len(active_df), 1):.1%})")
 
     events = segment_events(active_df, gap_frames=args.gap_frames)

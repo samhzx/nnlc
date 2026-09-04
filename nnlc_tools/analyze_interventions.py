@@ -16,6 +16,7 @@ import sys
 import numpy as np
 import pandas as pd
 
+from nnlc_tools.bool_utils import parse_bool, parse_bool_series
 from nnlc_tools.streaming_data import (
     DEFAULT_CHUNK_ROWS,
     iter_csv_chunks,
@@ -55,7 +56,7 @@ def segment_events(df, gap_frames=DEFAULT_GAP_FRAMES):
     if "steering_pressed" not in df.columns:
         return []
 
-    sp = df["steering_pressed"].astype(bool).values
+    sp = parse_bool_series(df["steering_pressed"]).to_numpy()
     routes = df["route_id"].map(str).values if "route_id" in df.columns else None
     n = len(sp)
 
@@ -380,7 +381,7 @@ def classify_events(
 
     # Lane-change guard: override classification to genuine unconditionally
     if "lane_change_active" in df.columns:
-        df.loc[df["lane_change_active"].astype(bool), "classification"] = "genuine"
+        df.loc[parse_bool_series(df["lane_change_active"]), "classification"] = "genuine"
 
     # Confidence: fraction of rules fired (for mechanical), inverted for genuine
     df["confidence"] = df.apply(
@@ -489,11 +490,11 @@ def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_G
                     write_rows(pending_gap)
                     pending_gap.clear()
                 current_route = route
-                is_active = active_index is None or bool(row[active_index])
-                is_standstill = standstill_index is not None and bool(row[standstill_index])
+                is_active = active_index is None or parse_bool(row[active_index])
+                is_standstill = standstill_index is not None and parse_bool(row[standstill_index])
                 if not is_active or is_standstill:
                     continue
-                pressed = bool(row[pressed_index])
+                pressed = parse_bool(row[pressed_index])
                 if pressed:
                     if event_row_count:
                         event_row_count += len(pending_gap)
@@ -939,12 +940,12 @@ def main():
     # Filter to active driving (same pattern as visualize_coverage.py:52-57)
     mask = pd.Series(True, index=df.index)
     if "active" in df.columns:
-        mask &= df["active"].astype(bool)
+        mask &= parse_bool_series(df["active"])
     if "standstill" in df.columns:
-        mask &= ~df["standstill"].astype(bool)
+        mask &= ~parse_bool_series(df["standstill"])
     active_df = df[mask].reset_index(drop=True)
 
-    n_override_frames = active_df["steering_pressed"].astype(bool).sum()
+    n_override_frames = parse_bool_series(active_df["steering_pressed"]).sum()
     print(f"Active frames: {len(active_df):,}  |  Override frames: {n_override_frames:,} ({n_override_frames / max(len(active_df), 1):.1%})")
 
     events = segment_events(active_df, gap_frames=args.gap_frames)
