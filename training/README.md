@@ -73,7 +73,11 @@ Pkg.add(["Flux", "MLUtils", "CSV", "DataFrames", "JSON", "Statistics",
 bash training/run.sh /path/to/latmodels/ --cpu
 ```
 
-大型数据集建议使用“CPU 低内存模式”并适当减小批次大小，以控制内存峰值。
+大型数据集建议使用 GUI 的“CPU 流式低内存模式”，或直接传入 `--streaming --batch-size=4096`。流式模式会对 CSV 进行两遍顺序扫描，只在内存中保留路线计数、每个训练分箱的固定容量样本和最多 10 万条测试样本，适合 16GB 内存电脑处理上亿行数据。
+
+流式模式保留与标准模式一致的 18 维输入、范围过滤、完整路线隔离、训练分箱每箱最多 20 条、测试集最多 10 万条、固定随机种子、对称增强和损失函数。储备抽样得到的具体行可能不同，但抽样分布与标准模式统计等价，不会因为分块大小改变训练规则。
+
+流式处理降低的是内存占用，不会减少中间 CSV 的磁盘占用。完整一键流程建议输出磁盘至少预留 100GB，并保证 CSV 中同一路线的数据连续；只有单条路线时，数据还必须按 `timestamp` 升序排列，程序会在训练前检查这些条件。
 
 ## 使用方法
 
@@ -90,6 +94,9 @@ julia latmodel_temporal.jl /path/to/latmodels/
 
 # CPU 训练（--cpu 为兼容旧命令保留）
 bash training/run.sh /path/to/latmodels/ --cpu
+
+# 上亿行 CSV：两遍扫描、固定容量抽样和 4096 批次
+julia training/latmodel_temporal.jl /path/to/latmodels/ --streaming --batch-size=4096
 
 # 3. 部署模型
 cp /path/to/latmodels/my_car_model.json \

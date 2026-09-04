@@ -11,12 +11,15 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LogNorm
+
+from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
 
 
 def load_data_for_viz(input_path):
@@ -220,6 +223,117 @@ def plot_coverage(df, output_path, gap_threshold=50):
     plt.close()
 
 
+def plot_coverage_stream(input_path, output_path, gap_threshold=50,
+                         chunksize=DEFAULT_CHUNK_ROWS):
+    """Generate coverage plots from bounded CSV chunks."""
+    header = pd.read_csv(input_path, nrows=0)
+    lat_accel_col = next(
+        (col for col in ("actual_lateral_accel", "desired_lateral_accel")
+         if col in header.columns),
+        None,
+    )
+    speed_bins = np.linspace(0, 40, 41)
+    lat_bins = np.linspace(-3, 3, 61)
+    h = np.zeros((40, 60), dtype=np.int64)
+    h_override = np.zeros_like(h)
+    lat_hist = np.zeros(60, dtype=np.int64)
+    speed_total = np.zeros(20, dtype=np.int64)
+    speed_override = np.zeros(20, dtype=np.int64)
+    lat_total = np.zeros(30, dtype=np.int64)
+    lat_override = np.zeros(30, dtype=np.int64)
+    torque_hist = np.zeros(40, dtype=np.int64)
+    torque_edges = np.linspace(0, 10, 41)
+    valid_rows = 0
+
+    for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+        mask = pd.Series(True, index=chunk.index)
+        if "active" in chunk:
+            mask &= chunk["active"].astype(bool)
+        if "standstill" in chunk:
+            mask &= ~chunk["standstill"].astype(bool)
+        active = chunk.loc[mask]
+        if lat_accel_col is None:
+            if not {"desired_curvature", "v_ego"}.issubset(active.columns):
+                continue
+            values = active["desired_curvature"] * active["v_ego"] ** 2
+        else:
+            values = active[lat_accel_col]
+        valid = pd.DataFrame({"speed": active["v_ego"], "lat": values}).dropna()
+        if valid.empty:
+            continue
+        valid_rows += len(valid)
+        speed = valid["speed"].to_numpy()
+        lat = valid["lat"].to_numpy()
+        h += np.histogram2d(np.clip(speed, 0, 40), np.clip(lat, -3, 3),
+                            bins=[speed_bins, lat_bins])[0].astype(np.int64)
+        lat_hist += np.histogram(np.clip(lat, -3, 3), bins=lat_bins)[0]
+        speed_idx = np.clip((speed // 2).astype(int), 0, 19)
+        speed_total += np.bincount(speed_idx, minlength=20)
+        lat_idx = np.clip(((lat + 3) // .2).astype(int), 0, 29)
+        lat_total += np.bincount(lat_idx, minlength=30)
+        if "steering_pressed" in active:
+            override = active.loc[valid.index, "steering_pressed"].astype(bool).to_numpy()
+            h_override += np.histogram2d(
+                np.clip(speed[override], 0, 40), np.clip(lat[override], -3, 3),
+                bins=[speed_bins, lat_bins],
+            )[0].astype(np.int64)
+            speed_override += np.bincount(speed_idx[override], minlength=20)
+            lat_override += np.bincount(lat_idx[override], minlength=30)
+            if "steering_torque" in active:
+                torque = active.loc[valid.index[override], "steering_torque"].abs().dropna().to_numpy()
+                torque_hist += np.histogram(np.clip(torque, 0, 10), bins=torque_edges)[0]
+
+    if valid_rows == 0:
+        raise ValueError("no usable active rows available for coverage plot")
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle("NNLC Training Data Coverage", fontsize=14, fontweight="bold")
+    display = h.astype(float)
+    display[display == 0] = np.nan
+    im = axes[0, 0].pcolormesh(
+        speed_bins, lat_bins, display.T,
+        norm=LogNorm(vmin=1, vmax=max(int(h.max()), 2)), cmap="viridis",
+    )
+    fig.colorbar(im, ax=axes[0, 0], label="Sample count (log)")
+    for i in range(40):
+        for j in range(60):
+            if 0 < h[i, j] < gap_threshold:
+                axes[0, 0].add_patch(plt.Rectangle(
+                    (speed_bins[i], lat_bins[j]), 1, .1,
+                    linewidth=.5, edgecolor="red", facecolor="none"))
+    axes[0, 0].set(xlabel="Speed (m/s)", ylabel="Lateral Accel (m/s²)",
+                   title="Speed vs Lat Accel\n(red outline = <50 samples)")
+    centers = (lat_bins[:-1] + lat_bins[1:]) / 2
+    axes[0, 1].bar(centers, lat_hist, width=.09, color="steelblue", edgecolor="none", alpha=.8)
+    axes[0, 1].set(xlabel="Lateral Accel (m/s²)", ylabel="Count", title="Lateral Accel Distribution")
+    speed_centers = np.arange(1, 40, 2)
+    speed_rate = np.divide(speed_override, speed_total, out=np.zeros(20), where=speed_total > 0) * 100
+    axes[0, 2].bar(speed_centers, speed_rate, width=1.5, color="coral", edgecolor="none", alpha=.8)
+    axes[0, 2].set(xlabel="Speed (m/s)", ylabel="Override Rate (%)", title="Steering Override by Speed")
+    axes[0, 2].axhline(10, color="red", linestyle="--", alpha=.5)
+    if h_override.any():
+        ov_display = h_override.astype(float)
+        ov_display[ov_display == 0] = np.nan
+        im_ov = axes[1, 0].pcolormesh(
+            speed_bins, lat_bins, ov_display.T,
+            norm=LogNorm(vmin=1, vmax=max(int(h_override.max()), 2)), cmap="viridis",
+        )
+        fig.colorbar(im_ov, ax=axes[1, 0], label="Override count (log)")
+    else:
+        axes[1, 0].text(0.5, 0.5, "No override events",
+                        transform=axes[1, 0].transAxes, ha="center", va="center")
+    axes[1, 0].set(xlabel="Speed (m/s)", ylabel="Lateral Accel (m/s²)", title="Override Concentration")
+    axes[1, 1].bar(torque_edges[:-1], torque_hist, width=.24, color="coral", edgecolor="none", alpha=.8)
+    axes[1, 1].set(xlabel="Steering Torque Magnitude", ylabel="Count", title="Torque Magnitude During Overrides")
+    lat_centers = (np.arange(30) + .5) * .2 - 3
+    lat_rate = np.divide(lat_override, lat_total, out=np.zeros(30), where=lat_total > 0) * 100
+    axes[1, 2].bar(lat_centers, lat_rate, width=.18, color="coral", edgecolor="none", alpha=.8)
+    axes[1, 2].set(xlabel="Lateral Accel (m/s²)", ylabel="Override Rate (%)", title="Steering Override by Lat Accel")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved coverage plot to {output_path}")
+
+
 MS_TO_MPH = 2.23694
 
 
@@ -321,7 +435,26 @@ def main():
                         help="Generate a separate lat_accel vs torque scatter plot")
     parser.add_argument("--max-points", type=int, default=None,
                         help="Max data points per torque scatter subplot (random sample)")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Process CSV in bounded chunks")
+    parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS,
+                        help=f"Rows per streaming chunk (default: {DEFAULT_CHUNK_ROWS:,})")
     args = parser.parse_args()
+
+    if args.chunk_rows <= 0:
+        parser.error("--chunk-rows must be a positive integer")
+    if args.streaming:
+        if not os.path.isfile(args.input) or not args.input.lower().endswith(".csv"):
+            parser.error("--streaming only supports an existing CSV file")
+        if args.torque_scatter:
+            parser.error("--torque-scatter is not available with --streaming")
+        try:
+            plot_coverage_stream(args.input, args.output, args.gap_threshold,
+                                 chunksize=args.chunk_rows)
+        except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        return
 
     df = load_data_for_viz(args.input)
     print(f"Loaded {len(df)} rows")
@@ -330,7 +463,6 @@ def main():
 
     if args.torque_scatter:
         # Save alongside the main coverage plot
-        import os
         out_dir = os.path.dirname(args.output) or "."
         scatter_path = os.path.join(out_dir, "lat_accel_vs_torque_data.png")
         plot_torque_scatter(df, scatter_path, max_points=args.max_points)

@@ -138,7 +138,12 @@ def find_rlogs(input_dir):
     files = []
     for pattern in patterns:
         files.extend(glob.glob(os.path.join(input_dir, pattern), recursive=True))
-    return sorted(set(files))
+    def natural_path_key(path):
+        normalized = os.fspath(path).replace("\\", "/")
+        return [int(part) if part.isdigit() else part.lower()
+                for part in re.split(r"(\d+)", normalized)]
+
+    return sorted(set(files), key=natural_path_key)
 
 
 def extract_route_id(path):

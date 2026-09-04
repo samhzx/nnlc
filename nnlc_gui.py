@@ -42,6 +42,7 @@ _ANSI_COLOR_TAGS = {
 TRAINING_MODES = {
     "CPU 标准模式": 16384,
     "CPU 低内存模式": 4096,
+    "CPU 流式低内存模式": 4096,
 }
 CORRUPT_LOG_MODES = {
     "严格模式（遇到损坏日志停止）": False,
@@ -102,6 +103,9 @@ class NNLCApp:
         self.corrupt_log_mode_var = tk.StringVar(value=saved_corrupt_mode)
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
+        self.keep_intermediates_var = tk.BooleanVar(
+            value=bool(saved_preferences.get("keep_intermediates", True))
+        )
         self.status_var = tk.StringVar(value="就绪")
         self.elapsed_var = tk.StringVar(value="")
         self._build_widgets()
@@ -164,6 +168,7 @@ class NNLCApp:
                         "car": car,
                         "training_mode": training_mode,
                         "corrupt_log_mode": corrupt_log_mode,
+                        "keep_intermediates": bool(self.keep_intermediates_var.get()),
                     },
                     handle,
                     ensure_ascii=False,
@@ -189,7 +194,7 @@ class NNLCApp:
         container = ttk.Frame(root, padding=(20, 16, 20, 14))
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(5, weight=1)
+        container.rowconfigure(6, weight=1)
 
         ttk.Label(container, text="NNLC 横向控制模型训练", font=("Microsoft YaHei UI", 17, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 12)
@@ -241,8 +246,10 @@ class NNLCApp:
             width=16,
         )
         self.training_mode_combo.grid(row=2, column=1, sticky="w", padx=(12, 10), pady=6)
-        self.training_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences())
-        ttk.Label(options_frame, text="仅使用 CPU；低内存模式使用更小批次").grid(row=2, column=2, sticky="w", pady=6)
+        self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_changed)
+        ttk.Label(options_frame, text="流式模式适合超大数据和 16GB 内存电脑").grid(
+            row=2, column=2, sticky="w", pady=6
+        )
         self.config_widgets.append(self.training_mode_combo)
 
         ttk.Label(options_frame, text="日志处理模式").grid(row=3, column=0, sticky="w", pady=6)
@@ -258,8 +265,22 @@ class NNLCApp:
         ttk.Label(options_frame, text="容错模式会跳过损坏 rlog 并记录文件").grid(row=3, column=2, sticky="w", pady=6)
         self.config_widgets.append(self.corrupt_log_mode_combo)
 
+        self.keep_intermediates_check = ttk.Checkbutton(
+            options_frame,
+            text="保留完整中间 CSV（默认）",
+            variable=self.keep_intermediates_var,
+            command=self._save_preferences,
+        )
+        self.keep_intermediates_check.grid(row=4, column=1,
+                                           sticky="w", padx=(12, 0), pady=6)
+        ttk.Label(options_frame, text="关闭后仅在流式训练成功时清理中间文件").grid(
+            row=4, column=2, sticky="e", pady=6
+        )
+        self.config_widgets.append(self.keep_intermediates_check)
+        self._update_streaming_options()
+
         controls = ttk.Frame(container)
-        controls.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        controls.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         controls.columnconfigure(1, weight=1)
         self.start_button = ttk.Button(controls, text="开始训练", style="Primary.TButton", command=self.start)
         self.start_button.grid(row=0, column=0, sticky="w")
@@ -272,13 +293,14 @@ class NNLCApp:
         self.clear_log_button.grid(row=0, column=4, padx=(8, 0))
 
         log_frame = ttk.LabelFrame(container, text="运行日志", style="Section.TLabelframe")
-        log_frame.grid(row=5, column=0, sticky="nsew")
+        log_frame.grid(row=6, column=0, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(
             log_frame,
             wrap="word",
             state="disabled",
+            height=16,
             font=("Consolas", 9),
             borderwidth=0,
             padx=8,
@@ -296,7 +318,7 @@ class NNLCApp:
         self.log.tag_configure("step", foreground="#007c91")
 
         ttk.Label(container, textvariable=self.status_var, relief="sunken", anchor="w", padding=(8, 5)).grid(
-            row=6, column=0, sticky="ew", pady=(10, 0)
+            row=7, column=0, sticky="ew", pady=(10, 0)
         )
 
     @staticmethod
@@ -310,6 +332,14 @@ class NNLCApp:
 
     def _toggle_threshold(self) -> None:
         self.threshold_entry.configure(state="disabled" if self.auto_threshold_var.get() else "normal")
+
+    def _update_streaming_options(self) -> None:
+        is_streaming = self.training_mode_var.get() == "CPU 流式低内存模式"
+        self.keep_intermediates_check.configure(state="normal" if is_streaming else "disabled")
+
+    def _on_training_mode_changed(self, _event=None) -> None:
+        self._update_streaming_options()
+        self._save_preferences()
 
     def _choose_data(self) -> None:
         path = filedialog.askdirectory(title="选择包含 reallog/rlog 的目录")
@@ -390,6 +420,7 @@ class NNLCApp:
             # to ``normal`` would let an invalid training mode be typed in.
             self.training_mode_combo.configure(state="readonly")
             self.corrupt_log_mode_combo.configure(state="readonly")
+            self._update_streaming_options()
 
     def _update_elapsed(self) -> None:
         if not self.worker or not self.worker.is_alive() or self.started_at is None:
@@ -478,7 +509,10 @@ class NNLCApp:
         skip_corrupt_rlogs = CORRUPT_LOG_MODES[corrupt_log_mode]
         self.worker = threading.Thread(
             target=self._run_worker,
-            args=(data_dir, output_dir, car, min_score, skip_visualize, skip_corrupt_rlogs, batch_size,
+            args=(data_dir, output_dir, car, min_score, skip_visualize,
+                  skip_corrupt_rlogs, batch_size,
+                  training_mode == "CPU 流式低内存模式",
+                  bool(self.keep_intermediates_var.get()),
                   self.cancel_event, self.process_holder),
             daemon=True,
         )
@@ -494,6 +528,8 @@ class NNLCApp:
         skip_visualize,
         skip_corrupt_rlogs,
         batch_size,
+        streaming_mode,
+        keep_intermediates,
         cancel_event,
         process_holder,
     ) -> None:
@@ -509,6 +545,8 @@ class NNLCApp:
                     output_dir=output_dir,
                     deploy_dir=output_dir,
                     batch_size=batch_size,
+                    streaming_mode=streaming_mode,
+                    keep_intermediates=keep_intermediates,
                     cancel_event=cancel_event,
                     process_holder=process_holder,
                 )

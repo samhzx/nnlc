@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, sample_csv
+
 
 # Activation functions
 def sigmoid(x):
@@ -309,7 +311,14 @@ def main():
     parser.add_argument("data", help="Training data CSV/Parquet file")
     parser.add_argument("-o", "--output-dir", default="./output/",
                         help="Output directory for plots (default: ./output/)")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Use a bounded deterministic sample when reading CSV")
+    parser.add_argument("--max-rows", type=int, default=100_000,
+                        help="Maximum rows retained by streaming validation (default: 100,000)")
     args = parser.parse_args()
+
+    if args.max_rows <= 0:
+        parser.error("--max-rows must be a positive integer")
 
     if not os.path.isfile(args.model):
         print(f"ERROR: Model file not found: {args.model}")
@@ -322,7 +331,17 @@ def main():
     print(f"Loaded model: {model.input_size} inputs, {len(model.layers)} layers")
     print(f"  Input vars: {model.input_vars}")
 
-    df = load_data(args.data)
+    if args.streaming:
+        if not args.data.lower().endswith(".csv"):
+            parser.error("--streaming only supports CSV data")
+        try:
+            df = sample_csv(args.data, max_rows=args.max_rows,
+                            chunksize=DEFAULT_CHUNK_ROWS)
+        except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+    else:
+        df = load_data(args.data)
     print(f"Loaded {len(df)} data rows")
 
     os.makedirs(args.output_dir, exist_ok=True)

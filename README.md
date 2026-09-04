@@ -39,10 +39,16 @@ Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命�
 2. 选择输出目录；中间 CSV、覆盖度图、模型验证图和最终 JSON 会保存在这里。
 3. 输入车型 `carFingerprint`，例如 `BYD_TANG_DMI_24`。车型仅要求非空，不做额外格式限制。
 4. 路线阈值保持“自动推荐”，或取消勾选后填写 `0-100` 的整数。
-5. 训练模式选择“CPU 标准模式”或“CPU 低内存模式”。项目固定使用 CPU，不会启用 GPU；低内存模式使用更小批次，适合内存较小的电脑。
+5. 训练模式按数据规模选择。项目固定使用 CPU，不会启用 GPU：
+   - “CPU 标准模式”：完整读入训练 CSV，适合数据量较小、内存充足的电脑。
+   - “CPU 低内存模式”：仍会完整读入 CSV，但训练批次从 16384 降到 4096，主要降低训练阶段的峰值内存。
+   - “CPU 流式低内存模式”：提取、评分、剪枝、覆盖度统计、验证抽样和 Julia 预处理均采用有界内存处理，适合 16GB 内存电脑和上亿行 CSV。
 6. 日志处理模式默认是严格模式。若设备下载日志时可能仍在写入，可选择“容错模式（跳过损坏日志）”；被跳过的文件会写入运行日志，训练前应确认剩余数据量足够。
+7. 流式模式可以选择是否保留完整中间 CSV。默认保留；关闭后只会在整个训练及质量验证成功后清理中间 CSV，训练失败时仍保留现场文件便于排查。
 
-车型、训练模式和日志处理模式会自动记住上次选择。覆盖度图默认生成，也可以在界面中取消。
+车型、训练模式、日志处理模式和中间 CSV 保留选项会自动记住上次选择。覆盖度图默认生成，也可以在界面中取消。
+
+流式模式需要对 CSV 进行多遍顺序扫描，因此处理时间可能比标准模式长，但内存不会随总行数线性增长。它保持完整路线隔离、固定随机种子、训练分箱每箱最多 20 条、测试集最多 10 万条、18 维输入、对称增强及原有损失规则。由于流程中会生成多个大型 CSV，处理上亿行数据时建议输出磁盘至少预留 100GB；程序启动时会显示剩余空间并在不足时警告。
 
 one-dir 程序无需安装目标电脑上的 Python、Julia 或依赖包，但必须整体保留 `NNLC_Trainer` 文件夹，不能只复制 `NNLC_Trainer.exe`。GitHub Actions 会将它打包为 `NNLC_Trainer-windows-x64-onedir.7z`；下载后使用 7-Zip、WinRAR 等工具完整解压，再运行 `NNLC_Trainer\NNLC_Trainer.exe`。
 
@@ -287,11 +293,24 @@ cp ./output/lateral_data_pruned.csv ./output/latmodels/YOUR_CAR.csv
 bash training/run.sh ./output/latmodels
 
 # 或直接运行 Julia
-cd training/
-julia latmodel_temporal.jl ../output/latmodels
+julia training/latmodel_temporal.jl ./output/latmodels
 
 # CPU 训练（低内存时可将训练模式切换为 CPU 低内存模式）
 bash training/run.sh ./output/latmodels --cpu
+
+# 上亿行 CSV 的流式低内存训练（固定 CPU）
+julia training/latmodel_temporal.jl ./output/latmodels --streaming --batch-size=4096
+```
+
+完整的一键流式流程也可以直接从命令行启动：
+
+```bash
+python nnlc_auto_train.py --data ./data --car YOUR_CAR \
+    --output ./output --streaming --batch-size 4096
+
+# 训练成功后不保留完整中间 CSV
+python nnlc_auto_train.py --data ./data --car YOUR_CAR \
+    --output ./output --streaming --batch-size 4096 --no-keep-intermediates
 ```
 
 ### 8. 部署模型
@@ -345,11 +364,16 @@ python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parque
 ### score_routes
 
 ```
-python -m nnlc_tools.score_routes [-h] [--min-score MIN_SCORE] input
+python -m nnlc_tools.score_routes [-h] [--min-score MIN_SCORE]
+                                        [--streaming] [--chunk-rows N] input
 
   input            CSV/Parquet 文件或 rlog 目录
   --min-score      仅显示评分 >= 此值的路线
+  --streaming      分块读取 CSV，避免完整载入内存
+  --chunk-rows N   每个分块的行数（默认：100000）
 ```
+
+`--streaming` 仅支持已有的 CSV 文件；输入目录、Parquet 或空 CSV 会直接提示错误，不会静默退回全量读取。
 
 评分标准（基础分 100 分，按以下项目扣分）：
 
@@ -367,6 +391,7 @@ python -m nnlc_tools.score_routes [-h] [--min-score MIN_SCORE] input
 ```
 nnlc-prune-routes [-h] [-o OUTPUT] [--min-score MIN_SCORE]
                   [--keep-saturated] [--keep-lane-change]
+                  [--streaming] [--chunk-rows N]
                   input
 
   input                nnlc-extract 生成的 CSV/Parquet 文件
@@ -374,6 +399,8 @@ nnlc-prune-routes [-h] [-o OUTPUT] [--min-score MIN_SCORE]
   --min-score N        排除评分低于 N 的路线（默认：0，不排除）
   --keep-saturated     不删除饱和帧
   --keep-lane-change   不删除变道帧
+  --streaming          分块读取和写出 CSV
+  --chunk-rows N       每个分块的行数（默认：100000）
 ```
 
 它位于流程中的 `score_routes` 和 `visualize_coverage` 之间，完成两件事：
@@ -383,23 +410,32 @@ nnlc-prune-routes [-h] [-o OUTPUT] [--min-score MIN_SCORE]
 ### visualize_coverage
 
 ```
-python -m nnlc_tools.visualize_coverage [-h] [-o OUTPUT] [--gap-threshold GAP_THRESHOLD] [--torque-scatter] [--max-points MAX_POINTS] input
+python -m nnlc_tools.visualize_coverage [-h] [-o OUTPUT]
+    [--gap-threshold GAP_THRESHOLD] [--torque-scatter]
+    [--max-points MAX_POINTS] [--streaming] [--chunk-rows N] input
 
   input              CSV/Parquet 文件或 rlog 目录
   -o, --output       输出图像路径（默认：coverage.png）
   --gap-threshold    突出显示样本较少的区间（默认：50）
   --torque-scatter   额外生成横向加速度与扭矩散点图
   --max-points       每个扭矩散点子图的最大数据点数（随机采样）
+  --streaming        分块统计 CSV 覆盖度，不完整载入数据
+  --chunk-rows N     每个分块的行数（默认：100000）
 ```
+
+`--streaming` 仅支持 CSV，且不能与 `--torque-scatter` 同时使用。
 
 ### visualize_model
 
 ```
-python -m nnlc_tools.visualize_model [-h] [-o OUTPUT_DIR] model data
+python -m nnlc_tools.visualize_model [-h] [-o OUTPUT_DIR]
+    [--streaming] [--max-rows N] model data
 
   model              已训练模型的 JSON 文件
   data               训练数据 CSV/Parquet 文件
   -o, --output-dir   图表输出目录（默认：./output/）
+  --streaming        从大型 CSV 中进行固定随机种子的有界抽样
+  --max-rows N       流式验证最多保留的行数（默认：100000）
 ```
 
 生成两组叠加模型预测曲线的数据图：
@@ -416,6 +452,7 @@ nnlc-interventions [-h] [-o OUTPUT] [--plot] [--scatter]
                    [--max-pothole-length FLOAT]
                    [--prune-output PATH]
                    [--prune {mechanical,driver,both}]
+                   [--streaming] [--chunk-rows N]
                    input
 ```
 
@@ -428,6 +465,8 @@ nnlc-interventions [-h] [-o OUTPUT] [--plot] [--scatter]
 | `--max-pothole-length` | 2.5 m | 用于按车速调整短事件阈值的坑洼尺寸估计 |
 | `--prune-output PATH` | （无） | 将剪枝后的有效帧写入 PATH（.csv 或 .parquet） |
 | `--prune` | `both` | 删除 `mechanical`、`driver` 或 `both` 类型的事件帧 |
+| `--streaming` | 关闭 | 分块处理 CSV；必须同时指定 `--prune-output`，不支持绘图参数 |
+| `--chunk-rows` | 100000 | 每个流式分块的行数 |
 
 ### nnlc-sc-visualize
 

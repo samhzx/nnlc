@@ -259,6 +259,294 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
   return data
 end
 
+# Streaming mode keeps only bounded reservoir samples in memory.  It uses the
+# same 18 model features and range filters as load_data, but scans the CSV in
+# two passes so route isolation and training-only normalization remain intact.
+const stream_offsets = [-0.3, -0.2, -0.1, 0.3, 0.6, 1.0, 1.5]
+stream_suffix(offset) = replace(f"_t{offset:+.1f}", "." => "", "+" => "p", "-" => "m")
+const stream_model_features = vcat(
+  ["v_ego", "desired_lateral_accel", "friction_input", "roll"],
+  ["desired_lateral_accel" * stream_suffix(offset) for offset in stream_offsets],
+  ["roll" * stream_suffix(offset) for offset in stream_offsets],
+)
+const stream_all_temporal_features = vcat(
+  [feature * stream_suffix(offset) for offset in stream_offsets for feature in ["actual_lateral_accel", "desired_lateral_accel", "roll"]],
+)
+const stream_required_columns = vcat(
+  ["timestamp", "v_ego", "a_ego", "steering_angle_deg", "steering_rate_deg", "steering_torque", "steering_pressed", "standstill", "desired_curvature", "curvature", "active", "lateral_control_type", "actual_lateral_accel", "desired_lateral_accel", "torque_output", "saturated", "roll", "lane_change_state", "friction_input", "route_id"],
+  stream_all_temporal_features,
+)
+const stream_train_sample_size = 20
+const stream_test_sample_size = 100_000
+const stream_v_ego_edges = collect(0.1:((45.0 - 0.1) / 121):45.0)
+const stream_desired_edges = collect(-4.1:(8.2 / 121):4.1)
+
+stream_bin(value::Float64, edges::Vector{Float64}) =
+  clamp(searchsortedlast(edges, value), 1, length(edges) - 1)
+
+function stream_cell(row, column::String)
+  try
+    return getproperty(row, Symbol(column))
+  catch
+    return missing
+  end
+end
+
+function stream_number(row, column::String, ::Type{T}) where T <: AbstractFloat
+  value = stream_cell(row, column)
+  if value === missing || value === nothing
+    return nothing
+  end
+  try
+    parsed = value isa Real ? T(value) : parse(T, string(value))
+    return isfinite(parsed) ? parsed : nothing
+  catch
+    return nothing
+  end
+end
+
+stream_float64(row, column::String) = stream_number(row, column, Float64)
+stream_timestamp(row) = stream_float64(row, "timestamp")
+
+function validate_stream_columns(row)
+  available_columns = Set(string.(propertynames(row)))
+  missing_columns = sort(collect(setdiff(Set(stream_required_columns), available_columns)))
+  if !isempty(missing_columns)
+    error("流式训练 CSV 缺少必需列：$(join(missing_columns, ", "))。请使用带 --temporal 的数据提取流程重新生成 CSV")
+  end
+end
+
+function stream_bool(row, column::String)
+  value = stream_cell(row, column)
+  if value isa Bool
+    return value
+  end
+  normalized = lowercase(strip(string(value)))
+  return normalized in ("true", "1", "yes", "on")
+end
+
+function stream_parse_row(row, feature_buffer::Union{Nothing, Vector{Float32}}=nothing)
+  # Match completecases(data) before range filtering, including temporal
+  # columns that are intentionally incomplete at each segment boundary.
+  for column in stream_required_columns
+    value = stream_cell(row, column)
+    if value === missing || value === nothing || isempty(strip(string(value)))
+      return nothing
+    end
+  end
+  if !stream_bool(row, "active") || stream_bool(row, "standstill")
+    return nothing
+  end
+
+  v_ego = stream_float64(row, "v_ego")
+  desired = stream_float64(row, "desired_lateral_accel")
+  friction = stream_float64(row, "friction_input")
+  roll = stream_float64(row, "roll")
+  torque = stream_float64(row, "torque_output")
+  if any(value -> value === nothing, (v_ego, desired, friction, roll, torque))
+    return nothing
+  end
+  actual = stream_float64(row, "actual_lateral_accel")
+  if actual === nothing || !(0.1 < v_ego < 45.0) || abs(torque) > 2.0 || abs(actual) >= 4.1 || abs(desired) >= 4.1 || abs(friction) >= 5.0 || abs(roll) >= 0.2
+    return nothing
+  end
+
+  features = feature_buffer
+  if features !== nothing
+    length(features) == length(stream_model_features) || error("流式特征缓冲区维度错误")
+    features[1] = Float32(v_ego)
+    features[2] = Float32(desired)
+    features[3] = Float32(friction)
+    features[4] = Float32(roll)
+  end
+  for (temporal_index, column) in enumerate(stream_model_features[5:end])
+    feature_index = temporal_index + 4
+    value = stream_float64(row, column)
+    if value === nothing
+      return nothing
+    end
+    limit = startswith(column, "desired_lateral_accel") ? 4.1 : 0.2
+    if abs(value) >= limit
+      return nothing
+    end
+    if features !== nothing
+      features[feature_index] = Float32(value)
+    end
+  end
+  # Validate actual temporal accelerations as load_data/filter_columns does.
+  for column in stream_all_temporal_features
+    if startswith(column, "actual_lateral_accel")
+      value = stream_float64(row, column)
+      if value === nothing || abs(value) >= 4.1
+        return nothing
+      end
+    end
+  end
+  route_value = stream_cell(row, "route_id")
+  route_id = route_value === missing ? "unknown" : string(route_value)
+  return (features=features, v_ego=v_ego, desired=desired,
+          target=Float32(torque), route_id=route_id)
+end
+
+function stream_reservoir_consider!(rng, reservoir::Vector{Vector{Float32}}, seen::Int,
+                                    features::Vector{Float32}, target::Float32,
+                                    limit::Int)
+  seen += 1
+  position = 0
+  if length(reservoir) < limit
+    position = length(reservoir) + 1
+  else
+    position = rand(rng, 1:seen)
+  end
+  if position <= limit
+    item = Vector{Float32}(undef, length(features) + 1)
+    copyto!(item, 1, features, 1, length(features))
+    item[end] = target
+    if position > length(reservoir)
+      push!(reservoir, item)
+    else
+      reservoir[position] = item
+    end
+  end
+  return seen
+end
+
+function stream_choose_test_routes(route_counts::Dict{String, Int}, row_count::Int)
+  if length(route_counts) < 2
+    return Set{String}()
+  end
+  target = clamp(round(Int, 0.2 * row_count), 2, row_count - 2)
+  route_ids = collect(keys(route_counts))
+  rng = MersenneTwister(42)
+  shuffle!(rng, route_ids)
+  candidate = nothing
+  distance = typemax(Int)
+  for route_id in route_ids
+    count = route_counts[route_id]
+    if count >= 2 && row_count - count >= 2 && abs(count - target) < distance
+      candidate = route_id
+      distance = abs(count - target)
+    end
+  end
+  candidate === nothing && return Set{String}()
+  selected = String[candidate]
+  selected_count = route_counts[candidate]
+  for route_id in sort(filter(id -> id != candidate, route_ids), by=id -> route_counts[id])
+    count = route_counts[route_id]
+    new_count = selected_count + count
+    if row_count - new_count >= 2 && abs(new_count - target) < abs(selected_count - target)
+      push!(selected, route_id)
+      selected_count = new_count
+    end
+  end
+  return Set(selected)
+end
+
+function stream_rows_to_dataframe(rows::Vector{Vector{Float32}})::DataFrame
+  if isempty(rows)
+    return DataFrame()
+  end
+  columns = [Vector{Float32}(undef, length(rows)) for _ in 1:length(stream_model_features)]
+  targets = Vector{Float32}(undef, length(rows))
+  for (row_index, row) in enumerate(rows)
+    for column_index in 1:length(stream_model_features)
+      columns[column_index][row_index] = row[column_index]
+    end
+    targets[row_index] = row[length(stream_model_features) + 1]
+  end
+  result = DataFrame()
+  for (column_index, column_name) in enumerate(stream_model_features)
+    result[!, Symbol(column_name)] = columns[column_index]
+  end
+  result[!, :torque_output] = targets
+  return result
+end
+
+function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, DataFrame}
+  route_counts = Dict{String, Int}()
+  valid_rows = 0
+  previous_timestamp = nothing
+  timestamps_monotonic = true
+  columns_validated = false
+  for row in CSV.Rows(infile; reusebuffer=true)
+    if !columns_validated
+      validate_stream_columns(row)
+      columns_validated = true
+    end
+    parsed = stream_parse_row(row)
+    if parsed !== nothing
+      valid_rows += 1
+      route_counts[parsed.route_id] = get(route_counts, parsed.route_id, 0) + 1
+      timestamp = stream_timestamp(row)
+      if previous_timestamp !== nothing && timestamp !== nothing && timestamp < previous_timestamp
+        timestamps_monotonic = false
+      end
+      if timestamp !== nothing
+        previous_timestamp = timestamp
+      end
+    end
+  end
+  if !columns_validated
+    error("流式训练 CSV 不包含任何数据行")
+  end
+  if valid_rows < 4
+    error("流式预处理后至少需要 4 条有效数据")
+  end
+  test_routes = stream_choose_test_routes(route_counts, valid_rows)
+  route_isolated = !isempty(test_routes)
+  if !route_isolated && !timestamps_monotonic
+    error("单路线流式训练要求 CSV 按 timestamp 升序排列")
+  end
+  println(out_streams, "Streaming pass 1: $valid_rows valid rows across $(length(route_counts)) routes")
+
+  train_bins = Dict{Tuple{Int, Int}, Vector{Vector{Float32}}}()
+  train_seen = Dict{Tuple{Int, Int}, Int}()
+  test_rows = Vector{Vector{Float32}}()
+  test_seen = 0
+  train_rng = MersenneTwister(44)
+  test_rng = MersenneTwister(43)
+  feature_buffer = Vector{Float32}(undef, length(stream_model_features))
+  valid_index = 0
+  split_gap = route_isolated ? 0 : min(temporal_split_gap_rows, valid_rows ÷ 5)
+  usable_rows = valid_rows - split_gap
+  train_limit = clamp(round(Int, 0.8 * usable_rows), 2, usable_rows - 2)
+
+  for row in CSV.Rows(infile; reusebuffer=true)
+    parsed = stream_parse_row(row, feature_buffer)
+    parsed === nothing && continue
+    valid_index += 1
+    is_test = route_isolated ? (parsed.route_id in test_routes) : (valid_index > train_limit + split_gap)
+    if is_test
+      test_seen = stream_reservoir_consider!(test_rng, test_rows, test_seen,
+                                             parsed.features, parsed.target,
+                                             stream_test_sample_size)
+    else
+      v_bin = stream_bin(parsed.v_ego, stream_v_ego_edges)
+      d_bin = stream_bin(parsed.desired, stream_desired_edges)
+      key = (v_bin, d_bin)
+      reservoir = get!(train_bins, key) do
+        Vector{Vector{Float32}}()
+      end
+      seen = get(train_seen, key, 0)
+      train_seen[key] = stream_reservoir_consider!(train_rng, reservoir, seen,
+                                                   parsed.features, parsed.target,
+                                                   stream_train_sample_size)
+    end
+  end
+
+  train_rows = Vector{Vector{Float32}}()
+  sizehint!(train_rows, min(valid_rows, length(train_bins) * stream_train_sample_size))
+  for reservoir in values(train_bins)
+    append!(train_rows, reservoir)
+  end
+  shuffle!(train_rng, train_rows)
+  if length(train_rows) < 2 || length(test_rows) < 2
+    error("流式训练集和测试集都至少需要 2 条数据")
+  end
+  println(out_streams, "Streaming pass 2: training=$(length(train_rows)) rows; test=$(length(test_rows)) rows")
+  return stream_rows_to_dataframe(train_rows), stream_rows_to_dataframe(test_rows)
+end
+
 # Keep complete routes on one side of the split. If there is only one usable
 # route, use a chronological split with a gap large enough to separate the
 # temporal input windows on both sides of the boundary.
@@ -375,23 +663,36 @@ function balance_training_data(data::DataFrame, row_indices::Vector{Int}, out_st
   return balanced
 end
 
-function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
+function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384, prepared_test::Union{Nothing, DataFrame}=nothing)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
   model_path = joinpath(working_dir, Base.basename(working_dir))
 
-  if nrow(data) < 4
+  if prepared_test === nothing && nrow(data) < 4
     error("至少需要 4 条有效数据，才能保证训练集和测试集各至少 2 条")
+  elseif prepared_test !== nothing && (nrow(data) < 2 || nrow(prepared_test) < 2)
+    error("流式训练集和测试集都至少需要 2 条数据")
   end
 
   feature_names = model_feature_names(data)
+  if feature_names != stream_model_features
+    error("模型输入列不完整或顺序错误：期望 18 列 $(join(stream_model_features, ", "))，实际 $(join(feature_names, ", "))")
+  end
 
-  # Keep only row indices until sampling is complete. This avoids materializing
-  # full 80/20 DataFrame copies for large extracted datasets.
-  train_indices, test_indices = split_train_test_indices(data, out_streams)
-  test_indices = limit_test_indices(test_indices, out_streams)
-  train = balance_training_data(data, train_indices, out_streams)
-  test = data[test_indices, :]
+  if prepared_test === nothing
+    # Keep only row indices until sampling is complete. This avoids materializing
+    # full 80/20 DataFrame copies for large extracted datasets.
+    train_indices, test_indices = split_train_test_indices(data, out_streams)
+    test_indices = limit_test_indices(test_indices, out_streams)
+    train = balance_training_data(data, train_indices, out_streams)
+    test = data[test_indices, :]
+  else
+    train = data
+    test = prepared_test
+  end
   if nrow(train) == 0 || nrow(test) == 0
     error("Training/test split produced an empty partition")
+  end
+  if model_feature_names(test) != feature_names
+    error("训练集和测试集的模型输入列不一致")
   end
 
   # Compute normalization statistics from training data only. This avoids
@@ -400,6 +701,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   input_std = Matrix{Float32}(undef, 1, length(feature_names))
   for (index, column_name) in enumerate(feature_names)
     column = Float32.(train[!, column_name])
+    if any(value -> !isfinite(value), column)
+      error("训练输入列 $column_name 包含 NaN 或 Inf")
+    end
     input_mean[1, index] = mean(column)
     column_std = std(column)
     input_std[1, index] = isfinite(column_std) && column_std > 0f0 ? Float32(column_std) : 1f0
@@ -410,6 +714,14 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   model_columns = vcat(feature_names, ["torque_output"])
   select!(train, Symbol.(model_columns))
   select!(test, Symbol.(model_columns))
+  for column_name in feature_names
+    if any(value -> !isfinite(value), Float32.(test[!, column_name]))
+      error("测试输入列 $column_name 包含 NaN 或 Inf")
+    end
+  end
+  if any(value -> !isfinite(value), Float32.(train[!, :torque_output])) || any(value -> !isfinite(value), Float32.(test[!, :torque_output]))
+    error("训练目标 torque_output 包含 NaN 或 Inf")
+  end
   println(out_streams, "Training rows: $(nrow(train)); test rows: $(nrow(test))")
 
   # The packaged trainer intentionally supports CPU only.  Keeping this
@@ -1419,7 +1731,7 @@ function multiline_string(strings::Vector{String}, n::Int; prefix="")::String
   return join(lines, ",\n")
 end
 
-function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_batch_size::Int=16384)
+function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false)
   carname = replace(Base.basename(in_file), ".csv" => "")
   outdir = create_folder_with_iterator(out_dir_base, carname, make_new=true)
   logfile = open(outdir * "/$(carname)_log.txt", "a")  # Open log file in append mode
@@ -1431,7 +1743,13 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
       # return
   end
   
-  data = load_data(in_file, use_existing_input, outdir, out_streams)
+  prepared_test = nothing
+  if streaming
+    println(out_streams, "使用两遍扫描的流式低内存预处理")
+    data, prepared_test = load_data_streaming(in_file, out_streams)
+  else
+    data = load_data(in_file, use_existing_input, outdir, out_streams)
+  end
 
   feature_names = model_feature_names(data)
   model_file = "$outdir/$carname.bson"
@@ -1443,13 +1761,18 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
       # return
   end
 
-  model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(outdir, use_existing_input, data, out_streams; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
+  model, input_mean, input_std, X_train, y_train, X_test, y_test, test_loss = train_model(
+    outdir, use_existing_input, data, out_streams;
+    force_cpu=force_cpu,
+    requested_batch_size=requested_batch_size,
+    prepared_test=prepared_test,
+  )
   
   test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss)
   close(logfile)
 end
 
-function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384)
+function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false)
   # Process only regular CSV files, excluding old balanced-data artifacts.
   csv_files = filter(
     file -> isfile(joinpath(in_dir, file)) && endswith(lowercase(file), ".csv") && !endswith(lowercase(file), "_balanced.csv"),
@@ -1462,7 +1785,12 @@ function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384)
   # Process each file
   for in_file in csv_files
       println("Processing $in_file")
-      create_model(joinpath(in_dir, in_file), results_dir; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
+      create_model(
+        joinpath(in_dir, in_file), results_dir;
+        force_cpu=force_cpu,
+        requested_batch_size=requested_batch_size,
+        streaming=streaming,
+      )
   end
 end
 
@@ -1470,6 +1798,7 @@ end
 # GPU training is intentionally unsupported by this trainer.  Keep accepting
 # --cpu for compatibility with existing scripts, but always select CPU.
 force_cpu = true
+streaming = any(argument -> argument == "--streaming", ARGS)
 batch_size_arg = findfirst(a -> startswith(a, "--batch-size="), ARGS)
 batch_size_flag = findfirst(a -> a == "--batch-size", ARGS)
 requested_batch_size = 16384
@@ -1501,8 +1830,8 @@ positional_args = [
 println("CPU mode enabled")
 
 if length(positional_args) > 0
-  main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
+  main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming)
 else
   home_dir = ENV["HOME"]
-  main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu, requested_batch_size=requested_batch_size)
+  main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming)
 end

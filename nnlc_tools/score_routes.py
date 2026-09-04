@@ -16,6 +16,8 @@ import sys
 
 import pandas as pd
 
+from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
+
 CRITERIA = [
     ("high_override",    lambda df: df["steering_pressed"].mean() > 0.10,                          -15, ">10% steering override"),
     ("high_saturated",   lambda df: df["saturated"].mean() > 0.05,                                 -20, ">5% saturated"),
@@ -136,6 +138,77 @@ def load_data_with_routes(input_path):
     sys.exit(1)
 
 
+def score_csv_stream(input_path, chunksize=DEFAULT_CHUNK_ROWS):
+    """Score a CSV while retaining only route-level counters."""
+    aggregates = {}
+    previous_timestamp = None
+    inferred_route = 0
+    for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+        chunk = chunk.copy()
+        if "route_id" not in chunk.columns:
+            if "timestamp" in chunk.columns:
+                timestamps = pd.to_numeric(chunk["timestamp"], errors="coerce")
+                breaks = []
+                for value in timestamps:
+                    is_break = (
+                        previous_timestamp is not None
+                        and pd.notna(value)
+                        and (value - previous_timestamp > 60 or value < previous_timestamp)
+                    )
+                    if is_break:
+                        inferred_route += 1
+                    breaks.append(inferred_route)
+                    if pd.notna(value):
+                        previous_timestamp = value
+                chunk["route_id"] = breaks
+            else:
+                chunk["route_id"] = 0
+
+        missing = sorted(REQUIRED_SCORE_COLUMNS.difference(chunk.columns))
+        if missing:
+            return None, f"missing fields: {', '.join(missing)}"
+        for route_id, group in chunk.groupby("route_id", sort=False, dropna=False):
+            key = str(route_id)
+            state = aggregates.setdefault(key, {
+                "rows": 0, "override": 0, "saturated": 0,
+                "active": 0, "standstill": 0, "lane_change": 0,
+            })
+            state["rows"] += len(group)
+            state["override"] += int(group["steering_pressed"].astype(bool).sum())
+            state["saturated"] += int(group["saturated"].astype(bool).sum())
+            state["active"] += int(group["active"].astype(bool).sum())
+            state["standstill"] += int(group["standstill"].astype(bool).sum())
+            state["lane_change"] += int((group["lane_change_state"] != 0).sum())
+
+    results = []
+    for route_id, state in aggregates.items():
+        rows = state["rows"]
+        if rows <= 0:
+            continue
+        score = 100
+        flags = []
+        checks = [
+            (state["override"] / rows > .10, -15, ">10% steering override"),
+            (state["saturated"] / rows > .05, -20, ">5% saturated"),
+            (state["active"] / rows < .80, -25, "<80% active"),
+            (state["standstill"] / rows > .30, -15, ">30% standstill"),
+            (state["lane_change"] / rows > .10, -10, ">10% lane change"),
+            (state["active"] * .01 < 120, -20, "<2 min active driving"),
+        ]
+        for triggered, penalty, description in checks:
+            if triggered:
+                score += penalty
+                flags.append(description)
+        results.append({
+            "route_id": route_id,
+            "score": max(0, score),
+            "duration_s": round(rows * .01, 1),
+            "rows": rows,
+            "issues": ", ".join(flags),
+        })
+    return results, None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Score route quality for NNLC training data.",
@@ -143,7 +216,39 @@ def main():
     parser.add_argument("input", help="CSV/Parquet file or directory of rlogs")
     parser.add_argument("--min-score", type=parse_score_threshold, default=0,
                         help="Only show routes with score >= this value")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Stream CSV in bounded chunks instead of loading it fully")
+    parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS,
+                        help=f"Rows per streaming chunk (default: {DEFAULT_CHUNK_ROWS:,})")
     args = parser.parse_args()
+
+    if args.chunk_rows <= 0:
+        parser.error("--chunk-rows must be a positive integer")
+    if args.streaming:
+        if not os.path.isfile(args.input) or not args.input.lower().endswith(".csv"):
+            parser.error("--streaming only supports an existing CSV file")
+        try:
+            results, error = score_csv_stream(args.input, chunksize=args.chunk_rows)
+        except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        if error:
+            print(f"ERROR: {error}")
+            sys.exit(1)
+        if not results:
+            print("ERROR: Input contains no data rows")
+            sys.exit(1)
+        results_df = pd.DataFrame(results).sort_values("score", ascending=False)
+        if args.min_score > 0:
+            results_df = results_df[results_df["score"] >= args.min_score]
+        print(f"\n{'Route ID':<45} {'Score':>5} {'Duration':>10} {'Rows':>8}  Issues")
+        print("-" * 120)
+        for _, row in results_df.iterrows():
+            route_str = str(row["route_id"])[:44]
+            print(f"{route_str:<45} {row['score']:>5} {row['duration_s']:>9.1f}s {row['rows']:>8}  {row['issues']}")
+        print(f"\n{len(results_df)} routes scored")
+        print(f"  {len(results_df[results_df['score'] >= 70])} routes with score >= 70 (recommended for training)")
+        return
 
     df, route_col = load_data_with_routes(args.input)
 

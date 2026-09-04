@@ -12,11 +12,17 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
 import pandas as pd
 
 from nnlc_tools.score_routes import score_route
+from nnlc_tools.streaming_data import (
+    DEFAULT_CHUNK_ROWS,
+    iter_csv_chunks,
+    require_distinct_paths,
+)
 
 
 def parse_score_threshold(value):
@@ -94,6 +100,87 @@ def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
     return df, stats
 
 
+def prune_csv_stream(input_path, output_path, min_score=0,
+                     drop_saturated=True, drop_lane_change=True,
+                     chunksize=DEFAULT_CHUNK_ROWS):
+    """Prune a CSV incrementally and return the same statistics as prune_routes."""
+    require_distinct_paths(input_path, output_path)
+    keep_routes = None
+    if min_score > 0:
+        from nnlc_tools.score_routes import score_csv_stream
+        route_results, error = score_csv_stream(input_path, chunksize=chunksize)
+        if error:
+            raise ValueError(error)
+        keep_routes = {
+            str(row["route_id"])
+            for row in route_results
+            if row["score"] >= min_score
+        }
+
+    initial_rows = route_rows_dropped = saturated_dropped = lane_change_dropped = 0
+    output_rows = 0
+    wrote_header = False
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    previous_timestamp = None
+    inferred_route = 0
+    try:
+        chunks = iter_csv_chunks(input_path, chunksize=chunksize)
+        with open(output_path, "w", newline="", encoding="utf-8") as output:
+            for chunk in chunks:
+                initial_rows += len(chunk)
+                if min_score > 0:
+                    if "route_id" not in chunk.columns:
+                        if "timestamp" not in chunk.columns:
+                            raise ValueError(
+                                "--min-score requires a route_id or timestamp column; "
+                                "cannot safely infer route boundaries"
+                            )
+                        route_ids = []
+                        timestamps = pd.to_numeric(chunk["timestamp"], errors="coerce")
+                        for value in timestamps:
+                            is_break = (
+                                previous_timestamp is not None
+                                and pd.notna(value)
+                                and (value - previous_timestamp > 60 or value < previous_timestamp)
+                            )
+                            if is_break:
+                                inferred_route += 1
+                            route_ids.append(inferred_route)
+                            if pd.notna(value):
+                                previous_timestamp = value
+                        chunk = chunk.copy()
+                        chunk["route_id"] = route_ids
+                    before = len(chunk)
+                    chunk = chunk[chunk["route_id"].map(str).isin(keep_routes)]
+                    route_rows_dropped += before - len(chunk)
+                if drop_saturated and "saturated" in chunk.columns:
+                    before = len(chunk)
+                    chunk = chunk[~chunk["saturated"].astype(bool)]
+                    saturated_dropped += before - len(chunk)
+                if drop_lane_change and "lane_change_state" in chunk.columns:
+                    before = len(chunk)
+                    lcs = chunk["lane_change_state"]
+                    chunk = chunk[lcs == "off"] if lcs.dtype == object else chunk[lcs == 0]
+                    lane_change_dropped += before - len(chunk)
+                if not wrote_header:
+                    chunk.head(0).to_csv(output, index=False)
+                    wrote_header = True
+                if not chunk.empty:
+                    chunk.to_csv(output, header=False, index=False)
+                    output_rows += len(chunk)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        raise ValueError("input CSV is empty or missing")
+    if not wrote_header:
+        raise ValueError("input CSV contains no data rows")
+    return {
+        "initial_rows": initial_rows,
+        "route_rows_dropped": route_rows_dropped,
+        "saturated_dropped": saturated_dropped,
+        "lane_change_dropped": lane_change_dropped,
+        "output_rows": output_rows,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Prune lateral data by route score and frame-level flags.",
@@ -107,7 +194,36 @@ def main():
                         help="Do not drop saturated frames")
     parser.add_argument("--keep-lane-change", action="store_true",
                         help="Do not drop lane-change frames")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Process CSV in bounded chunks instead of loading it fully")
+    parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS,
+                        help=f"Rows per streaming chunk (default: {DEFAULT_CHUNK_ROWS:,})")
     args = parser.parse_args()
+
+    if args.chunk_rows <= 0:
+        parser.error("--chunk-rows must be a positive integer")
+    if args.streaming:
+        if not args.input.lower().endswith(".csv"):
+            parser.error("--streaming only supports CSV input")
+        try:
+            stats = prune_csv_stream(
+                args.input, args.output, min_score=args.min_score,
+                drop_saturated=not args.keep_saturated,
+                drop_lane_change=not args.keep_lane_change,
+                chunksize=args.chunk_rows,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        print(f"Loaded {stats['initial_rows']:,} rows")
+        if args.min_score > 0:
+            print(f"Route filter (score >= {args.min_score}): dropped {stats['route_rows_dropped']:,} rows")
+        if not args.keep_saturated:
+            print(f"Saturated frames dropped:   {stats['saturated_dropped']:,}")
+        if not args.keep_lane_change:
+            print(f"Lane-change frames dropped: {stats['lane_change_dropped']:,}")
+        print(f"Output: {stats['output_rows']:,} rows written to {args.output}")
+        return
 
     from nnlc_tools.data_io import load_data
     df = load_data(args.input)

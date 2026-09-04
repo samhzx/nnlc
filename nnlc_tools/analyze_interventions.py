@@ -16,6 +16,13 @@ import sys
 import numpy as np
 import pandas as pd
 
+from nnlc_tools.streaming_data import (
+    DEFAULT_CHUNK_ROWS,
+    iter_csv_chunks,
+    open_csv_writer,
+    require_distinct_paths,
+)
+
 
 # Default thresholds (legacy heuristic path — kept for backward compat)
 DEFAULT_MIN_DURATION = 0.15    # seconds — rule_brief threshold
@@ -49,6 +56,7 @@ def segment_events(df, gap_frames=DEFAULT_GAP_FRAMES):
         return []
 
     sp = df["steering_pressed"].astype(bool).values
+    routes = df["route_id"].map(str).values if "route_id" in df.columns else None
     n = len(sp)
 
     events = []
@@ -65,13 +73,17 @@ def segment_events(df, gap_frames=DEFAULT_GAP_FRAMES):
         # Extend, merging over short gaps
         j = i + 1
         while j < n:
+            if routes is not None and routes[j] != routes[start]:
+                break
             if sp[j]:
                 end = j
                 j += 1
             else:
                 # Look ahead to see if there's another pressed region within gap_frames
                 gap_end = j
-                while gap_end < n and not sp[gap_end] and (gap_end - j) <= gap_frames:
+                while (gap_end < n and not sp[gap_end]
+                       and (gap_end - j) < gap_frames
+                       and (routes is None or routes[gap_end] == routes[start])):
                     gap_end += 1
                 if gap_end < n and sp[gap_end]:
                     # Merge: skip the gap
@@ -392,6 +404,132 @@ def mark_rows(active_df, events_df):
     result = active_df.copy()
     result["_intervention"] = labels
     return result
+
+
+def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_GAP_FRAMES,
+                     cfg=None, chunksize=DEFAULT_CHUNK_ROWS, max_event_rows=100_000):
+    """Classify and prune override events while streaming a CSV.
+
+    The default ``prune=both`` path only retains the short gap look-ahead.
+    Classification modes retain one current event and reject an abnormally
+    long event instead of risking an unbounded memory allocation.
+    """
+    if cfg is None and prune != "both":
+        from nnlc_tools.steering_classifier.config import ClassifierConfig
+        cfg = ClassifierConfig()
+    require_distinct_paths(input_path, output_path)
+    output_handle = None
+    columns = None
+    active_rows = dropped_rows = event_count = 0
+    event_core = []
+    event_row_count = 0
+    pending_gap = []
+    output_buffer = []
+    output_buffer_limit = min(chunksize, 10_000)
+    route_sentinel = object()
+    current_route = route_sentinel
+
+    def flush_output():
+        if output_buffer:
+            pd.DataFrame.from_records(output_buffer, columns=columns).to_csv(
+                output_handle, header=False, index=False, lineterminator="\n"
+            )
+            output_buffer.clear()
+
+    def write_rows(rows):
+        nonlocal active_rows
+        if rows:
+            output_buffer.extend(rows)
+            active_rows += len(rows)
+            if len(output_buffer) >= output_buffer_limit:
+                flush_output()
+
+    def finish_event():
+        nonlocal dropped_rows, event_count, event_row_count
+        if event_row_count == 0:
+            return
+        if prune != "both" and event_row_count > max_event_rows:
+            raise ValueError(
+                f"override event exceeds {max_event_rows:,} rows; "
+                "refusing an unbounded in-memory classification"
+            )
+        event_count += 1
+        if prune == "both":
+            remove = True
+        else:
+            event_df = pd.DataFrame(event_core, columns=columns)
+            events = [{"start_idx": 0, "end_idx": len(event_df) - 1}]
+            classified = classify_events_cascade(event_df, events, cfg=cfg)
+            classification = str(classified.iloc[0]["classification"])
+            remove = classification == prune
+        if remove:
+            dropped_rows += event_row_count
+        else:
+            write_rows(event_core)
+        event_core.clear()
+        event_row_count = 0
+
+    try:
+        for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+            if columns is None:
+                columns = list(chunk.columns)
+                output_handle, _ = open_csv_writer(output_path, columns)
+            required = {"steering_pressed"}
+            missing = sorted(required.difference(chunk.columns))
+            if missing:
+                raise ValueError(f"missing fields: {', '.join(missing)}")
+            route_index = columns.index("route_id") if "route_id" in columns else None
+            active_index = columns.index("active") if "active" in columns else None
+            standstill_index = columns.index("standstill") if "standstill" in columns else None
+            pressed_index = columns.index("steering_pressed")
+            for row in chunk.itertuples(index=False, name=None):
+                route = row[route_index] if route_index is not None else None
+                if current_route is not route_sentinel and str(route) != str(current_route):
+                    finish_event()
+                    write_rows(pending_gap)
+                    pending_gap.clear()
+                current_route = route
+                is_active = active_index is None or bool(row[active_index])
+                is_standstill = standstill_index is not None and bool(row[standstill_index])
+                if not is_active or is_standstill:
+                    continue
+                pressed = bool(row[pressed_index])
+                if pressed:
+                    if event_row_count:
+                        event_row_count += len(pending_gap)
+                        if prune != "both":
+                            event_core.extend(pending_gap)
+                        pending_gap.clear()
+                    event_row_count += 1
+                    if prune != "both":
+                        event_core.append(row)
+                    if prune != "both" and event_row_count > max_event_rows:
+                        raise ValueError(
+                            f"override event exceeds {max_event_rows:,} rows; "
+                            "refusing an unbounded in-memory classification"
+                        )
+                elif event_row_count:
+                    pending_gap.append(row)
+                    if len(pending_gap) > gap_frames:
+                        finish_event()
+                        write_rows(pending_gap)
+                        pending_gap.clear()
+                else:
+                    write_rows([row])
+        finish_event()
+        write_rows(pending_gap)
+        flush_output()
+    finally:
+        if output_handle is not None:
+            output_handle.close()
+    if columns is None:
+        raise ValueError("input CSV is empty or missing")
+    return {
+        "active_rows": active_rows,
+        "dropped_rows": dropped_rows,
+        "event_count": event_count,
+        "output_rows": active_rows,
+    }
 
 
 def plot_intervention_scatter(df, output_path, max_points=None):
@@ -758,6 +896,10 @@ def main():
                         help="Write active frames with the selected event type(s) removed to PATH (.csv or .parquet)")
     parser.add_argument("--prune", choices=["mechanical", "driver", "both"], default="both",
                         help="Which event types to remove when --prune-output is set (default: both)")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Process CSV in bounded chunks; only supports --prune-output")
+    parser.add_argument("--chunk-rows", type=int, default=DEFAULT_CHUNK_ROWS,
+                        help=f"Rows per streaming chunk (default: {DEFAULT_CHUNK_ROWS:,})")
     args = parser.parse_args()
 
     from nnlc_tools.steering_classifier.config import ClassifierConfig
@@ -766,6 +908,26 @@ def main():
         torque_rate_definite_driver=args.torque_rate_driver,
         max_pothole_length_m=args.max_pothole_length,
     )
+
+    if args.chunk_rows <= 0:
+        parser.error("--chunk-rows must be a positive integer")
+    if args.streaming:
+        if not args.input.lower().endswith(".csv"):
+            parser.error("--streaming only supports CSV input")
+        if not args.prune_output or args.plot or args.scatter:
+            parser.error("--streaming requires --prune-output and does not support --plot/--scatter")
+        try:
+            stats = prune_csv_stream(
+                args.input, args.prune_output, prune=args.prune,
+                gap_frames=args.gap_frames, cfg=cfg, chunksize=args.chunk_rows,
+            )
+        except (OSError, ValueError, pd.errors.EmptyDataError) as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        print(f"Active frames: {stats['active_rows'] + stats['dropped_rows']:,}")
+        print(f"Segmented into {stats['event_count']:,} events")
+        print(f"Pruned output: {stats['output_rows']:,} rows written to {args.prune_output} ({stats['dropped_rows']:,} frames removed)")
+        return
 
     df = load_data(args.input)
     print(f"Loaded {len(df):,} rows")

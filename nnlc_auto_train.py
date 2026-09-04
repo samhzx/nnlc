@@ -132,6 +132,8 @@ SCORE_LEVELS = {
     "poor": 40,
 }
 
+MIN_STREAMING_FREE_BYTES = 100 * 1024 ** 3
+
 
 # ============================================================
 # 工具函数
@@ -299,6 +301,23 @@ def validate_score_threshold(value):
         raise ValueError("min_score 必须是 0-100 的整数")
 
 
+def report_streaming_disk_space(output_dir):
+    """Report free output space and warn when a large run may exhaust it."""
+    try:
+        free_bytes = shutil.disk_usage(output_dir).free
+    except OSError as exc:
+        print_warn(f"无法检查输出磁盘剩余空间: {exc}")
+        return None
+    free_gib = free_bytes / 1024 ** 3
+    print_info(f"输出磁盘剩余空间: {free_gib:.1f} GB")
+    if free_bytes < MIN_STREAMING_FREE_BYTES:
+        print_warn(
+            "流式训练处理超大数据时建议至少预留 100 GB；"
+            "当前空间可能不足，请关注中间 CSV 的增长"
+        )
+    return free_bytes
+
+
 def _raise_if_cancelled(cancel_event):
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("训练已取消")
@@ -396,10 +415,13 @@ def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False):
     return output_csv
 
 
-def step_score(input_csv, python_exe):
+def step_score(input_csv, python_exe, streaming=False):
     """步骤2: 评估路线质量，返回自动推荐的 min_score。"""
+    command = [python_exe, "-m", "nnlc_tools.score_routes", input_csv]
+    if streaming:
+        command.append("--streaming")
     result = run_command(
-        [python_exe, "-m", "nnlc_tools.score_routes", input_csv],
+        command,
         "评估路线质量",
     )
 
@@ -436,12 +458,15 @@ def step_score(input_csv, python_exe):
     return recommended_score
 
 
-def step_prune(input_csv, min_score, output_dir, python_exe):
+def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False):
     """步骤3: 修剪低质量路线。"""
     output_csv = os.path.join(output_dir, "routes_pruned.csv")
+    command = [python_exe, "-m", "nnlc_tools.prune_routes", input_csv,
+               "--min-score", str(min_score), "-o", output_csv]
+    if streaming:
+        command.append("--streaming")
     run_command(
-        [python_exe, "-m", "nnlc_tools.prune_routes", input_csv,
-         "--min-score", str(min_score), "-o", output_csv],
+        command,
         f"修剪路线 (min-score={min_score})",
     )
 
@@ -465,12 +490,15 @@ def step_prune(input_csv, min_score, output_dir, python_exe):
     return output_csv
 
 
-def step_interventions(input_csv, output_dir, python_exe):
+def step_interventions(input_csv, output_dir, python_exe, streaming=False):
     """步骤4: 移除干预帧。"""
     output_csv = os.path.join(output_dir, "interventions_pruned.csv")
+    command = [python_exe, "-m", "nnlc_tools.analyze_interventions", input_csv,
+               "--prune-output", output_csv]
+    if streaming:
+        command.append("--streaming")
     run_command(
-        [python_exe, "-m", "nnlc_tools.analyze_interventions", input_csv,
-         "--prune-output", output_csv],
+        command,
         "分类并移除干预帧",
     )
 
@@ -489,12 +517,15 @@ def step_interventions(input_csv, output_dir, python_exe):
     return output_csv
 
 
-def step_visualize(input_csv, output_dir, python_exe):
+def step_visualize(input_csv, output_dir, python_exe, streaming=False):
     """步骤5: 可视化数据覆盖度。"""
     output_png = os.path.join(output_dir, "coverage.png")
+    command = [python_exe, "-m", "nnlc_tools.visualize_coverage", input_csv,
+               "-o", output_png]
+    if streaming:
+        command.append("--streaming")
     run_command(
-        [python_exe, "-m", "nnlc_tools.visualize_coverage", input_csv,
-         "-o", output_png],
+        command,
         "生成数据覆盖度图",
     )
 
@@ -505,7 +536,8 @@ def step_visualize(input_csv, output_dir, python_exe):
 
 
 def step_train(input_csv, car_name, output_dir, cancel_event=None,
-               process_holder=None, batch_size=16384, force_cpu=True):
+               process_holder=None, batch_size=16384, force_cpu=True,
+               streaming=False):
     """步骤6: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
     # 创建训练输入目录（只包含要训练的 CSV）
@@ -526,7 +558,15 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
 
     # 复制 CSV 为车型命名
     car_csv = os.path.join(train_input_dir, f"{car_name}.csv")
-    shutil.copy2(input_csv, car_csv)
+    if streaming:
+        try:
+            os.link(input_csv, car_csv)
+            print_info("流式训练使用硬链接，避免复制大型训练 CSV")
+        except OSError:
+            shutil.copy2(input_csv, car_csv)
+            print_warn("当前文件系统不支持硬链接，已回退为复制训练 CSV")
+    else:
+        shutil.copy2(input_csv, car_csv)
 
     # 清理旧的训练结果（如果存在）
     train_results_dir = os.path.join(train_input_dir, "training_results", car_name)
@@ -545,7 +585,10 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     # compatibility with older callers, but never allow a GPU path here.
     force_cpu = True
     cmd = [julia_exe, script_path, train_input_dir, "--cpu", f"--batch-size={batch_size}"]
-    print_info(f"Julia 训练中（CPU 模式，batch size={batch_size:,}）")
+    if streaming:
+        cmd.append("--streaming")
+    mode_label = "CPU 流式低内存模式" if streaming else "CPU 模式"
+    print_info(f"Julia 训练中（{mode_label}，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
     print_warn("Julia 首次运行需编译依赖（约 3-10 分钟无输出属正常），请耐心等待")
     print_info("训练日志会实时显示在下方:\n" + "-" * 60)
@@ -608,7 +651,8 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     return model_json, train_results_dir
 
 
-def step_validate(model_json, train_data_csv, output_dir, python_exe):
+def step_validate(model_json, train_data_csv, output_dir, python_exe,
+                  streaming=False):
     """步骤7: 验证模型质量。"""
     # 1. 检查 JSON 结构
     with open(model_json, "r", encoding="utf-8") as f:
@@ -655,9 +699,12 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe):
     viz_data = balanced_csv if os.path.exists(balanced_csv) else train_data_csv
 
     try:
+        command = [python_exe, "-m", "nnlc_tools.visualize_model", model_json,
+                   viz_data, "-o", validation_dir]
+        if streaming:
+            command.append("--streaming")
         validation_result = run_command(
-            [python_exe, "-m", "nnlc_tools.visualize_model", model_json,
-             viz_data, "-o", validation_dir],
+            command,
             "生成模型验证图表",
             check=False,
         )
@@ -720,7 +767,8 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
 def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                skip_visualize=False, output_dir=None, deploy_dir=None,
                cancel_event=None, process_holder=None, batch_size=16384,
-               force_cpu=True, skip_corrupt_rlogs=False):
+               force_cpu=True, skip_corrupt_rlogs=False,
+               streaming_mode=False, keep_intermediates=True):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -736,6 +784,8 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         batch_size: Julia 训练批次大小，默认 16384；较小值可降低内存峰值
         force_cpu: 兼容旧调用方的参数；当前训练始终使用 CPU
         skip_corrupt_rlogs: 是否跳过无法解析的损坏 rlog 并继续提取
+        streaming_mode: 是否使用分块评分、剪枝、可视化和 Julia 流式训练
+        keep_intermediates: 是否保留完整中间 CSV 文件
 
     Returns:
         模型文件路径
@@ -769,6 +819,8 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     print_info(f"输出目录: {output_dir}")
+    if streaming_mode:
+        report_streaming_disk_space(output_dir)
 
     start_time = time.time()
 
@@ -783,7 +835,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # ---- 步骤 2: 评估路线质量 ----
     _raise_if_cancelled(cancel_event)
     print_step(2, total_steps, "评估路线质量")
-    recommended_score = step_score(lateral_csv, python_exe)
+    recommended_score = step_score(lateral_csv, python_exe, streaming=streaming_mode)
     if min_score is None:
         min_score = recommended_score
         print_info(f"使用自动推荐阈值: min-score={min_score}")
@@ -793,18 +845,20 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # ---- 步骤 3: 修剪路线 ----
     _raise_if_cancelled(cancel_event)
     print_step(3, total_steps, "修剪低质量路线")
-    pruned_csv = step_prune(lateral_csv, min_score, output_dir, python_exe)
+    pruned_csv = step_prune(lateral_csv, min_score, output_dir, python_exe,
+                             streaming=streaming_mode)
 
     # ---- 步骤 4: 移除干预帧 ----
     _raise_if_cancelled(cancel_event)
     print_step(4, total_steps, "移除干预帧")
-    final_csv = step_interventions(pruned_csv, output_dir, python_exe)
+    final_csv = step_interventions(pruned_csv, output_dir, python_exe,
+                                   streaming=streaming_mode)
 
     # ---- 步骤 5: 可视化覆盖度 ----
     if not skip_visualize:
         _raise_if_cancelled(cancel_event)
         print_step(5, total_steps, "可视化数据覆盖度")
-        step_visualize(final_csv, output_dir, python_exe)
+        step_visualize(final_csv, output_dir, python_exe, streaming=streaming_mode)
 
     # ---- 步骤 6: 训练模型 ----
     _raise_if_cancelled(cancel_event)
@@ -816,6 +870,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         output_dir,
         batch_size=batch_size,
         force_cpu=force_cpu,
+        streaming=streaming_mode,
         cancel_event=cancel_event,
         process_holder=process_holder,
     )
@@ -824,7 +879,8 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     _raise_if_cancelled(cancel_event)
     validate_step = train_step + 1
     print_step(validate_step, total_steps, "验证模型质量")
-    quality_ok = step_validate(model_json, final_csv, output_dir, python_exe)
+    quality_ok = step_validate(model_json, final_csv, output_dir, python_exe,
+                               streaming=streaming_mode)
 
     if not quality_ok:
         raise RuntimeError("模型质量验证未通过，已停止部署；请调整参数或补充数据后重试。")
@@ -834,6 +890,23 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     deploy_step = validate_step + 1
     print_step(deploy_step, total_steps, "部署模型")
     deployed_path = step_deploy(model_json, car_name, skip_deploy, deploy_dir=deploy_dir)
+
+    if streaming_mode and not keep_intermediates:
+        training_copy = os.path.join(output_dir, "training_input", f"{car_name}.csv")
+        cleanup_failures = []
+        for intermediate in {lateral_csv, pruned_csv, final_csv, training_copy}:
+            try:
+                os.remove(intermediate)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_failures.append(f"{intermediate}: {exc}")
+        if cleanup_failures:
+            print_warn("部分中间 CSV 无法清理，模型和训练结果不受影响:")
+            for failure in cleanup_failures:
+                print_warn(f"  - {failure}")
+        else:
+            print_info("已按设置清理完整中间 CSV，仅保留训练结果和统计文件")
 
     # ---- 总结 ----
     elapsed = time.time() - start_time
@@ -946,6 +1019,10 @@ def main():
     parser.add_argument("--cpu", action="store_true", help="兼容参数；训练始终使用 CPU")
     parser.add_argument("--skip-corrupt", action="store_true",
                         help="跳过无法解析的损坏 rlog 并继续提取")
+    parser.add_argument("--streaming", action="store_true",
+                        help="使用流式评分、剪枝、覆盖度统计和 Julia 训练")
+    parser.add_argument("--no-keep-intermediates", action="store_true",
+                        help="流式模式成功后删除完整中间 CSV")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
 
     args = parser.parse_args()
@@ -980,6 +1057,8 @@ def main():
         batch_size=args.batch_size,
         force_cpu=True,
         skip_corrupt_rlogs=args.skip_corrupt,
+        streaming_mode=args.streaming,
+        keep_intermediates=not args.no_keep_intermediates,
     )
 
 
