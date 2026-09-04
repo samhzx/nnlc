@@ -73,10 +73,27 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
     steer_actuator_delay: 转向执行器延迟（秒）
 
   Returns:
-    friction_input 值
+    friction_input 值；输入或计算结果非有限时返回 None
   """
   if model_accels_y is None or len(model_accels_y) < len(T_IDXS):
     return 0.0
+
+  try:
+    scalar_inputs = np.asarray([
+        v_ego,
+        desired_lat_accel,
+        actual_lat_accel,
+        desired_curvature,
+        actual_curvature,
+        steer_actuator_delay,
+    ], dtype=np.float64)
+    lat_accels = np.asarray(model_accels_y[:len(T_IDXS)], dtype=np.float64)
+  except (TypeError, ValueError, OverflowError):
+    return None
+  if scalar_inputs.shape != (6,) or not np.all(np.isfinite(scalar_inputs)):
+    return None
+  if lat_accels.shape != (len(T_IDXS),) or not np.all(np.isfinite(lat_accels)):
+    return None
 
   # low_speed_factor
   low_speed_factor = float(np.interp(v_ego, LOW_SPEED_X, LOW_SPEED_Y)) ** 2
@@ -93,7 +110,6 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
   friction_upper_idx = next((i for i, t in enumerate(T_IDXS) if t > lookahead), 16)
 
   # predicted_lateral_jerk
-  lat_accels = np.array(model_accels_y[:len(T_IDXS)])
   predicted_lateral_jerk = np.diff(lat_accels) / np.array(T_DIFFS)
 
   # desired_lateral_jerk
@@ -110,7 +126,7 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
 
   # friction_input
   friction_input = lat_accel_friction_factor * (setpoint - measurement) + LAT_JERK_FRICTION_FACTOR * lookahead_lateral_jerk
-  return float(friction_input)
+  return float(friction_input) if np.isfinite(friction_input) else None
 
 COLUMNS = [
     "timestamp",

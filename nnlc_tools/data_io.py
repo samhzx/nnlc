@@ -5,15 +5,25 @@ import os
 import pandas as pd
 
 
+class DataLoadError(ValueError):
+    """Raised when an input data file or rlog directory cannot be read."""
+
+
+_READ_ERRORS = (OSError, ValueError, ImportError)
+
+
 def load_data(input_path):
     """Load lateral data from CSV, Parquet, or directory of rlogs.
 
     Returns a DataFrame, or None if no data found.
     """
     if os.path.isfile(input_path):
-        if input_path.endswith(".parquet"):
-            return pd.read_parquet(input_path)
-        return pd.read_csv(input_path)
+        try:
+            if input_path.lower().endswith(".parquet"):
+                return pd.read_parquet(input_path)
+            return pd.read_csv(input_path)
+        except _READ_ERRORS as exc:
+            raise DataLoadError(f"无法读取数据文件 {input_path}: {exc}") from exc
 
     if os.path.isdir(input_path):
         import tempfile
@@ -37,6 +47,8 @@ def load_data(input_path):
             if stream.rows_written == 0:
                 return None
             return pd.read_csv(temp_path)
+        except (OSError, ValueError, ImportError, RuntimeError) as exc:
+            raise DataLoadError(f"无法读取 rlog 数据目录 {input_path}: {exc}") from exc
         finally:
             stream.close()
             try:
