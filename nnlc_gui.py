@@ -44,9 +44,10 @@ TRAINING_MODES = {
     "CPU 流式低内存模式": 4096,
 }
 CORRUPT_LOG_MODES = {
-    "严格模式（遇到损坏日志停止）": False,
     "容错模式（跳过损坏日志）": True,
+    "严格模式（遇到损坏日志停止）": False,
 }
+DEFAULT_CORRUPT_LOG_MODE = "容错模式（跳过损坏日志）"
 LEGACY_TRAINING_MODES = {
     "标准模式": "CPU 标准模式",
     "低内存模式": "CPU 流式低内存模式",
@@ -89,7 +90,7 @@ class NNLCApp:
 
         saved_corrupt_mode = saved_preferences.get("corrupt_log_mode")
         if not isinstance(saved_corrupt_mode, str) or saved_corrupt_mode not in CORRUPT_LOG_MODES:
-            saved_corrupt_mode = "严格模式（遇到损坏日志停止）"
+            saved_corrupt_mode = DEFAULT_CORRUPT_LOG_MODE
 
         saved_car = saved_preferences.get("car")
         if not isinstance(saved_car, str) or not saved_car.strip():
@@ -157,7 +158,7 @@ class NNLCApp:
             training_mode = "CPU 标准模式"
         corrupt_log_mode = self.corrupt_log_mode_var.get()
         if corrupt_log_mode not in CORRUPT_LOG_MODES:
-            corrupt_log_mode = "严格模式（遇到损坏日志停止）"
+            corrupt_log_mode = DEFAULT_CORRUPT_LOG_MODE
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -504,7 +505,7 @@ class NNLCApp:
         skip_visualize = not self.skip_viz_var.get()
         corrupt_log_mode = self.corrupt_log_mode_var.get().strip()
         if corrupt_log_mode not in CORRUPT_LOG_MODES:
-            corrupt_log_mode = "严格模式（遇到损坏日志停止）"
+            corrupt_log_mode = DEFAULT_CORRUPT_LOG_MODE
             self.corrupt_log_mode_var.set(corrupt_log_mode)
         skip_corrupt_rlogs = CORRUPT_LOG_MODES[corrupt_log_mode]
         self.worker = threading.Thread(
