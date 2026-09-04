@@ -41,7 +41,6 @@ _ANSI_COLOR_TAGS = {
 }
 TRAINING_MODES = {
     "CPU 标准模式": 16384,
-    "CPU 低内存模式": 4096,
     "CPU 流式低内存模式": 4096,
 }
 CORRUPT_LOG_MODES = {
@@ -50,7 +49,8 @@ CORRUPT_LOG_MODES = {
 }
 LEGACY_TRAINING_MODES = {
     "标准模式": "CPU 标准模式",
-    "低内存模式": "CPU 低内存模式",
+    "低内存模式": "CPU 流式低内存模式",
+    "CPU 低内存模式": "CPU 流式低内存模式",
 }
 
 
