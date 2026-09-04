@@ -25,16 +25,17 @@
 """
 
 import argparse
-import contextlib
 import csv
-import io
 import json
 import math
 import os
+import queue
 import runpy
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -123,6 +124,35 @@ def _emit(message):
 # 模型验收标准
 MAX_TEST_LOSS = 0.05
 REQUIRED_INPUT_SIZE = 18
+EXPECTED_INPUT_VARS = [
+    "v_ego",
+    "desired_lateral_accel",
+    "friction_input",
+    "roll",
+    "desired_lateral_accel_tm03",
+    "desired_lateral_accel_tm02",
+    "desired_lateral_accel_tm01",
+    "desired_lateral_accel_tp03",
+    "desired_lateral_accel_tp06",
+    "desired_lateral_accel_tp10",
+    "desired_lateral_accel_tp15",
+    "roll_tm03",
+    "roll_tm02",
+    "roll_tm01",
+    "roll_tp03",
+    "roll_tp06",
+    "roll_tp10",
+    "roll_tp15",
+]
+EXPECTED_LAYER_DIMS = ((18, 7), (7, 13), (13, 3), (3, 1))
+BUNDLED_WORKER_MODULES = frozenset({
+    "nnlc_tools.extract_lateral_data",
+    "nnlc_tools.score_routes",
+    "nnlc_tools.prune_routes",
+    "nnlc_tools.analyze_interventions",
+    "nnlc_tools.visualize_coverage",
+    "nnlc_tools.visualize_model",
+})
 
 # 评分等级
 SCORE_LEVELS = {
@@ -188,89 +218,148 @@ def print_info(message):
     _emit(f"  {Colors.BLUE}[INFO]{Colors.RESET} {message}")
 
 
-def run_command(cmd, description, check=True):
-    """执行命令并实时显示输出。
+def _terminate_process_tree(process):
+    """Terminate a child process and any workers it started."""
+    if process is None or process.poll() is not None:
+        return
 
-    Args:
-        cmd: 命令列表或字符串
-        description: 命令描述
-        check: 是否在非零退出码时抛出异常
+    pid = getattr(process, "pid", None)
+    if pid is not None and os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            # ``taskkill`` can be present but fail (for example when the
+            # process has already exited or permissions changed).  Only stop
+            # here when it actually terminated the process tree.
+            if result.returncode == 0 or process.poll() is not None:
+                return
+        except OSError:
+            pass
 
-    Returns:
-        subprocess.CompletedProcess 对象
-    """
-    print_info(f"{description}...")
-    _emit(f"    命令: {cmd if isinstance(cmd, str) else ' '.join(str(c) for c in cmd)}")
+    if pid is not None and os.name != "nt":
+        try:
+            process_group = os.getpgid(pid)
+            os.killpg(process_group, signal.SIGTERM)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process_group, signal.SIGKILL)
+            return
+        except OSError:
+            pass
 
-    # A frozen exe cannot launch ``python -m ...`` because the target machine
-    # has no Python interpreter.  Execute our own bundled modules in-process
-    # instead.  Keeping the source-mode subprocess path preserves the normal
-    # CLI behaviour and makes debugging with a virtualenv straightforward.
-    if (
+    try:
+        process.terminate()
+    except (OSError, AttributeError):
+        pass
+    try:
+        process.wait(timeout=2)
+    except (subprocess.TimeoutExpired, OSError, AttributeError):
+        try:
+            process.kill()
+        except (OSError, AttributeError):
+            pass
+
+
+def _prepare_command(cmd):
+    """Convert a bundled module command into a cancellable child EXE call."""
+    is_bundled_module = (
         getattr(sys, "frozen", False)
         and isinstance(cmd, (list, tuple))
         and len(cmd) >= 3
         and os.path.abspath(str(cmd[0])) == os.path.abspath(sys.executable)
         and cmd[1] == "-m"
-    ):
-        old_argv = sys.argv
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        returncode = 0
-        try:
-            sys.argv = [str(cmd[1])] + [str(arg) for arg in cmd[3:]]
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                runpy.run_module(str(cmd[2]), run_name="__main__")
-        except SystemExit as exc:
-            returncode = int(exc.code) if isinstance(exc.code, int) else 1
-        except Exception:
-            returncode = 1
-            import traceback
-            traceback.print_exc(file=stderr)
-        finally:
-            sys.argv = old_argv
-        result = subprocess.CompletedProcess(cmd, returncode, stdout.getvalue(), stderr.getvalue())
-        for line in result.stdout.strip().splitlines():
-            _emit(f"    {line}")
-        for line in result.stderr.strip().splitlines():
-            _emit(f"    {line}")
-        if check and returncode:
-            raise subprocess.CalledProcessError(returncode, cmd, result.stdout, result.stderr)
-        if returncode:
-            print_warn(f"命令退出码: {returncode}")
-        else:
-            print_ok("完成")
-        return result
+    )
+    if is_bundled_module:
+        return [sys.executable, "--run-module", str(cmd[2]), *[str(arg) for arg in cmd[3:]]]
+    return cmd
 
+
+def run_command(cmd, description, check=True, cancel_event=None,
+                process_holder=None, cwd=None, env=None):
+    """Execute a command with live output and cooperative cancellation."""
+    print_info(f"{description}...")
+    _emit(f"    命令: {cmd if isinstance(cmd, str) else ' '.join(str(c) for c in cmd)}")
+
+    actual_cmd = _prepare_command(cmd)
     start_time = time.time()
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+        "cwd": cwd,
+        "env": env,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=check,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except subprocess.CalledProcessError as e:
-        elapsed = time.time() - start_time
-        print_error(f"命令失败 (耗时 {elapsed:.1f}s, 退出码 {e.returncode})")
-        if e.stdout:
-            for line in e.stdout.strip().split("\n")[-5:]:
-                _emit(f"    {line}")
-        if e.stderr:
-            for line in e.stderr.strip().split("\n")[-5:]:
-                _emit(f"    {line}")
-        raise
+        process = subprocess.Popen(actual_cmd, **popen_kwargs)
     except FileNotFoundError:
-        print_error(f"命令未找到: {cmd[0] if isinstance(cmd, list) else cmd.split()[0]}")
+        executable = actual_cmd[0] if isinstance(actual_cmd, (list, tuple)) else actual_cmd
+        print_error(f"命令未找到: {executable}")
         raise
+    except OSError as exc:
+        print_error(f"命令启动失败: {exc}")
+        raise
+
+    if process_holder is not None:
+        process_holder["process"] = process
+
+    output_lines = []
+    output_queue = queue.Queue()
+    reader_done = threading.Event()
+
+    def read_output():
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output_queue.put(line)
+        finally:
+            reader_done.set()
+
+    reader = threading.Thread(target=read_output, name="nnlc-command-reader", daemon=True)
+    reader.start()
+    cancelled = False
+    try:
+        while not reader_done.is_set() or process.poll() is None or not output_queue.empty():
+            if cancel_event is not None and cancel_event.is_set() and process.poll() is None:
+                cancelled = True
+                _terminate_process_tree(process)
+            try:
+                line = output_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            output_lines.append(line)
+            _emit("    " + line.rstrip())
+        returncode = process.wait()
+    finally:
+        if process_holder is not None and process_holder.get("process") is process:
+            process_holder["process"] = None
+
+    result = subprocess.CompletedProcess(cmd, returncode, "".join(output_lines), "")
+    if cancelled or (cancel_event is not None and cancel_event.is_set()):
+        raise RuntimeError("训练已取消")
 
     elapsed = time.time() - start_time
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            _emit(f"    {line}")
-    print_ok(f"完成 (耗时 {elapsed:.1f}s)")
+    if returncode != 0:
+        print_error(f"命令失败 (耗时 {elapsed:.1f}s, 退出码 {returncode})")
+        if check:
+            raise subprocess.CalledProcessError(
+                returncode, cmd, result.stdout, result.stderr,
+            )
+        print_warn(f"命令退出码: {returncode}")
+    else:
+        print_ok(f"完成 (耗时 {elapsed:.1f}s)")
     return result
 
 
@@ -383,7 +472,8 @@ def validate_data_dir(data_dir):
 # 训练流程
 # ============================================================
 
-def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False):
+def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False,
+                 cancel_event=None, process_holder=None):
     """步骤1: 提取横向控制数据。"""
     output_csv = os.path.join(output_dir, "lateral_data.csv")
     command = [python_exe, "-m", "nnlc_tools.extract_lateral_data", data_dir,
@@ -394,6 +484,8 @@ def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False):
         command,
         "提取横向控制数据（含时序特征，跳过损坏日志）"
         if skip_corrupt_rlogs else "提取横向控制数据（含时序特征）",
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     # 验证输出
@@ -415,7 +507,8 @@ def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False):
     return output_csv
 
 
-def step_score(input_csv, python_exe, streaming=False):
+def step_score(input_csv, python_exe, streaming=False, cancel_event=None,
+               process_holder=None):
     """步骤2: 评估路线质量，返回自动推荐的 min_score。"""
     command = [python_exe, "-m", "nnlc_tools.score_routes", input_csv]
     if streaming:
@@ -423,6 +516,8 @@ def step_score(input_csv, python_exe, streaming=False):
     result = run_command(
         command,
         "评估路线质量",
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     # 解析评分结果，自动推荐 min_score
@@ -458,7 +553,8 @@ def step_score(input_csv, python_exe, streaming=False):
     return recommended_score
 
 
-def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False):
+def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False,
+               cancel_event=None, process_holder=None):
     """步骤3: 修剪低质量路线。"""
     output_csv = os.path.join(output_dir, "routes_pruned.csv")
     command = [python_exe, "-m", "nnlc_tools.prune_routes", input_csv,
@@ -468,6 +564,8 @@ def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False):
     run_command(
         command,
         f"修剪路线 (min-score={min_score})",
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     if not os.path.exists(output_csv):
@@ -490,7 +588,8 @@ def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False):
     return output_csv
 
 
-def step_interventions(input_csv, output_dir, python_exe, streaming=False):
+def step_interventions(input_csv, output_dir, python_exe, streaming=False,
+                       cancel_event=None, process_holder=None):
     """步骤4: 移除干预帧。"""
     output_csv = os.path.join(output_dir, "interventions_pruned.csv")
     command = [python_exe, "-m", "nnlc_tools.analyze_interventions", input_csv,
@@ -500,6 +599,8 @@ def step_interventions(input_csv, output_dir, python_exe, streaming=False):
     run_command(
         command,
         "分类并移除干预帧",
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     if not os.path.exists(output_csv):
@@ -517,7 +618,8 @@ def step_interventions(input_csv, output_dir, python_exe, streaming=False):
     return output_csv
 
 
-def step_visualize(input_csv, output_dir, python_exe, streaming=False):
+def step_visualize(input_csv, output_dir, python_exe, streaming=False,
+                   cancel_event=None, process_holder=None):
     """步骤5: 可视化数据覆盖度。"""
     output_png = os.path.join(output_dir, "coverage.png")
     command = [python_exe, "-m", "nnlc_tools.visualize_coverage", input_csv,
@@ -527,6 +629,8 @@ def step_visualize(input_csv, output_dir, python_exe, streaming=False):
     run_command(
         command,
         "生成数据覆盖度图",
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     if os.path.exists(output_png):
@@ -604,21 +708,25 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     env["QT_QPA_PLATFORM"] = "offscreen"
     # Julia resolves relative package/artifact paths from its working tree;
     # use the extracted bundle root for the frozen app.
-    process = subprocess.Popen(
-        cmd,
-        cwd=script_root,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
+    process_kwargs = {
+        "cwd": script_root,
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        process_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        process_kwargs["start_new_session"] = True
+    process = subprocess.Popen(cmd, **process_kwargs)
     if process_holder is not None:
         process_holder["process"] = process
     if cancel_event is not None and cancel_event.is_set():
-        process.terminate()
+        _terminate_process_tree(process)
     try:
         if process.stdout is not None:
             for line in process.stdout:
@@ -651,34 +759,210 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     return model_json, train_results_dir
 
 
+def _validate_model_structure(params):
+    """Validate the complete JSON contract exported by the Julia trainer."""
+    issues = []
+    if not isinstance(params, dict):
+        return ["模型 JSON 顶层必须是对象"]
+
+    required_fields = (
+        "input_size", "output_size", "input_mean", "input_std",
+        "layers", "input_vars", "model_test_loss",
+    )
+    missing_fields = [field for field in required_fields if field not in params]
+    if missing_fields:
+        issues.append(f"缺少必需字段: {', '.join(missing_fields)}")
+
+    input_size = params.get("input_size")
+    if isinstance(input_size, bool) or not isinstance(input_size, int) or input_size != REQUIRED_INPUT_SIZE:
+        issues.append(f"input_size={input_size!r} (应为 {REQUIRED_INPUT_SIZE})")
+
+    output_size = params.get("output_size")
+    if isinstance(output_size, bool) or not isinstance(output_size, int) or output_size != 1:
+        issues.append(f"output_size={output_size!r} (应为 1)")
+
+    input_vars = params.get("input_vars")
+    if not isinstance(input_vars, list):
+        issues.append("input_vars 必须是字符串数组")
+    elif input_vars != EXPECTED_INPUT_VARS:
+        if not all(isinstance(value, str) for value in input_vars):
+            issues.append("input_vars 必须全部是字符串")
+        if len(input_vars) != REQUIRED_INPUT_SIZE:
+            issues.append(
+                f"input_vars 长度为 {len(input_vars)} (应为 {REQUIRED_INPUT_SIZE})"
+            )
+        else:
+            differences = [
+                f"#{index}: {actual!r} 应为 {expected!r}"
+                for index, (actual, expected) in enumerate(zip(input_vars, EXPECTED_INPUT_VARS))
+                if actual != expected
+            ]
+            issues.append("input_vars 顺序或名称错误: " + "; ".join(differences[:4]))
+        try:
+            if len(set(input_vars)) != len(input_vars):
+                issues.append("input_vars 不能包含重复名称")
+        except TypeError:
+            # The string-type error above is the useful diagnostic for nested
+            # arrays or other unhashable malformed values.
+            pass
+
+    def numeric_array(value, label):
+        """Return ``(shape, values)`` for a JSON numeric array.
+
+        Model validation runs before optional plotting dependencies are used.
+        Keeping this check in the standard library means a minimal source
+        install still rejects malformed models without falsely rejecting every
+        valid model just because NumPy is unavailable.
+        """
+        if not isinstance(value, list):
+            issues.append(f"{label} 必须是数字数组")
+            return None
+
+        malformed = False
+
+        def inspect(item):
+            nonlocal malformed
+            if isinstance(item, list):
+                children = [inspect(child) for child in item]
+                child_shapes = [child[0] for child in children if child is not None]
+                if len(child_shapes) != len(children) or (
+                    child_shapes and any(shape != child_shapes[0] for shape in child_shapes[1:])
+                ):
+                    malformed = True
+                    return (len(item),), []
+                child_shape = child_shapes[0] if child_shapes else ()
+                values = [value for child in children if child is not None for value in child[1]]
+                return (len(item),) + child_shape, values
+            if isinstance(item, (int, float)) and not isinstance(item, bool):
+                try:
+                    numeric_value = float(item)
+                except (OverflowError, ValueError):
+                    malformed = True
+                    return (), []
+                if not math.isfinite(numeric_value):
+                    malformed = True
+                return (), [numeric_value]
+            malformed = True
+            return None
+
+        inspected = inspect(value)
+        if malformed or inspected is None:
+            if any(
+                isinstance(item, (str, bool, dict))
+                for item in _walk_json_values(value)
+            ):
+                issues.append(f"{label} 包含非数字值")
+            else:
+                issues.append(f"{label} 不是规则的数字数组或包含 NaN/Inf")
+            return None
+        shape, values = inspected
+        return shape, values
+
+    def _walk_json_values(value):
+        if isinstance(value, list):
+            for item in value:
+                yield from _walk_json_values(item)
+        else:
+            yield value
+
+    def vector_values(info, label, expected_size):
+        if info is None:
+            return None
+        shape, values = info
+        is_vector = len(shape) == 1 or (
+            len(shape) == 2 and 1 in shape
+        )
+        if len(values) != expected_size or not is_vector:
+            issues.append(
+                f"{label} 形状为 {shape} (应为长度 {expected_size} 的向量或单行/单列数组)"
+            )
+            return None
+        return values
+
+    vector_values(
+        numeric_array(params.get("input_mean"), "input_mean"),
+        "input_mean",
+        REQUIRED_INPUT_SIZE,
+    )
+    stds = vector_values(
+        numeric_array(params.get("input_std"), "input_std"),
+        "input_std",
+        REQUIRED_INPUT_SIZE,
+    )
+    if stds is not None and any(value <= 0 for value in stds):
+        issues.append("input_std 必须全部大于 0")
+
+    layers = params.get("layers")
+    if not isinstance(layers, list):
+        issues.append("layers 必须是数组")
+        layers = []
+    elif len(layers) != len(EXPECTED_LAYER_DIMS):
+        issues.append(f"layers 数量为 {len(layers)} (应为 {len(EXPECTED_LAYER_DIMS)})")
+
+    expected_activations = (frozenset({"sigmoid", "σ"}),) * 2 + (frozenset({"identity"}),) * 2
+    for index, expected_dims in enumerate(EXPECTED_LAYER_DIMS):
+        if index >= len(layers):
+            break
+        layer = layers[index]
+        if not isinstance(layer, dict):
+            issues.append(f"第 {index + 1} 层必须是对象")
+            continue
+        weight_key = f"dense_{index + 1}_W"
+        bias_key = f"dense_{index + 1}_b"
+        if weight_key not in layer:
+            issues.append(f"第 {index + 1} 层缺少 {weight_key}")
+        if bias_key not in layer:
+            issues.append(f"第 {index + 1} 层缺少 {bias_key}")
+        if weight_key in layer:
+            weights = numeric_array(layer[weight_key], f"{weight_key}")
+            if weights is not None and weights[0] != expected_dims:
+                issues.append(
+                    f"{weight_key} 形状为 {weights[0]} (应为 {expected_dims[0]}x{expected_dims[1]})"
+                )
+        if bias_key in layer:
+            vector_values(
+                numeric_array(layer[bias_key], f"{bias_key}"),
+                bias_key,
+                expected_dims[1],
+            )
+        activation = layer.get("activation")
+        if not isinstance(activation, str) or activation not in expected_activations[index]:
+            expected_label = "sigmoid/σ" if index < 2 else "identity"
+            issues.append(
+                f"第 {index + 1} 层激活函数为 {activation!r} (应为 {expected_label})"
+            )
+
+    return issues
+
+
 def step_validate(model_json, train_data_csv, output_dir, python_exe,
-                  streaming=False):
+                  streaming=False, cancel_event=None, process_holder=None):
     """步骤7: 验证模型质量。"""
     # 1. 检查 JSON 结构
-    with open(model_json, "r", encoding="utf-8") as f:
-        params = json.load(f)
-
-    issues = []
-
-    input_size = params.get("input_size", 0)
-    if input_size != REQUIRED_INPUT_SIZE:
-        issues.append(f"input_size={input_size} (应为 {REQUIRED_INPUT_SIZE})")
-
-    raw_test_loss = params.get("model_test_loss", float("inf"))
     try:
-        test_loss = float(raw_test_loss)
-    except (TypeError, ValueError):
-        test_loss = float("inf")
-    if not math.isfinite(test_loss) or test_loss > MAX_TEST_LOSS:
-        issues.append(f"model_test_loss={test_loss:.6f} (应 < {MAX_TEST_LOSS})")
+        with open(model_json, "r", encoding="utf-8") as f:
+            params = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print_error(f"模型 JSON 无法读取或格式错误: {exc}")
+        return False
 
-    # 检查 input_vars 顺序
-    input_vars = params.get("input_vars", [])
-    if len(input_vars) >= 4:
-        jerk_idx = next((i for i, v in enumerate(input_vars) if "jerk" in v), -1)
-        roll_idx = next((i for i, v in enumerate(input_vars) if v == "roll"), -1)
-        if jerk_idx >= 0 and roll_idx >= 0 and jerk_idx > roll_idx:
-            issues.append(f"input_vars 顺序错误: lateral_jerk(idx={jerk_idx}) 在 roll(idx={roll_idx}) 之后")
+    issues = _validate_model_structure(params)
+
+    input_size = params.get("input_size") if isinstance(params, dict) else None
+
+    raw_test_loss = (
+        params.get("model_test_loss", float("inf"))
+        if isinstance(params, dict)
+        else float("inf")
+    )
+    try:
+        if isinstance(raw_test_loss, bool):
+            raise TypeError("布尔值不是有效的 loss")
+        test_loss = float(raw_test_loss)
+    except (TypeError, ValueError, OverflowError):
+        test_loss = float("inf")
+    if not math.isfinite(test_loss) or test_loss >= MAX_TEST_LOSS:
+        issues.append(f"model_test_loss={test_loss:.6f} (应 < {MAX_TEST_LOSS})")
 
     if issues:
         print_error("模型质量验证未通过:")
@@ -688,7 +972,7 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
 
     print_ok(f"input_size: {input_size}")
     print_ok(f"model_test_loss: {test_loss:.6f} (< {MAX_TEST_LOSS})")
-    print_ok(f"input_vars 顺序: 正确")
+    print_ok("模型 JSON 结构、输入变量、权重维度和归一化参数: 正确")
 
     # 2. 生成验证图表
     validation_dir = os.path.join(output_dir, "validation")
@@ -707,6 +991,8 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
             command,
             "生成模型验证图表",
             check=False,
+            cancel_event=cancel_event,
+            process_holder=process_holder,
         )
         if validation_result.returncode != 0:
             print_warn("模型验证图表生成失败，但不影响模型质量判定。")
@@ -718,6 +1004,12 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
             ]
             if missing_plots:
                 print_warn(f"模型验证图表缺失: {', '.join(missing_plots)}")
+    except RuntimeError as e:
+        # Cancellation must propagate to the workflow so it cannot continue
+        # into deployment after the user stops the validation worker.
+        if cancel_event is not None and cancel_event.is_set():
+            raise
+        print_warn(f"验证图表生成失败: {e}")
     except Exception as e:
         print_warn(f"验证图表生成失败: {e}")
 
@@ -731,7 +1023,7 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
                 layer_sizes.append(len(v[0]) if v else 0)
                 break
     if layer_sizes:
-        print_info(f"网络结构: {input_size} -> {' -> '.join(str(s) for s in layer_sizes)} -> 1")
+        print_info(f"网络结构: {input_size} -> {' -> '.join(str(s) for s in layer_sizes)}")
     print_info(f"层数: {len(layers)}")
 
     return True
@@ -830,12 +1122,20 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     lateral_csv = step_extract(
         data_dir, output_dir, python_exe,
         skip_corrupt_rlogs=skip_corrupt_rlogs,
+        cancel_event=cancel_event,
+        process_holder=process_holder,
     )
 
     # ---- 步骤 2: 评估路线质量 ----
     _raise_if_cancelled(cancel_event)
     print_step(2, total_steps, "评估路线质量")
-    recommended_score = step_score(lateral_csv, python_exe, streaming=streaming_mode)
+    recommended_score = step_score(
+        lateral_csv,
+        python_exe,
+        streaming=streaming_mode,
+        cancel_event=cancel_event,
+        process_holder=process_holder,
+    )
     if min_score is None:
         min_score = recommended_score
         print_info(f"使用自动推荐阈值: min-score={min_score}")
@@ -846,19 +1146,30 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     _raise_if_cancelled(cancel_event)
     print_step(3, total_steps, "修剪低质量路线")
     pruned_csv = step_prune(lateral_csv, min_score, output_dir, python_exe,
-                             streaming=streaming_mode)
+                             streaming=streaming_mode,
+                             cancel_event=cancel_event,
+                             process_holder=process_holder)
 
     # ---- 步骤 4: 移除干预帧 ----
     _raise_if_cancelled(cancel_event)
     print_step(4, total_steps, "移除干预帧")
     final_csv = step_interventions(pruned_csv, output_dir, python_exe,
-                                   streaming=streaming_mode)
+                                   streaming=streaming_mode,
+                                   cancel_event=cancel_event,
+                                   process_holder=process_holder)
 
     # ---- 步骤 5: 可视化覆盖度 ----
     if not skip_visualize:
         _raise_if_cancelled(cancel_event)
         print_step(5, total_steps, "可视化数据覆盖度")
-        step_visualize(final_csv, output_dir, python_exe, streaming=streaming_mode)
+        step_visualize(
+            final_csv,
+            output_dir,
+            python_exe,
+            streaming=streaming_mode,
+            cancel_event=cancel_event,
+            process_holder=process_holder,
+        )
 
     # ---- 步骤 6: 训练模型 ----
     _raise_if_cancelled(cancel_event)
@@ -880,7 +1191,9 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     validate_step = train_step + 1
     print_step(validate_step, total_steps, "验证模型质量")
     quality_ok = step_validate(model_json, final_csv, output_dir, python_exe,
-                               streaming=streaming_mode)
+                               streaming=streaming_mode,
+                               cancel_event=cancel_event,
+                               process_holder=process_holder)
 
     if not quality_ok:
         raise RuntimeError("模型质量验证未通过，已停止部署；请调整参数或补充数据后重试。")
@@ -919,7 +1232,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         params = json.load(f)
     try:
         test_loss = float(params.get("model_test_loss", float("inf")))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         test_loss = float("inf")
 
     print(f"  车型:        {car_name}")
@@ -988,8 +1301,27 @@ def interactive_mode():
     auto_train(data_dir, car_name, min_score, skip_deploy, skip_visualize)
 
 
+def run_bundled_module(module_name, module_args):
+    """Run one bundled CLI module in a child EXE process.
+
+    This private entry point is used by the frozen GUI so long-running Python
+    extraction/processing steps have a real process handle and can be stopped
+    together with their worker tree.
+    """
+    if module_name not in BUNDLED_WORKER_MODULES:
+        raise ValueError(f"不允许启动内部模块: {module_name}")
+    sys.argv = [module_name, *module_args]
+    runpy.run_module(module_name, run_name="__main__")
+
+
 def main():
     """主入口。"""
+    # A frozen executable uses itself as the Python-module worker.  Handle this
+    # before argparse so the worker never opens the GUI or interactive prompt.
+    if len(sys.argv) >= 3 and sys.argv[1] == "--run-module":
+        run_bundled_module(sys.argv[2], sys.argv[3:])
+        return
+
     parser = argparse.ArgumentParser(
         description="NNLC 横向控制模型一键训练",
         formatter_class=argparse.RawDescriptionHelpFormatter,

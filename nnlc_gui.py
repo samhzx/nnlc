@@ -21,7 +21,7 @@ except ImportError:  # Some minimal Python builds (including CI macOS) omit Tk.
     tk = None
     filedialog = messagebox = ttk = None
 
-from nnlc_auto_train import auto_train
+from nnlc_auto_train import _terminate_process_tree, auto_train
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -452,10 +452,7 @@ class NNLCApp:
             self.cancel_event.set()
             process = self.process_holder.get("process")
             if process is not None and process.poll() is None:
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
+                _terminate_process_tree(process)
         self.root.destroy()
 
     def start(self) -> None:
