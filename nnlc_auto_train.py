@@ -512,6 +512,18 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     train_input_dir = os.path.join(output_dir, "training_input")
     os.makedirs(train_input_dir, exist_ok=True)
 
+    # Julia 会训练该目录下的全部 CSV。先移除上次任务留下的输入文件，
+    # 避免更换车型并复用输出目录时意外重复训练旧车型。
+    stale_inputs = []
+    with os.scandir(train_input_dir) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.lower().endswith(".csv"):
+                stale_inputs.append(entry.path)
+    for stale_input in stale_inputs:
+        os.remove(stale_input)
+    if stale_inputs:
+        print_info(f"已清理 {len(stale_inputs)} 个旧训练输入文件")
+
     # 复制 CSV 为车型命名
     car_csv = os.path.join(train_input_dir, f"{car_name}.csv")
     shutil.copy2(input_csv, car_csv)

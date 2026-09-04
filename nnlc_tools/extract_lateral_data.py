@@ -368,6 +368,30 @@ class _StreamingCsvWriter:
         self.finish_segment()
         self.handle.flush()
 
+    def begin_segment(self):
+        """Record a rollback point before extracting one rlog segment."""
+        if self.pending or self.past:
+            raise RuntimeError("previous rlog segment was not finalized")
+        self.handle.flush()
+        return (
+            self.handle.tell(),
+            self.rows_written,
+            self.rows_seen,
+            self.rows_filtered,
+        )
+
+    def rollback_segment(self, checkpoint):
+        """Remove every row written since ``checkpoint`` and reset buffers."""
+        position, rows_written, rows_seen, rows_filtered = checkpoint
+        self.pending.clear()
+        self.past.clear()
+        self.handle.flush()
+        self.handle.seek(position)
+        self.handle.truncate()
+        self.rows_written = rows_written
+        self.rows_seen = rows_seen
+        self.rows_filtered = rows_filtered
+
     def finish_segment(self):
         while self.pending:
             self._emit_ready()
@@ -429,20 +453,17 @@ def main():
 
     def process_rlog(rlog_path, stream):
         """Extract one file, optionally continuing after a corrupt segment."""
+        checkpoint = stream.begin_segment()
         stream.route_id = extract_route_id(rlog_path)
         try:
             extract_segment(rlog_path, row_callback=stream.accept)
         except Exception as exc:
+            stream.rollback_segment(checkpoint)
             if not args.skip_corrupt:
                 raise
             skipped_rlogs.append((rlog_path, str(exc)))
             print(f"WARNING: Skipping unreadable rlog: {rlog_path}")
             print(f"  Reason: {exc}")
-            # Do not let a failed segment's temporal buffer affect the next
-            # segment. Construction-time parse failures normally have no
-            # pending rows, while this also handles iteration-time failures.
-            stream.pending.clear()
-            stream.past.clear()
             return
         stream.finish_segment()
 

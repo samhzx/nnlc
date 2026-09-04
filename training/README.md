@@ -18,10 +18,13 @@
 训练脚本读取由 `extract_lateral_data.py --temporal` 生成的 CSV 文件。所需列包括：
 
 - `v_ego`：车速（m/s）
-- `actual_lateral_accel`：实际横向加速度（m/s²）
 - `desired_lateral_accel`：期望横向加速度（m/s²）
+- `friction_input`：横向加速度误差与前瞻横向 jerk 组合得到的摩擦补偿输入
 - `roll`：道路横滚角（弧度）
-- 时间偏移列：`-0.3`、`-0.2`、`-0.1`、`+0.3`、`+0.6`、`+1.0`、`+1.5` 秒
+- `torque_output`：模型训练目标
+- `desired_lateral_accel` 和 `roll` 的时间偏移列：`-0.3`、`-0.2`、`-0.1`、`+0.3`、`+0.6`、`+1.0`、`+1.5` 秒
+
+最终模型共有 18 个输入：4 个当前状态输入、7 个期望横向加速度时序输入和 7 个横滚角时序输入。`route_id` 和 `timestamp` 仅用于隔离训练集与测试集，不会写入模型输入。
 
 CSV 文件路径应类似 `/path/to/latmodels/YOUR_CAR_NAME.csv`。
 
@@ -31,14 +34,14 @@ CSV 文件路径应类似 `/path/to/latmodels/YOUR_CAR_NAME.csv`。
 
 ```json
 {
-  "input_size": 25,
+  "input_size": 18,
   "output_size": 1,
   "input_mean": [15.2, 0.01, ...],
   "input_std": [8.5, 1.2, ...],
   "layers": [
     {
-      "layer1_W": [[...weights...]],
-      "layer1_b": [...biases...],
+      "dense_1_W": [[...weights...]],
+      "dense_1_b": [...biases...],
       "activation": "sigmoid"
     },
     ...

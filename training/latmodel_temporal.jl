@@ -85,6 +85,20 @@ Optimisers.init(o::CustomAdaGrad, x::AbstractArray) = fill!(similar(x, Float32),
 
 # Define constants
 const t_list = [-0.3f0 -0.2f0 -0.1f0 0.3f0 0.6f0 1f0 1.5f0]
+const non_model_columns = Set([
+  :torque_output,
+  :combined_column,
+  :v_ego_bins,
+  :desired_lateral_accel_bins,
+  :friction_input_bins,
+  :roll_bins,
+  :route_id,
+  :timestamp,
+])
+const temporal_split_gap_rows = 180
+const max_test_rows = 100_000
+
+model_feature_names(data::DataFrame) = filter(name -> Symbol(name) ∉ non_model_columns, names(data))
 
 function create_folder_with_iterator(path::AbstractString, folder_name::AbstractString; make_new=true)::String
   full_path = joinpath(path, folder_name)
@@ -143,12 +157,14 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     # friction_input 由 extract_lateral_data.py 精确计算，与 nnlc.py 运行时 update_friction_input 逻辑一致
     temporal_lat_accel_cols = filter(c -> occursin(r"^desired_lateral_accel_t[mp]\d+$", c), names(data))
     temporal_roll_cols = filter(c -> occursin(r"^roll_t[mp]\d+$", c), names(data))
-    keep_cols = vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols)
+    metadata_cols = filter(c -> c in names(data), ["route_id", "timestamp"])
+    keep_cols = vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols, metadata_cols)
     select!(data, Symbol.(keep_cols))
 
     # 重排列顺序：与 nnlc.py 运行时 feedforward (nn_input) 输入完全一致
-    # 列顺序：v_ego, desired_lateral_accel, friction_input, roll, torque_output, 时序desired_lat(7), 时序roll(7)
-    select!(data, vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols))
+    # 列顺序：v_ego, desired_lateral_accel, friction_input, roll, torque_output,
+    # 时序desired_lat(7), 时序roll(7)，最后保留不参与训练的路线划分元数据。
+    select!(data, keep_cols)
 
     if nrow(data) == 0
       error("No valid training rows remain after active/standstill filtering")
@@ -243,65 +259,118 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
   return data
 end
 
-# Split by bin while keeping singleton bins in the training set.  If every
-# bin is a singleton, a stratified split cannot produce a test partition, so
-# fall back to a global split rather than aborting training.
-function split_train_test(data::DataFrame, label_col::Symbol, out_streams; train_fraction::Float64=0.8)
+# Keep complete routes on one side of the split. If there is only one usable
+# route, use a chronological split with a gap large enough to separate the
+# temporal input windows on both sides of the boundary.
+function split_train_test_indices(data::DataFrame, out_streams; train_fraction::Float64=0.8)
   row_count = nrow(data)
-  if row_count < 2
-    error("At least two training rows are required")
+  if row_count < 4
+    error("至少需要 4 条有效数据，才能保证训练集和测试集各至少 2 条")
   end
 
-  groups = Dict{String, Vector{Int}}()
-  for (index, label) in enumerate(data[!, label_col])
-    push!(get!(groups, string(label), Int[]), index)
-  end
+  if :route_id in propertynames(data)
+    route_groups = Dict{String, Vector{Int}}()
+    for (index, route_id) in enumerate(data[!, :route_id])
+      push!(get!(route_groups, string(route_id), Int[]), index)
+    end
 
-  train_indices = Int[]
-  test_indices = Int[]
-  for indices in values(groups)
-    shuffle!(indices)
-    if length(indices) == 1
-      append!(train_indices, indices)
-    else
-      train_count = clamp(round(Int, train_fraction * length(indices)), 1, length(indices) - 1)
-      append!(train_indices, indices[1:train_count])
-      append!(test_indices, indices[(train_count + 1):end])
+    if length(route_groups) >= 2
+      target_test_count = clamp(round(Int, (1 - train_fraction) * row_count), 2, row_count - 2)
+      route_ids = collect(keys(route_groups))
+      rng = MersenneTwister(42)
+      shuffle!(rng, route_ids)
+
+      # Start with the single route closest to the requested test size, then
+      # greedily add routes only while doing so improves the row-count ratio.
+      test_route_ids = String[]
+      candidate_route = nothing
+      candidate_distance = typemax(Int)
+      for route_id in route_ids
+        route_count = length(route_groups[route_id])
+        if route_count >= 2 && row_count - route_count >= 2
+          distance = abs(route_count - target_test_count)
+          if distance < candidate_distance
+            candidate_route = route_id
+            candidate_distance = distance
+          end
+        end
+      end
+
+      if candidate_route !== nothing
+        push!(test_route_ids, candidate_route)
+        test_count = length(route_groups[candidate_route])
+        remaining_route_ids = filter(route_id -> route_id != candidate_route, route_ids)
+        sort!(remaining_route_ids, by=route_id -> length(route_groups[route_id]))
+        for route_id in remaining_route_ids
+          route_count = length(route_groups[route_id])
+          new_test_count = test_count + route_count
+          if row_count - new_test_count >= 2 && abs(new_test_count - target_test_count) < abs(test_count - target_test_count)
+            push!(test_route_ids, route_id)
+            test_count = new_test_count
+          end
+        end
+
+        test_routes = Set(test_route_ids)
+        train_indices = Int[]
+        test_indices = Int[]
+        for (route_id, indices) in route_groups
+          append!(route_id in test_routes ? test_indices : train_indices, indices)
+        end
+        if length(train_indices) >= 2 && length(test_indices) >= 2
+          println(out_streams, "Route split: training=$(length(train_indices)) rows from $(length(route_groups) - length(test_routes)) routes; test=$(length(test_indices)) rows from $(length(test_routes)) routes")
+          return train_indices, test_indices
+        end
+      end
     end
   end
 
-  if isempty(train_indices) || isempty(test_indices)
-    println(out_streams, "分箱分层无法产生完整测试集，退回全局 80/20 划分")
-    all_indices = collect(1:row_count)
-    shuffle!(all_indices)
-    train_count = clamp(round(Int, train_fraction * row_count), 1, row_count - 1)
-    train_indices = all_indices[1:train_count]
-    test_indices = all_indices[(train_count + 1):end]
+  println(out_streams, "无法进行完整路线隔离，使用带时序隔离区的顺序划分")
+  ordered_indices = :timestamp in propertynames(data) ? sortperm(data[!, :timestamp]) : collect(1:row_count)
+  split_gap = min(temporal_split_gap_rows, row_count ÷ 5)
+  usable_rows = row_count - split_gap
+  train_count = clamp(round(Int, train_fraction * usable_rows), 2, usable_rows - 2)
+  test_start = train_count + split_gap + 1
+  train_indices = ordered_indices[1:train_count]
+  test_indices = ordered_indices[test_start:end]
+  if length(train_indices) < 2 || length(test_indices) < 2
+    error("训练集和测试集都至少需要 2 条数据")
   end
-
-  shuffle!(train_indices)
-  shuffle!(test_indices)
-  println(out_streams, "Split rows before balancing: training=$(length(train_indices)); test=$(length(test_indices))")
-  return data[train_indices, :], data[test_indices, :]
+  println(out_streams, "Sequential split: training=$(length(train_indices)); gap=$split_gap; test=$(length(test_indices))")
+  return train_indices, test_indices
 end
 
-function balance_training_data(data::DataFrame, out_streams; sample_size::Int=20)
-  unique_bins = unique(data[!, :combined_column])
-  if isempty(unique_bins)
+function limit_test_indices(test_indices::Vector{Int}, out_streams; row_limit::Int=max_test_rows)
+  if length(test_indices) <= row_limit
+    return test_indices
+  end
+  rng = MersenneTwister(43)
+  limited_indices = sample(rng, test_indices, row_limit; replace=false)
+  println(out_streams, "Test rows limited from $(length(test_indices)) to $(length(limited_indices)) to bound memory usage")
+  return limited_indices
+end
+
+function balance_training_data(data::DataFrame, row_indices::Vector{Int}, out_streams; sample_size::Int=20)
+  bin_indices = Dict{String, Vector{Int}}()
+  for row_index in row_indices
+    label = string(data[row_index, :combined_column])
+    push!(get!(bin_indices, label, Int[]), row_index)
+  end
+  if isempty(bin_indices)
     error("No training bins remain after preprocessing")
   end
-  prog = ProgressMeter.Progress(length(unique_bins), 1, "Balancing training bins:")
-  println(out_streams, f"Balancing training data into {length(unique_bins)} bins (max {sample_size} rows/bin)")
+  prog = ProgressMeter.Progress(length(bin_indices), 1, "Balancing training bins:")
+  println(out_streams, f"Balancing training data into {length(bin_indices)} bins (max {sample_size} rows/bin)")
 
-  sampled_bin_data = Vector{DataFrame}(undef, length(unique_bins))
-  Threads.@threads for i in 1:length(unique_bins)
-    bin_data = data[data[!, :combined_column] .== unique_bins[i], :]
-    count = min(sample_size, nrow(bin_data))
-    indices = sample(1:nrow(bin_data), count; replace=false)
-    sampled_bin_data[i] = bin_data[indices, :]
+  rng = MersenneTwister(44)
+  sampled_indices = Int[]
+  sizehint!(sampled_indices, min(length(row_indices), length(bin_indices) * sample_size))
+  for indices in values(bin_indices)
+    count = min(sample_size, length(indices))
+    append!(sampled_indices, sample(rng, indices, count; replace=false))
     next!(prog)
   end
-  balanced = vcat(sampled_bin_data...)
+  shuffle!(rng, sampled_indices)
+  balanced = data[sampled_indices, :]
   println(out_streams, f"Training rows after balancing: {nrow(balanced)}")
   return balanced
 end
@@ -309,15 +378,18 @@ end
 function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
   model_path = joinpath(working_dir, Base.basename(working_dir))
 
-  if nrow(data) < 2
-    error("At least two training rows are required")
+  if nrow(data) < 4
+    error("至少需要 4 条有效数据，才能保证训练集和测试集各至少 2 条")
   end
 
-  feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
+  feature_names = model_feature_names(data)
 
-  # Split before balancing so sparse bins cannot collapse the test set.
-  train, test = split_train_test(data, :combined_column, out_streams)
-  train = balance_training_data(train, out_streams)
+  # Keep only row indices until sampling is complete. This avoids materializing
+  # full 80/20 DataFrame copies for large extracted datasets.
+  train_indices, test_indices = split_train_test_indices(data, out_streams)
+  test_indices = limit_test_indices(test_indices, out_streams)
+  train = balance_training_data(data, train_indices, out_streams)
+  test = data[test_indices, :]
   if nrow(train) == 0 || nrow(test) == 0
     error("Training/test split produced an empty partition")
   end
@@ -521,7 +593,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   function get_scaling_vector(x, low, high)
       speed = @view x[:, 1]
       min_speed, max_speed = extrema(speed)
-      @fastmath normalized_speed = @. (speed - min_speed) / (max_speed - min_speed) # normalize to [0, 1]
+      speed_span = max_speed - min_speed
+      if speed_span <= eps(Float32)
+        # A constant-speed batch has no meaningful speed normalization. Use
+        # the midpoint weight instead of creating NaN through division by 0.
+        return fill((low + high) / 2f0, length(speed))
+      end
+      @fastmath normalized_speed = @. (speed - min_speed) / speed_span # normalize to [0, 1]
       @fastmath scaling_vector = @. low + (high - low) * normalized_speed # scale to [low, high]
       return scaling_vector
   end
@@ -635,16 +713,20 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         λ_monotonic = λ_monotonicmax * min(1f0, max(0f0, epoch - epoch_max * λ_monotonic_start_epoch_fraction) / (epoch_max * 0.3f0))
         λ_odd = λ_oddmax * min(1f0, max(0f0, epoch - epoch_max * λ_odd_start_epoch_fraction) / (epoch_max * 0.4f0))
         λ_origin = λ_originmax * min(1f0, max(0f0, epoch - epoch_max * λ_origin_start_epoch_fraction) / (epoch_max * 0.2f0))
-        l = 0f0
+        epoch_loss_sum = 0f0
+        epoch_sample_count = 0
         for (x, y) in train_data_loader
-          l = train_batch!(x, y, λ, λ_monotonic, λ_odd, λ_origin)
+          epoch_loss_sum += Float32(train_batch!(x, y, λ, λ_monotonic, λ_odd, λ_origin)) * length(y)
+          epoch_sample_count += length(y)
         end
 
         # Preserve the original sign-symmetry augmentation without retaining a
         # second copy of the complete training set.
         for (x, y) in train_data_loader
-          l = train_batch!(x .* symmetry_signs, -y, λ, λ_monotonic, λ_odd, λ_origin)
+          epoch_loss_sum += Float32(train_batch!(x .* symmetry_signs, -y, λ, λ_monotonic, λ_odd, λ_origin)) * length(y)
+          epoch_sample_count += length(y)
         end
+        l = epoch_loss_sum / epoch_sample_count
 
         push!(losses, l)
         push!(lambdas, (λ, λ_monotonic, λ_odd, λ_origin))
@@ -652,18 +734,22 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         t = now()
         if (t - last_log_time) > Dates.Millisecond(10000) || epoch % logstep == 0 || epoch >= epoch_max
             loss_cur = l
-            Δloss = loss_cur - loss_last
-            if (Δloss > 0) || (Δloss ≈ 0)
-                stall_count += 1
+            if isfinite(loss_last)
+                Δloss = loss_cur - loss_last
+                ΔΔloss = Δloss - Δloss_last
+                if Δloss < -tol
+                    stall_count = 0
+                else
+                    stall_count += 1
+                end
+            else
+                Δloss = 0f0
+                ΔΔloss = 0f0
+                stall_count = 0
             end
-            if stall_count ≥ stall_check_count && ((Δloss < 0) || (Δloss ≈ 0f0))
-                println(out_streams, "Stalled at epoch $epoch, loss $loss_cur")
-                break
-            end
-            ΔΔloss = Δloss - Δloss_last
             loss_last = loss_cur
             Δloss_last = Δloss
-            if abs(Δloss) > tol || abs(Δloss_last) > Δtol
+            if abs(Δloss) > tol || abs(ΔΔloss) > Δtol
                 cur_time = Dates.format(now(), "HH:MM:SS")
                 # predict time remaining
                 time_str = "estimating remaining time..."
@@ -679,6 +765,10 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
                     time_str = "$epoch_remaining_time_str remaining of $epoch_total_time_str total"
                 end
                 println(out_streams, f"{cur_time} Epoch {epoch:3d} of {epoch_max} ({time_str}); Loss: {loss_cur:.6f}, ΔLoss: {Δloss:.7f}, ΔΔLoss: {ΔΔloss:.9f}, λ: {λ:.6G}, λ_monotonic: {λ_monotonic:.6G}, λ_odd: {λ_odd:.6G}, λ_origin: {λ_origin:.6G}")
+            end
+            if epoch >= epoch_min && stall_count >= stall_check_count
+                println(out_streams, "Stopped after $stall_count consecutive checks without loss improvement at epoch $epoch, loss $loss_cur")
+                break
             end
             logstepfloat *= logstepgrowth
             logstep = round(Int, logstepfloat)
@@ -1343,7 +1433,7 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
   
   data = load_data(in_file, use_existing_input, outdir, out_streams)
 
-  feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
+  feature_names = model_feature_names(data)
   model_file = "$outdir/$carname.bson"
   use_existing_input = false
   println(out_streams, "Model file: $model_file")
@@ -1360,8 +1450,11 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
 end
 
 function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384)
-  # Get all CSV files that aren't balanced files
-  csv_files = filter(file -> occursin(".csv", file) && !occursin("_balanced.csv", file), readdir(in_dir))
+  # Process only regular CSV files, excluding old balanced-data artifacts.
+  csv_files = filter(
+    file -> isfile(joinpath(in_dir, file)) && endswith(lowercase(file), ".csv") && !endswith(lowercase(file), "_balanced.csv"),
+    readdir(in_dir),
+  )
 
   results_dir = joinpath(in_dir, "training_results")
   mkpath(results_dir)
