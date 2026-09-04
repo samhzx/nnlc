@@ -37,6 +37,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 
 
 def _configure_console_encoding():
@@ -644,6 +645,9 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
                streaming=False):
     """步骤6: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+        raise ValueError("batch_size 必须是正整数")
+
     # 创建训练输入目录（只包含要训练的 CSV）
     train_input_dir = os.path.join(output_dir, "training_input")
     os.makedirs(train_input_dir, exist_ok=True)
@@ -683,8 +687,6 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     script_root = RESOURCE_DIR if getattr(sys, "frozen", False) else NNLC_TOOLS_DIR
     script_path = os.path.join(script_root, TRAINING_SCRIPT)
     julia_exe = get_julia_exe()
-    if not isinstance(batch_size, int) or batch_size <= 0:
-        raise ValueError("batch_size must be a positive integer")
     # The supported application mode is CPU-only.  Keep the argument for API
     # compatibility with older callers, but never allow a GPU path here.
     force_cpu = True
@@ -961,8 +963,8 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
         test_loss = float(raw_test_loss)
     except (TypeError, ValueError, OverflowError):
         test_loss = float("inf")
-    if not math.isfinite(test_loss) or test_loss >= MAX_TEST_LOSS:
-        issues.append(f"model_test_loss={test_loss:.6f} (应 < {MAX_TEST_LOSS})")
+    if not math.isfinite(test_loss) or test_loss < 0 or test_loss >= MAX_TEST_LOSS:
+        issues.append(f"model_test_loss={test_loss:.6f} (应为 0 <= loss < {MAX_TEST_LOSS})")
 
     if issues:
         print_error("模型质量验证未通过:")
@@ -1038,15 +1040,34 @@ def step_deploy(model_json, car_name, skip_deploy=False, deploy_dir=None):
         print_info(f"如需部署，复制到: {dest_path}")
         return model_json
 
+    # 确保目标目录存在；临时文件也会放在同一目录，以便原子替换。
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+
     # 备份现有模型
     if os.path.exists(dest_path):
         backup_path = f"{dest_path}.bak"
         shutil.copy2(dest_path, backup_path)
         print_ok(f"已备份原模型: {backup_path}")
 
-    # 复制新模型
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    shutil.copy2(model_json, dest_path)
+    # 先复制到目标目录中的临时文件，成功后再原子替换目标文件，避免复制中断留下半截模型。
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(dest_path)}.",
+            suffix=".tmp",
+            dir=os.path.dirname(dest_path),
+        )
+        os.close(fd)
+        shutil.copy2(model_json, temp_path)
+        os.replace(temp_path, dest_path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
     print_ok(f"模型已部署: {dest_path}")
 
     return dest_path
@@ -1082,6 +1103,9 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     Returns:
         模型文件路径
     """
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+        raise ValueError("batch_size 必须是正整数")
+
     # GPU training is intentionally not exposed by this application.
     force_cpu = True
     # Coverage and validation charts are generated from the worker thread in
@@ -1102,9 +1126,9 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     print_info(f"Python: {python_exe}")
 
     if not validate_julia():
-        sys.exit(1)
+        raise RuntimeError("Julia 环境检查失败，请根据上面的错误信息修复 Julia 配置后重试。")
     if not validate_data_dir(data_dir):
-        sys.exit(1)
+        raise RuntimeError("数据目录检查失败，请根据上面的错误信息选择包含 rlog 文件的目录。")
 
     # 创建输出目录
     output_dir = output_dir or os.path.join(NNLC_TOOLS_DIR, "output", car_name)

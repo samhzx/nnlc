@@ -1235,7 +1235,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
             lat_accels = [lataccel + t * latjerk for t in t_list]
             rolls = [roll for t in t_list]
             input_data = [vego lataccel latjerk roll]
-            x = hcat(input_data, lat_accels, rolls)
+            x = hcat(input_data, lat_accels', rolls')
             xstr = "[" * join(x, ",") * "]"
             result_model = feedforward_function(x, zero_bias=zero_bias)  # Model evaluation
             result_manual = feedforward_function_manual(x, zero_bias=zero_bias)  # Manual evaluation
@@ -1255,7 +1255,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   end
 
   test_dict_zero_bias = test_evaluate_manually(model, zero_bias=true)
+  if test_dict_zero_bias === false
+    error("手动模型验证失败（zero_bias=true），拒绝导出模型")
+  end
   test_dict = test_evaluate_manually(model)
+  if test_dict === false
+    error("手动模型验证失败，拒绝导出模型")
+  end
 
   current_date_and_time = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
 
