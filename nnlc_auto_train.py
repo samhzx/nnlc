@@ -30,6 +30,7 @@ import json
 import math
 import os
 import queue
+import re
 import runpy
 import signal
 import shutil
@@ -531,14 +532,25 @@ def step_score(input_csv, python_exe, streaming=False, cancel_event=None,
     poor_count = 0
     total_routes = 0
 
-    for line in output.split("\n"):
-        if "routes scored" in line:
-            total_routes = int(line.split()[0])
-        if "routes with score >= 70" in line:
-            good_count = int(line.strip().split()[0])
+    for line in output.splitlines():
+        total_match = re.match(r"^\s*(\d+)\s+routes scored\b", line)
+        if total_match:
+            try:
+                total_routes = int(total_match.group(1))
+            except (TypeError, ValueError):
+                # The regex currently only captures digits, but keep parsing
+                # defensive so a future output change cannot abort training.
+                continue
+
+        good_match = re.match(r"^\s*(\d+)\s+routes with score >= 70\b", line)
+        if good_match:
+            try:
+                good_count = int(good_match.group(1))
+            except (TypeError, ValueError):
+                continue
 
     if total_routes > 0:
-        good_ratio = good_count / total_routes
+        good_ratio = min(max(good_count, 0), total_routes) / total_routes
         if good_ratio >= 0.3:
             # 30% 以上高质量，使用严格阈值
             recommended_score = 70
@@ -549,6 +561,8 @@ def step_score(input_csv, python_exe, streaming=False, cancel_event=None,
             # 高质量路线不足 10%，放宽阈值
             recommended_score = 40
             print_warn("高质量路线不足 10%，建议补充采集更多激活行驶数据")
+    else:
+        print_warn("未能从评分输出中解析路线数量，将使用默认阈值 min-score=60")
 
     print_info(f"自动推荐 min-score = {recommended_score}")
     return recommended_score
