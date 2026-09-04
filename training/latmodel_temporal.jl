@@ -232,59 +232,78 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
     # create a combined column for balancing
     data[!,:combined_column] = string.(data[!,:v_ego_bins], "_", data[!,:desired_lateral_accel_bins])
     
-    # balance the data
-    unique_bins = unique(data[!, :combined_column])
-    if isempty(unique_bins)
+    if isempty(unique(data[!, :combined_column]))
       error("No training bins remain after preprocessing")
     end
-    prog = ProgressMeter.Progress(length(unique_bins), 1, "Balancing bins:")
-    println(out_streams, f"Balancing data into {length(unique_bins)} bins")
-
-    flattened_sampled_bin_data = Vector{DataFrame}(undef, length(unique_bins))
-    Threads.@threads for i in 1:length(unique_bins)
-        bin_label = unique_bins[i]
-        bin_data = data[data[!, :combined_column] .== bin_label, :]
-        flattened_sampled_bin_data[i] = bin_data[sample(1:nrow(bin_data), min(sample_size, nrow(bin_data))), :]
-        next!(prog)
-    end
-    data = vcat(flattened_sampled_bin_data...)
-
-    bin_sizes = [size(i,1) for i in flattened_sampled_bin_data]
-    println(out_streams, f"Num points after initial balancing: {nrow(data)}")
-    bin_min_size = minimum(bin_sizes)
-    bin_max_size = maximum(bin_sizes)
-    bin_mean_size = mean(bin_sizes)
-    bin_std_size = length(bin_sizes) > 1 ? std(bin_sizes) : 0.0
-    println(out_streams, f"Bin sizes: min={bin_min_size}, max={bin_max_size}, mean={bin_mean_size}, std={bin_std_size}")
-
-    requested_bin_size = Int(round(max((bin_min_size + bin_mean_size)/2, mean(bin_sizes) - bin_std_size/2), digits=0))
-    # Sampling is without replacement; never ask a sparse bin for more rows
-    # than it contains (and keep the one-bin case finite).
-    new_bin_size = clamp(requested_bin_size, 1, bin_min_size)
-    println(out_streams, f"Shrinking bins to {new_bin_size} points")
-    
-    # Pre-allocate for better performance
-    resized_bin_data = Vector{DataFrame}(undef, length(flattened_sampled_bin_data))
-    
-    Threads.@threads for i in 1:length(flattened_sampled_bin_data)
-        resized_bin_data[i] = flattened_sampled_bin_data[i][sample(1:size(flattened_sampled_bin_data[i],1), new_bin_size), :]
-    end
-    
-    data = vcat(resized_bin_data...)
-    println(out_streams, f"Num points after final balancing: {nrow(data)}")
-
-    for col in names(data)
-      if typeof(data[1, col]) == Float64
-        println(out_streams, "$col: $(describe(collect(data[:,col])))")
-      end
-    end
-
-    CSV.write(joinpath(outdir, replace(Base.basename(infile), ".csv" => "_balanced.csv")), data)
+    println(out_streams, f"Prepared {nrow(data)} rows across {length(unique(data[!, :combined_column]))} bins")
   else
     println(out_streams, "Loading preprocessed data...")
   end
 
   return data
+end
+
+# Split by bin while keeping singleton bins in the training set.  If every
+# bin is a singleton, a stratified split cannot produce a test partition, so
+# fall back to a global split rather than aborting training.
+function split_train_test(data::DataFrame, label_col::Symbol, out_streams; train_fraction::Float64=0.8)
+  row_count = nrow(data)
+  if row_count < 2
+    error("At least two training rows are required")
+  end
+
+  groups = Dict{String, Vector{Int}}()
+  for (index, label) in enumerate(data[!, label_col])
+    push!(get!(groups, string(label), Int[]), index)
+  end
+
+  train_indices = Int[]
+  test_indices = Int[]
+  for indices in values(groups)
+    shuffle!(indices)
+    if length(indices) == 1
+      append!(train_indices, indices)
+    else
+      train_count = clamp(round(Int, train_fraction * length(indices)), 1, length(indices) - 1)
+      append!(train_indices, indices[1:train_count])
+      append!(test_indices, indices[(train_count + 1):end])
+    end
+  end
+
+  if isempty(train_indices) || isempty(test_indices)
+    println(out_streams, "分箱分层无法产生完整测试集，退回全局 80/20 划分")
+    all_indices = collect(1:row_count)
+    shuffle!(all_indices)
+    train_count = clamp(round(Int, train_fraction * row_count), 1, row_count - 1)
+    train_indices = all_indices[1:train_count]
+    test_indices = all_indices[(train_count + 1):end]
+  end
+
+  shuffle!(train_indices)
+  shuffle!(test_indices)
+  println(out_streams, "Split rows before balancing: training=$(length(train_indices)); test=$(length(test_indices))")
+  return data[train_indices, :], data[test_indices, :]
+end
+
+function balance_training_data(data::DataFrame, out_streams; sample_size::Int=20)
+  unique_bins = unique(data[!, :combined_column])
+  if isempty(unique_bins)
+    error("No training bins remain after preprocessing")
+  end
+  prog = ProgressMeter.Progress(length(unique_bins), 1, "Balancing training bins:")
+  println(out_streams, f"Balancing training data into {length(unique_bins)} bins (max {sample_size} rows/bin)")
+
+  sampled_bin_data = Vector{DataFrame}(undef, length(unique_bins))
+  Threads.@threads for i in 1:length(unique_bins)
+    bin_data = data[data[!, :combined_column] .== unique_bins[i], :]
+    count = min(sample_size, nrow(bin_data))
+    indices = sample(1:nrow(bin_data), count; replace=false)
+    sampled_bin_data[i] = bin_data[indices, :]
+    next!(prog)
+  end
+  balanced = vcat(sampled_bin_data...)
+  println(out_streams, f"Training rows after balancing: {nrow(balanced)}")
+  return balanced
 end
 
 function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
@@ -296,21 +315,22 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
   feature_names = names(select(data, Not([:torque_output, :combined_column, :v_ego_bins, :desired_lateral_accel_bins, :friction_input_bins, :roll_bins])))
 
-  # Compute normalization statistics column by column. This avoids another
-  # full-data matrix solely for mean/std and keeps only the final two vectors.
+  # Split before balancing so sparse bins cannot collapse the test set.
+  train, test = split_train_test(data, :combined_column, out_streams)
+  train = balance_training_data(train, out_streams)
+  if nrow(train) == 0 || nrow(test) == 0
+    error("Training/test split produced an empty partition")
+  end
+
+  # Compute normalization statistics from training data only. This avoids
+  # leaking test-set distribution information into the model.
   input_mean = Matrix{Float32}(undef, 1, length(feature_names))
   input_std = Matrix{Float32}(undef, 1, length(feature_names))
   for (index, column_name) in enumerate(feature_names)
-    column = Float32.(data[!, column_name])
+    column = Float32.(train[!, column_name])
     input_mean[1, index] = mean(column)
     column_std = std(column)
     input_std[1, index] = isfinite(column_std) && column_std > 0f0 ? Float32(column_std) : 1f0
-  end
-
-  # split into train and test sets
-  train, test = stratifiedobs(row->row[:combined_column], data, p = 0.8)
-  if nrow(train) == 0 || nrow(test) == 0
-    error("Training/test split produced an empty partition; provide more varied data")
   end
 
   # Keep only the numeric training columns. Symmetric examples are generated

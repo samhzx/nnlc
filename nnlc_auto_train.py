@@ -578,10 +578,10 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
 
     elapsed = time.time() - start_time
     print("-" * 60)
-    print_ok(f"Julia 训练结束 (耗时 {elapsed:.1f}s, 退出码 {result.returncode})")
-
     if result.returncode != 0:
+        print_error(f"Julia 训练结束 (耗时 {elapsed:.1f}s, 退出码 {result.returncode})")
         raise RuntimeError(f"Julia 训练失败，退出码 {result.returncode}")
+    print_ok(f"Julia 训练结束 (耗时 {elapsed:.1f}s, 退出码 0)")
 
     # 检查模型文件
     model_json = os.path.join(train_results_dir, f"{car_name}.json")
