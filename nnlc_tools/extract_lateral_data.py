@@ -181,7 +181,9 @@ def extract_segment(rlog_path, row_callback=None):
 
     lr = None
     try:
-        lr = LogReader(rlog_path, sort_by_time=True)
+        # rlog events are expected to be chronological.  Validate the order
+        # while streaming instead of sorting every event into a large list.
+        lr = LogReader(rlog_path, check_time_order=True)
     except Exception as e:
         raise RuntimeError(f"Could not open {rlog_path}: {e}") from e
 

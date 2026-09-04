@@ -483,7 +483,7 @@ nnlc-sc-visualize [-h] [-o OUTPUT] [--gap-frames GAP_FRAMES]
 
 ### 提取时内存不足
 
-CSV 提取器会逐段处理 rlog，内存峰值主要由当前 rlog 和时序窗口决定。Parquet 输出仍需由 pandas 读取最终 DataFrame，超大数据集建议优先使用 CSV 或分批处理。
+CSV 提取器会逐段处理 rlog，LogReader 使用 `pycapnp.Event.read_multiple(file)` 逐条解析，不再把单个 rlog 的全部事件保存在内存中。zstd/bz2 日志会先解压到临时文件，默认优先放在程序（exe）所在目录；如果该目录不可写，会自动回退到系统临时目录。也可以通过 `NNLC_TEMP_DIR` 环境变量指定临时目录，因此需要保证该磁盘有足够空间；时序窗口仍只保留有限行。Parquet 输出仍需由 pandas 读取最终 DataFrame，超大数据集建议优先使用 CSV 或分批处理。日志事件如果不是按 `logMonoTime` 升序排列，会被拒绝并按当前严格/容错模式处理。
 
 ### 未找到 rlog 文件
 

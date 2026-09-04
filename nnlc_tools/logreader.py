@@ -6,9 +6,9 @@ capnp schemas in nnlc_tools/cereal/ and providing a simple iterator interface.
 """
 
 import bz2
-import mmap
 import os
 import shutil
+import sys
 import tempfile
 
 import capnp
@@ -18,14 +18,48 @@ CEREAL_DIR = os.path.join(os.path.dirname(__file__), "cereal")
 capnp_log = capnp.load(os.path.join(CEREAL_DIR, "log.capnp"), imports=[CEREAL_DIR])
 
 
-class LogReader:
-    """Read and iterate over messages in an rlog file."""
+def _runtime_directory():
+    """Return the directory containing the executable or source project."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    def __init__(self, fn, sort_by_time=False):
+
+def _temporary_file():
+    """Open a temporary file beside the program, falling back to the OS temp dir.
+
+    ``NNLC_TEMP_DIR`` can override the preferred location.  The fallback keeps
+    installations under read-only directories (for example ``Program Files``)
+    usable.
+    """
+    preferred_dir = os.environ.get("NNLC_TEMP_DIR") or _runtime_directory()
+    try:
+        os.makedirs(preferred_dir, exist_ok=True)
+        return tempfile.TemporaryFile(dir=preferred_dir)
+    except (OSError, ValueError):
+        return tempfile.TemporaryFile()
+
+
+class LogReader:
+    """Read and iterate over messages in an rlog file.
+
+    ``sort_by_time`` is retained for compatibility with the former API.  The
+    streaming implementation never builds a full sorted event list; when it
+    is true, timestamps are validated as the stream is consumed instead.
+    ``check_time_order`` can be used by new callers to request that validation
+    explicitly.
+    """
+
+    def __init__(self, fn, sort_by_time=False, check_time_order=None):
         self._file = None
-        self._mapping = None
         self._temporary_file = False
-        self._ents = []
+        self._filename = fn
+        # Keep the historical argument for callers, but do not materialize a
+        # sorted list.  ``sort_by_time=True`` now means order validation for
+        # compatibility; callers can use ``check_time_order`` explicitly.
+        self._check_time_order = bool(
+            sort_by_time if check_time_order is None else check_time_order
+        )
         source = None
         target = None
 
@@ -34,17 +68,18 @@ class LogReader:
             magic = source.read(4)
             source.seek(0)
 
-            # Decompress directly into a temporary file.  Keeping the parsed
-            # messages backed by mmap avoids a second full-size Python bytes
-            # object and bounds the peak memory used by large rlogs.
+            # Decompress directly into a temporary file.  pycapnp's
+            # read_multiple(file) consumes this file one message at a time,
+            # so the uncompressed payload stays on disk instead of becoming a
+            # second full-size Python bytes object.
             if magic == b"\x28\xB5\x2F\xFD":  # zstd magic
-                target = tempfile.TemporaryFile()
+                target = _temporary_file()
                 with zstd.ZstdDecompressor().stream_reader(source) as reader:
                     shutil.copyfileobj(reader, target, length=1024 * 1024)
                 source.close()
                 self._temporary_file = True
             elif magic[:2] == b"BZ":
-                target = tempfile.TemporaryFile()
+                target = _temporary_file()
                 with bz2.BZ2File(source, "rb") as reader:
                     shutil.copyfileobj(reader, target, length=1024 * 1024)
                 source.close()
@@ -58,13 +93,8 @@ class LogReader:
                 raise ValueError(f"rlog file is empty: {fn}")
             target.seek(0)
             self._file = target
-            self._mapping = mmap.mmap(target.fileno(), 0, access=mmap.ACCESS_READ)
-            self._ents = capnp_log.Event.read_multiple_bytes(self._mapping)
-
-            if sort_by_time:
-                self._ents = sorted(self._ents, key=lambda e: e.logMonoTime)
         except Exception:
-            # Decompression or mmap setup may fail before ``source`` is
+            # Decompression or stream setup may fail before ``source`` is
             # transferred to ``self._file``.  Close both handles explicitly;
             # otherwise repeated corrupt rlogs can exhaust file descriptors.
             for handle in (target, source):
@@ -77,19 +107,33 @@ class LogReader:
             raise
 
     def __iter__(self):
-        return iter(self._ents)
+        if self._file is None:
+            return
+
+        # read_multiple requires a real file object and advances its cursor as
+        # each framed Cap'n Proto message is yielded.  Readers are copied by
+        # pycapnp's default ``skip_copy=False`` behavior, which is important
+        # because extract_segment retains references to the latest state
+        # messages while reading the next event.
+        self._file.seek(0)
+        previous_time = None
+        yielded_events = False
+        for event in capnp_log.Event.read_multiple(self._file, skip_copy=False):
+            yielded_events = True
+            if self._check_time_order:
+                current_time = event.logMonoTime
+                if previous_time is not None and current_time < previous_time:
+                    raise ValueError(
+                        f"rlog events are not ordered by logMonoTime: "
+                        f"{current_time} < {previous_time} ({self._filename})"
+                    )
+                previous_time = current_time
+            yield event
+        if not yielded_events:
+            raise ValueError(f"rlog contains no events: {self._filename}")
 
     def close(self):
-        """Release the mmap and temporary decompression file."""
-        self._ents = []
-        if self._mapping is not None:
-            try:
-                self._mapping.close()
-            except (BufferError, OSError):
-                # capnp may retain a short-lived view; the file is still
-                # released by the owning process if that happens.
-                pass
-            self._mapping = None
+        """Release the source and any temporary decompression file."""
         if self._file is not None:
             try:
                 self._file.close()
