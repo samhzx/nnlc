@@ -146,7 +146,12 @@ EXPECTED_INPUT_VARS = [
     "roll_tp10",
     "roll_tp15",
 ]
-EXPECTED_LAYER_DIMS = ((18, 7), (7, 13), (13, 3), (3, 1))
+# Julia's JSON export keeps the serialized column-major orientation.  The
+# Python inference loader transposes each weight after loading it, so model
+# validation must check the raw JSON shapes rather than the post-transpose
+# inference shapes.
+EXPECTED_LAYER_JSON_SHAPES = ((7, 18), (13, 7), (3, 13), (1, 3))
+EXPECTED_LAYER_OUTPUT_SIZES = (7, 13, 3, 1)
 BUNDLED_WORKER_MODULES = frozenset({
     "nnlc_tools.extract_lateral_data",
     "nnlc_tools.score_routes",
@@ -915,11 +920,11 @@ def _validate_model_structure(params):
     if not isinstance(layers, list):
         issues.append("layers 必须是数组")
         layers = []
-    elif len(layers) != len(EXPECTED_LAYER_DIMS):
-        issues.append(f"layers 数量为 {len(layers)} (应为 {len(EXPECTED_LAYER_DIMS)})")
+    elif len(layers) != len(EXPECTED_LAYER_JSON_SHAPES):
+        issues.append(f"layers 数量为 {len(layers)} (应为 {len(EXPECTED_LAYER_JSON_SHAPES)})")
 
     expected_activations = (frozenset({"sigmoid", "σ"}),) * 2 + (frozenset({"identity"}),) * 2
-    for index, expected_dims in enumerate(EXPECTED_LAYER_DIMS):
+    for index, expected_shape in enumerate(EXPECTED_LAYER_JSON_SHAPES):
         if index >= len(layers):
             break
         layer = layers[index]
@@ -934,15 +939,15 @@ def _validate_model_structure(params):
             issues.append(f"第 {index + 1} 层缺少 {bias_key}")
         if weight_key in layer:
             weights = numeric_array(layer[weight_key], f"{weight_key}")
-            if weights is not None and weights[0] != expected_dims:
+            if weights is not None and weights[0] != expected_shape:
                 issues.append(
-                    f"{weight_key} 形状为 {weights[0]} (应为 {expected_dims[0]}x{expected_dims[1]})"
+                    f"{weight_key} 形状为 {weights[0]} (应为 {expected_shape[0]}x{expected_shape[1]})"
                 )
         if bias_key in layer:
             vector_values(
                 numeric_array(layer[bias_key], f"{bias_key}"),
                 bias_key,
-                expected_dims[1],
+                EXPECTED_LAYER_OUTPUT_SIZES[index],
             )
         activation = layer.get("activation")
         if not isinstance(activation, str) or activation not in expected_activations[index]:
@@ -1038,8 +1043,9 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
     for l in layers:
         for k, v in l.items():
             if k.endswith("_W"):
-                # v 是二维列表 [[...], [...], ...]，列数 = 隐藏层节点数
-                layer_sizes.append(len(v[0]) if v else 0)
+                # JSON 的外层长度对应每层输出节点数；Python 加载器会
+                # 转置后再执行 batch × input 的矩阵乘法。
+                layer_sizes.append(len(v) if isinstance(v, list) else 0)
                 break
     if layer_sizes:
         print_info(f"网络结构: {input_size} -> {' -> '.join(str(s) for s in layer_sizes)}")
