@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 
 import numpy as np
 import pandas as pd
@@ -327,6 +328,26 @@ def _temporal_column_specs():
     return specs
 
 
+def _replace_with_retry(source_path, target_path, attempts=5, delay=0.5):
+    """Atomically replace a file, tolerating short-lived Windows file locks."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            os.replace(source_path, target_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if os.name != "nt" or attempt + 1 >= attempts:
+                break
+            time.sleep(delay)
+    if last_error is not None:
+        raise PermissionError(
+            f"无法替换输出文件：{target_path}。请关闭正在打开该文件的程序 "
+            "（例如 Excel、同步软件或杀毒软件）后重试。"
+        ) from last_error
+    raise RuntimeError(f"无法替换输出文件：{target_path}")
+
+
 class _StreamingCsvWriter:
     """Write extracted rows while retaining only the temporal look-ahead window."""
 
@@ -525,8 +546,16 @@ def main():
             for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
                 process_rlog(rlog_path, stream)
             stream.finish()
-            if stream.rows_written > 0:
-                os.replace(temp_path, args.output)
+            rows_written = stream.rows_written
+            rows_seen = stream.rows_seen
+            rows_filtered = stream.rows_filtered
+            if rows_written > 0:
+                # Windows does not allow renaming an open file. Close the
+                # writer before replacing the destination; Linux permits the
+                # old order, which hid this portability bug.
+                stream.close()
+                stream = None
+                _replace_with_retry(temp_path, args.output)
                 success = True
         finally:
             if stream is not None:
@@ -537,17 +566,17 @@ def main():
                 except FileNotFoundError:
                     pass
 
-        if stream.rows_written == 0:
+        if rows_written == 0:
             if skipped_rlogs:
                 print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
                 for path, reason in skipped_rlogs:
                     print(f"  - {path}: {reason}")
             print("ERROR: No data extracted from any rlog files")
             sys.exit(1)
-        print(f"Extracted {stream.rows_written} rows")
-        if stream.rows_filtered:
-            ratio = stream.rows_filtered / max(stream.rows_seen, 1)
-            print(f"Filtered {stream.rows_filtered} override rows ({ratio:.1%} of data)")
+        print(f"Extracted {rows_written} rows")
+        if rows_filtered:
+            ratio = rows_filtered / max(rows_seen, 1)
+            print(f"Filtered {rows_filtered} override rows ({ratio:.1%} of data)")
         if args.temporal:
             print("Added temporal columns with per-segment streaming")
     else:
@@ -599,7 +628,7 @@ def main():
             df = pd.read_csv(temp_path)
             print(f"Extracted {len(df)} rows")
             df.to_parquet(parquet_temp_path, index=False)
-            os.replace(parquet_temp_path, args.output)
+            _replace_with_retry(parquet_temp_path, args.output)
         finally:
             for path in (temp_path, parquet_temp_path):
                 try:
