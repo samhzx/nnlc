@@ -186,7 +186,8 @@ def extract_segment(rlog_path, row_callback=None):
 
     Follows the message iteration pattern from openpilot's
     measure_steering_accuracy.py — accumulate messages by type in a state dict,
-    then emit a row when controlsState arrives.
+    then emit a row when controlsState arrives. One rlog is fully sorted before
+    it is processed; the complete dataset is still emitted incrementally.
     """
     from nnlc_tools.logreader import LogReader
 
@@ -197,9 +198,10 @@ def extract_segment(rlog_path, row_callback=None):
 
     lr = None
     try:
-        # rlog events are expected to be chronological.  Validate the order
-        # while streaming instead of sorting every event into a large list.
-        lr = LogReader(rlog_path, check_time_order=True)
+        # Sort the complete current rlog before extracting state transitions.
+        # The caller still writes rows incrementally, so only one rlog is
+        # materialized at a time.
+        lr = LogReader(rlog_path, sort_by_time=True)
     except Exception as e:
         raise RuntimeError(f"Could not open {rlog_path}: {e}") from e
 
@@ -503,10 +505,10 @@ def main():
 
     if fmt == "csv":
         # CSV is the pipeline's native format. Write rows as they arrive so
-        # memory usage is bounded by one rlog's parser state and the temporal
-        # look-ahead buffer instead of the complete dataset.  Use a temporary
-        # sibling file so a strict-mode failure can never replace a valid
-        # existing output with a partial CSV.
+        # memory usage is bounded by one sorted rlog plus the temporal
+        # look-ahead buffer instead of the complete dataset. Use a temporary
+        # sibling file so a failure can never replace a valid existing output
+        # with a partial CSV.
         output_dir = os.path.dirname(os.path.abspath(args.output))
         os.makedirs(output_dir, exist_ok=True)
         temp_file = tempfile.NamedTemporaryFile(

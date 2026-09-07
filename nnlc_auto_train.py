@@ -454,11 +454,14 @@ def validate_data_dir(data_dir):
         print_error(f"数据目录不存在: {data_dir}")
         return False
 
-    # 检查是否有 rlog 文件
+    # Keep this list in sync with extract_lateral_data.find_rlogs().  A loose
+    # startswith("rlog") check would accept temporary files such as rlog.tmp,
+    # then fail later when the extractor finds no supported rlog files.
+    supported_rlog_names = {"rlog", "rlog.zst", "rlog.bz2"}
     rlog_count = 0
     for root, dirs, files in os.walk(data_dir):
         for f in files:
-            if f.startswith("rlog"):
+            if f in supported_rlog_names:
                 rlog_count += 1
 
     if rlog_count == 0:

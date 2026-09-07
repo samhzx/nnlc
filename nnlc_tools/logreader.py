@@ -43,23 +43,24 @@ def _temporary_file():
 class LogReader:
     """Read and iterate over messages in an rlog file.
 
-    ``sort_by_time`` is retained for compatibility with the former API.  The
-    streaming implementation never builds a full sorted event list; when it
-    is true, timestamps are validated as the stream is consumed instead.
-    ``check_time_order`` can be used by new callers to request that validation
-    explicitly.
+    ``sort_by_time`` is retained for compatibility with the former API. When
+    enabled, all events from this single rlog are read and stably sorted by
+    ``logMonoTime`` before iteration. This keeps event ordering deterministic
+    without imposing an arbitrary reorder window or dropping late events.
+    ``check_time_order`` is kept as a compatibility option for older callers;
+    when enabled without sorting, it raises if the source order is invalid.
     """
 
     def __init__(self, fn, sort_by_time=False, check_time_order=None):
         self._file = None
         self._temporary_file = False
         self._filename = fn
-        # Keep the historical argument for callers, but do not materialize a
-        # sorted list.  ``sort_by_time=True`` now means order validation for
-        # compatibility; callers can use ``check_time_order`` explicitly.
-        self._check_time_order = bool(
-            sort_by_time if check_time_order is None else check_time_order
-        )
+        if not isinstance(sort_by_time, bool):
+            raise ValueError("sort_by_time must be a boolean")
+        if check_time_order is not None and not isinstance(check_time_order, bool):
+            raise ValueError("check_time_order must be a boolean or None")
+        self._sort_by_time = sort_by_time
+        self._check_time_order = bool(check_time_order)
         source = None
         target = None
 
@@ -116,9 +117,16 @@ class LogReader:
         # because extract_segment retains references to the latest state
         # messages while reading the next event.
         self._file.seek(0)
-        previous_time = None
         yielded_events = False
-        for event in capnp_log.Event.read_multiple(self._file, skip_copy=False):
+        events = capnp_log.Event.read_multiple(self._file, skip_copy=False)
+        if self._sort_by_time:
+            # The caller explicitly accepts per-rlog memory usage. Sorting is
+            # stable, so events with equal timestamps retain their file order.
+            buffered_events = list(events)
+            buffered_events.sort(key=lambda event: event.logMonoTime)
+            events = iter(buffered_events)
+        previous_time = None
+        for event in events:
             yielded_events = True
             if self._check_time_order:
                 current_time = event.logMonoTime
