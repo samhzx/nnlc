@@ -69,6 +69,7 @@ using TeeStreams
 
 
 t_list = [-0.3 0.3 0.8]
+const training_random_seed = 20260907
 
 function create_folder_with_iterator(path::AbstractString, folder_name::AbstractString; make_new=true)
   full_path = joinpath(path, folder_name)
@@ -348,8 +349,16 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   y_test = Array{Float32}(y_test) #|> device
 
   input_dim = size(X_train, 2)
+  expected_input_dim = 4 + 2 * length(t_list)
+  if input_dim != expected_input_dim
+    error("模型输入特征数量错误：期望 $(expected_input_dim)，实际 $(input_dim)")
+  end
+  if size(X_train, 1) != length(y_train) || size(X_test, 1) != length(y_test)
+    error("训练/测试特征与目标数量不一致：X_train=$(size(X_train))，y_train=$(size(y_train))，X_test=$(size(X_test))，y_test=$(size(y_test))")
+  end
 
   # Define the model
+  Random.seed!(training_random_seed)
   model = Chain(
       Dense(input_dim, 8, sigmoid),
       Dense(8, 16, sigmoid),
@@ -604,6 +613,8 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       X_train = cpu(X_train)
       y_train = cpu(y_train)
     end
+    # Keep batch ordering reproducible across runs.
+    Random.seed!(training_random_seed + 1)
     train_data_loader = DataLoader((X_train', y_train), batchsize=batch_size, shuffle=true)
 
     grid = grid |> device
@@ -822,7 +833,12 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
             steer_angles = [sa + t * sr for t in t_list]
             rolls = [roll for t in t_list]
             input_data = [vego sa sr roll]
-            x = hcat(input_data, steer_angles', rolls')
+            # t_list is a 1×N matrix, so the comprehensions already have the
+            # row shape required by hcat.
+            x = hcat(input_data, steer_angles, rolls)
+            if size(x) != (1, expected_input_dim)
+              error("手动模型验证输入尺寸错误：期望 (1, $(expected_input_dim))，实际 $(size(x))")
+            end
             xstr = "[" * join(x, ",") * "]"
             result_model = feedforward_function(x, zero_bias=zero_bias)  # Model evaluation
             result_manual = feedforward_function_manual(x, zero_bias=zero_bias)  # Manual evaluation

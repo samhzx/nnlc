@@ -97,6 +97,7 @@ const non_model_columns = Set([
 ])
 const temporal_split_gap_rows = 180
 const max_test_rows = 100_000
+const training_random_seed = 20260907
 
 model_feature_names(data::DataFrame) = filter(name -> Symbol(name) ∉ non_model_columns, names(data))
 
@@ -758,8 +759,16 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   GC.gc()
 
   input_dim = size(X_train, 2)
+  expected_input_dim = 4 + 2 * length(t_list)
+  if input_dim != expected_input_dim
+    error("模型输入特征数量错误：期望 $(expected_input_dim)，实际 $(input_dim)")
+  end
+  if size(X_train, 1) != length(y_train) || size(X_test, 1) != length(y_test)
+    error("训练/测试特征与目标数量不一致：X_train=$(size(X_train))，y_train=$(size(y_train))，X_test=$(size(X_test))，y_test=$(size(y_test))")
+  end
 
   # Define the model
+  Random.seed!(training_random_seed)
   model = Chain(
       Dense(input_dim, 7, sigmoid),
       Dense(7, 13, sigmoid),
@@ -987,6 +996,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       @load old_model model
   else
 
+    # Reset the global RNG after model initialization so DataLoader shuffling is
+    # deterministic and independent of the random numbers consumed by Dense.
+    Random.seed!(training_random_seed + 1)
     train_data_loader = DataLoader((X_train', y_train), batchsize=batch_size, shuffle=true)
     symmetry_signs = ones(Float32, input_dim)
     symmetry_signs[2:end] .= -1f0
@@ -1235,7 +1247,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
             lat_accels = [lataccel + t * latjerk for t in t_list]
             rolls = [roll for t in t_list]
             input_data = [vego lataccel latjerk roll]
-            x = hcat(input_data, lat_accels', rolls')
+            # t_list is declared as a 1×N matrix, so these comprehensions are
+            # already row-shaped.  Transposing them creates N×1 arrays and
+            # makes hcat fail against the 1×4 input row.
+            x = hcat(input_data, lat_accels, rolls)
+            if size(x) != (1, expected_input_dim)
+              error("手动模型验证输入尺寸错误：期望 (1, $(expected_input_dim))，实际 $(size(x))")
+            end
             xstr = "[" * join(x, ",") * "]"
             result_model = feedforward_function(x, zero_bias=zero_bias)  # Model evaluation
             result_manual = feedforward_function_manual(x, zero_bias=zero_bias)  # Manual evaluation
