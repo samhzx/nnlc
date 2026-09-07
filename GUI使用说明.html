@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>NNLC GUI 详细使用说明</title>
+  <style>
+    :root {
+      --ink: #17212b;
+      --muted: #5f6b76;
+      --line: #d8dee4;
+      --soft: #f5f7f8;
+      --paper: #ffffff;
+      --navy: #132b3a;
+      --teal: #087f8c;
+      --teal-soft: #e9f5f5;
+      --green: #18794e;
+      --green-soft: #eaf6ef;
+      --amber: #9a6700;
+      --amber-soft: #fff8df;
+      --red: #c33a2c;
+      --red-soft: #fff0ee;
+      --violet: #7656a8;
+      --shadow: 0 12px 30px rgba(20, 39, 51, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 20px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #eef1f3;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.75;
+      letter-spacing: 0;
+    }
+
+    a { color: var(--teal); }
+
+    code, pre {
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      letter-spacing: 0;
+    }
+
+    code {
+      padding: 0.12em 0.35em;
+      border: 1px solid #d9e0e4;
+      border-radius: 4px;
+      color: #22313c;
+      background: #f4f6f7;
+      overflow-wrap: anywhere;
+    }
+
+    .masthead {
+      color: #fff;
+      background: var(--navy);
+      border-bottom: 5px solid var(--teal);
+    }
+
+    .masthead-inner {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 36px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: #8cd4d7;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.35; }
+
+    h1 {
+      margin: 0;
+      font-size: 46px;
+      font-weight: 750;
+    }
+
+    .lede {
+      max-width: 790px;
+      margin: 12px 0 0;
+      color: #d7e3e9;
+      font-size: 17px;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 22px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 3px 10px;
+      border: 1px solid #49616f;
+      border-radius: 4px;
+      color: #eaf2f5;
+      background: #203b4b;
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 28px;
+      width: min(1180px, calc(100% - 40px));
+      margin: 28px auto 56px;
+      align-items: start;
+    }
+
+    .toc {
+      position: sticky;
+      top: 20px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--paper);
+      box-shadow: 0 6px 16px rgba(20, 39, 51, 0.06);
+    }
+
+    .toc-title {
+      margin: 0 0 9px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 6px 8px;
+      border-left: 3px solid transparent;
+      color: #34434e;
+      font-size: 14px;
+      text-decoration: none;
+    }
+
+    .toc a:hover,
+    .toc a:focus-visible {
+      border-left-color: var(--teal);
+      color: var(--teal);
+      background: var(--teal-soft);
+      outline: none;
+    }
+
+    main {
+      min-width: 0;
+      padding: 0 26px;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      box-shadow: 0 6px 18px rgba(20, 39, 51, 0.05);
+    }
+
+    section {
+      margin: 0;
+      padding: 30px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    section:last-child { border-bottom: 0; }
+
+    h2 {
+      margin: 0 0 18px;
+      color: var(--navy);
+      font-size: 25px;
+    }
+
+    h3 {
+      margin: 24px 0 9px;
+      color: #294250;
+      font-size: 18px;
+    }
+
+    p { margin: 10px 0; }
+
+    ul, ol {
+      margin: 10px 0;
+      padding-left: 1.35em;
+    }
+
+    li + li { margin-top: 6px; }
+
+    .callout {
+      margin: 16px 0;
+      padding: 13px 15px;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+    }
+
+    .callout.warning {
+      border-left-color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout.success {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .callout strong { color: var(--navy); }
+
+    .steps {
+      display: grid;
+      gap: 12px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: step;
+    }
+
+    .steps > li {
+      position: relative;
+      min-height: 48px;
+      margin: 0;
+      padding: 10px 12px 10px 58px;
+      border-bottom: 1px solid var(--line);
+      counter-increment: step;
+    }
+
+    .steps > li:last-child { border-bottom: 0; }
+
+    .steps > li::before {
+      content: counter(step);
+      position: absolute;
+      top: 9px;
+      left: 8px;
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--teal);
+      font-weight: 750;
+    }
+
+    .steps strong { display: block; }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 14px 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--paper);
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #fff;
+      background: #294553;
+      font-weight: 700;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:nth-child(even) { background: #f8fafb; }
+
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 4px;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge.yes { color: var(--green); background: var(--green-soft); }
+    .badge.no { color: #59636c; background: #edf0f2; }
+    .badge.default { color: #12626b; background: var(--teal-soft); }
+
+    .gui-window {
+      margin: 18px 0 12px;
+      overflow: hidden;
+      border: 1px solid #9aa6ad;
+      border-radius: 7px;
+      background: #f3f3f3;
+      box-shadow: var(--shadow);
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .gui-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 38px;
+      padding: 0 12px;
+      color: #20262b;
+      background: #e8ecef;
+      border-bottom: 1px solid #bcc5ca;
+    }
+
+    .window-controls { color: #68747d; letter-spacing: 8px; }
+
+    .gui-body { padding: 18px; }
+
+    .gui-heading {
+      margin: 0 0 13px;
+      font-size: 21px;
+      font-weight: 750;
+    }
+
+    .gui-group {
+      position: relative;
+      margin: 0 0 12px;
+      padding: 17px 13px 11px;
+      border: 1px solid #aeb7bd;
+      background: #f7f7f7;
+    }
+
+    .gui-group-title {
+      position: absolute;
+      top: -10px;
+      left: 9px;
+      padding: 0 5px;
+      background: #f7f7f7;
+      font-weight: 700;
+    }
+
+    .gui-row {
+      display: grid;
+      grid-template-columns: 108px minmax(190px, 1fr) 210px;
+      gap: 10px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .gui-label { white-space: nowrap; }
+
+    .gui-input,
+    .gui-select {
+      min-height: 29px;
+      padding: 4px 8px;
+      overflow: hidden;
+      border: 1px solid #7f8d96;
+      color: #26343d;
+      background: #fff;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .gui-input.disabled { color: #8a9297; background: #e6e9eb; }
+
+    .gui-button {
+      display: inline-block;
+      min-height: 29px;
+      padding: 4px 11px;
+      border: 1px solid #8d989f;
+      border-radius: 3px;
+      color: #1d2930;
+      background: #f5f5f5;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .gui-button.primary {
+      color: #fff;
+      border-color: #096e78;
+      background: var(--teal);
+      font-weight: 700;
+    }
+
+    .gui-hint { color: #68747d; font-size: 12px; }
+
+    .gui-checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+      align-items: center;
+    }
+
+    .check::before {
+      content: "✓";
+      display: inline-grid;
+      width: 16px;
+      height: 16px;
+      margin-right: 5px;
+      place-items: center;
+      border: 1px solid #65757f;
+      color: #fff;
+      background: var(--teal);
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .gui-controls {
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      margin: 13px 0;
+    }
+
+    .progress-track {
+      height: 7px;
+      overflow: hidden;
+      border: 1px solid #a4afb5;
+      background: #fff;
+    }
+
+    .progress-value { width: 44%; height: 100%; background: var(--teal); }
+
+    .gui-log {
+      min-height: 116px;
+      padding: 10px;
+      border: 1px solid #aeb7bd;
+      color: #27343c;
+      background: #fff;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .gui-log .info { color: #2563a6; }
+    .gui-log .step { color: #007c91; }
+    .gui-log .ok { color: #16803a; }
+
+    .gui-status {
+      margin-top: 10px;
+      padding: 5px 8px;
+      border: 1px solid #b2bbc0;
+      background: #e6e8e9;
+    }
+
+    .marker {
+      display: inline-grid;
+      width: 22px;
+      height: 22px;
+      margin-left: 5px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--red);
+      font-size: 12px;
+      font-weight: 750;
+      vertical-align: middle;
+    }
+
+    .legend-grid,
+    .preset-grid,
+    .check-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .mini-panel {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fafbfb;
+    }
+
+    .mini-panel h3 { margin: 0 0 7px; font-size: 16px; }
+    .mini-panel p { margin: 4px 0; font-size: 14px; }
+
+    .color-key {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 0;
+    }
+
+    .swatch { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
+
+    pre {
+      margin: 12px 0;
+      padding: 15px;
+      overflow: auto;
+      border: 1px solid #314b59;
+      border-radius: 6px;
+      color: #e6edf1;
+      background: #132b3a;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    details {
+      margin: 10px 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }
+
+    summary {
+      padding: 12px 14px;
+      color: #263b48;
+      background: #f7f9fa;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    details > div { padding: 5px 14px 14px; }
+
+    .footer {
+      padding: 28px 20px 34px;
+      color: #cbd8de;
+      background: var(--navy);
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .footer p { margin: 3px 0; }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; }
+      .toc nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .gui-row { grid-template-columns: 96px minmax(170px, 1fr); }
+      .gui-row > :last-child { grid-column: 2; }
+      .gui-controls { grid-template-columns: auto 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      body { font-size: 15px; }
+      .masthead-inner, .layout { width: min(100% - 24px, 1180px); }
+      .masthead-inner { padding: 30px 0 28px; }
+      h1 { font-size: 34px; }
+      main { padding: 0 16px; }
+      section { padding: 24px 0; }
+      h2 { font-size: 22px; }
+      .toc nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .legend-grid, .preset-grid, .check-grid { grid-template-columns: 1fr; }
+      .gui-body { padding: 12px; }
+      .gui-row { grid-template-columns: 1fr; gap: 4px; padding: 5px 0; }
+      .gui-row > :last-child { grid-column: auto; }
+      .gui-controls { grid-template-columns: 1fr 1fr; }
+      .progress-track { grid-column: 1 / -1; }
+      th, td { min-width: 130px; }
+    }
+
+    @media print {
+      body { background: #fff; font-size: 11pt; }
+      .masthead { color: #000; background: #fff; border-bottom: 2px solid #000; }
+      .masthead-inner { width: 100%; padding: 18px 0; }
+      .lede, .eyebrow { color: #333; }
+      .meta-row, .toc { display: none; }
+      .layout { display: block; width: 100%; margin: 0; }
+      main { padding: 0; border: 0; box-shadow: none; }
+      section { break-inside: avoid; }
+      .gui-window { box-shadow: none; }
+      .footer { color: #333; background: #fff; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <p class="eyebrow">Windows 图形界面操作手册</p>
+      <h1>NNLC GUI 详细使用说明</h1>
+      <p class="lede">从准备 rlog、选择参数，到训练完成、检查模型与排查错误。本说明与当前项目中的 <code>nnlc_gui.py</code> 行为保持一致。</p>
+      <div class="meta-row" aria-label="文档适用范围">
+        <span class="tag">适用：NNLC_Trainer one-dir 版本</span>
+        <span class="tag">训练设备：Windows x64</span>
+        <span class="tag">训练后端：CPU</span>
+        <span class="tag">更新日期：2026-09-07</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="toc" aria-label="目录">
+      <p class="toc-title">文档目录</p>
+      <nav>
+        <a href="#start">1. 下载与启动</a>
+        <a href="#prepare">2. 训练前准备</a>
+        <a href="#overview">3. 界面总览</a>
+        <a href="#fields">4. 参数说明</a>
+        <a href="#modes">5. 模式选择</a>
+        <a href="#run">6. 开始训练</a>
+        <a href="#pipeline">7. 训练流程</a>
+        <a href="#outputs">8. 输出文件</a>
+        <a href="#quality">9. 质量判断</a>
+        <a href="#settings">10. 设置记忆</a>
+        <a href="#errors">11. 故障排查</a>
+        <a href="#checklist">12. 完成检查</a>
+      </nav>
+    </aside>
+
+    <main>
+      <section id="start">
+        <h2>1. 下载、解压与启动</h2>
+        <ol class="steps">
+          <li><strong>下载构建产物</strong>在 GitHub Actions 对应的成功构建中，下载 <code>NNLC_Trainer-windows-x64-onedir-7z</code>。构建产物保留 14 天，请及时下载。</li>
+          <li><strong>完成两层解压</strong>GitHub 通常先下载一个 ZIP 包；先解开外层 ZIP，得到 <code>NNLC_Trainer-windows-x64-onedir.7z</code>，再使用 7-Zip 或 WinRAR 解开内层 7z。不要直接在压缩软件预览窗口中运行程序。</li>
+          <li><strong>保留整个目录</strong>进入解压后的 <code>NNLC_Trainer</code> 文件夹，确认其中同时存在 <code>NNLC_Trainer.exe</code> 和 <code>_internal</code> 文件夹。</li>
+          <li><strong>启动 GUI</strong>双击 <code>NNLC_Trainer.exe</code>。程序是 one-dir 形式，目标电脑无需另外安装 Python、Julia 或项目依赖。</li>
+        </ol>
+        <div class="callout danger"><strong>不能只复制 EXE。</strong>Julia、Python 包、训练脚本和运行库位于同目录的 <code>_internal</code> 中。只拿走 <code>NNLC_Trainer.exe</code> 会导致程序启动或训练失败。</div>
+        <div class="callout warning"><strong>Windows 安全提示：</strong>如果系统提示“未知发布者”，请先确认压缩包来自你自己的 GitHub Actions 构建，再选择“更多信息”并运行。不要运行来源不明的程序包。</div>
+      </section>
+
+      <section id="prepare">
+        <h2>2. 训练前准备</h2>
+        <div class="check-grid">
+          <div class="mini-panel">
+            <h3>rlog 数据</h3>
+            <p>输入目录可以包含多层路线和分段子目录。程序会递归查找文件名完全匹配 <code>rlog</code>、<code>rlog.zst</code> 或 <code>rlog.bz2</code> 的文件。</p>
+          </div>
+          <div class="mini-panel">
+            <h3>可用磁盘</h3>
+            <p>输出目录会产生多个大型 CSV。超大数据使用流式模式时建议至少预留 100 GB；程序会在启动流程时报告剩余空间并给出警告。</p>
+          </div>
+          <div class="mini-panel">
+            <h3>稳定供电</h3>
+            <p>训练可能持续较长时间。关闭 Windows 睡眠，保持窗口打开，并避免在训练期间移动程序目录、输入目录或输出目录。</p>
+          </div>
+          <div class="mini-panel">
+            <h3>数据质量</h3>
+            <p>建议使用 20 至 30 条不同路线、约 5 至 10 小时的干净数据，覆盖城市、郊区、高速、左右弯和坡度变化。</p>
+          </div>
+        </div>
+        <h3>推荐的目录结构</h3>
+        <pre><code>D:\reallog\
+├─ 2026-08-30--10-15-00\
+│  ├─ 0\rlog.zst
+│  ├─ 1\rlog.zst
+│  └─ 2\rlog.zst
+└─ 2026-08-31--16-40-00\
+   ├─ 0\rlog.zst
+   └─ 1\rlog.zst</code></pre>
+        <div class="callout"><strong>可以直接选择上层目录。</strong>选择示例中的 <code>D:\reallog</code> 即可，不需要逐个选择路线或分段。</div>
+      </section>
+
+      <section id="overview">
+        <h2>3. GUI 界面总览</h2>
+        <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
+        <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
+          <div class="gui-titlebar">
+            <span>NNLC 横向控制模型训练</span>
+            <span class="window-controls">— □ ×</span>
+          </div>
+          <div class="gui-body">
+            <div class="gui-heading">NNLC 横向控制模型训练</div>
+            <div class="gui-group">
+              <span class="gui-group-title">目录设置</span>
+              <div class="gui-row">
+                <span class="gui-label">reallog 目录 <span class="marker">1</span></span>
+                <span class="gui-input">D:\reallog</span>
+                <span class="gui-button">浏览...</span>
+              </div>
+              <div class="gui-row">
+                <span class="gui-label">输出目录 <span class="marker">2</span></span>
+                <span class="gui-input">C:\Users\用户名\Documents\NNLC_Output</span>
+                <span class="gui-button">浏览...</span>
+              </div>
+            </div>
+            <div class="gui-group">
+              <span class="gui-group-title">训练参数</span>
+              <div class="gui-row">
+                <span class="gui-label">车型 <span class="marker">3</span></span>
+                <span class="gui-input">BYD_TANG_DMI_24</span>
+                <span class="gui-hint">示例：BYD_TANG_DMI_24</span>
+              </div>
+              <div class="gui-row">
+                <span class="gui-label">路线阈值 <span class="marker">4</span></span>
+                <span class="gui-checks"><span class="gui-input disabled">70</span><span class="check">自动推荐（默认）</span><span class="check">生成覆盖度图（默认）</span></span>
+                <span class="gui-hint">取消自动推荐后可输入 0-100</span>
+              </div>
+              <div class="gui-row">
+                <span class="gui-label">训练模式 <span class="marker">5</span></span>
+                <span class="gui-select">CPU 标准模式　⌄</span>
+                <span class="gui-hint">流式模式适合超大数据和 16GB 内存电脑</span>
+              </div>
+              <div class="gui-row">
+                <span class="gui-label">日志处理模式 <span class="marker">6</span></span>
+                <span class="gui-select">容错模式（跳过损坏日志）　⌄</span>
+                <span class="gui-hint">容错模式会跳过损坏 rlog 并记录文件</span>
+              </div>
+              <div class="gui-row">
+                <span></span>
+                <span class="check">保留完整中间 CSV（默认） <span class="marker">7</span></span>
+                <span class="gui-hint">仅在流式模式下可以修改</span>
+              </div>
+            </div>
+            <div class="gui-controls">
+              <span class="gui-button primary">开始训练 <span class="marker">8</span></span>
+              <span class="progress-track"><span class="progress-value"></span></span>
+              <span class="gui-button">打开输出目录 <span class="marker">9</span></span>
+              <span class="gui-button">清空日志</span>
+            </div>
+            <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/8] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">10</span></div>
+            <div class="gui-status">训练中，请保持窗口打开...</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="fields">
+        <h2>4. 每个参数怎样填写</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>编号与字段</th><th>作用与填写方法</th><th>默认行为</th><th>是否记忆</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>1. reallog 目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>空白，必须选择存在的目录。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击“浏览...”。</td><td>优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>3. 车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>4. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>生成覆盖度图</strong></td><td>生成 <code>coverage.png</code>，用于检查车速、横向加速度和接管等覆盖情况。建议保持勾选。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>5. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>6. 日志处理模式</strong></td><td>容错模式会跳过无法读取的 rlog 并打印清单；严格模式遇到第一个损坏文件就停止。</td><td><span class="badge default">容错模式</span></td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>7. 保留完整中间 CSV</strong></td><td>只在流式模式中可修改。取消后，仅当整个训练和质量验证成功时才删除大型中间 CSV；失败时仍保留现场文件。</td><td><span class="badge default">已勾选</span></td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>8. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>9. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>10. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保留或复制完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="modes">
+        <h2>5. 训练模式与日志模式选择</h2>
+        <h3>CPU 标准模式与流式模式</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>项目</th><th>CPU 标准模式</th><th>CPU 流式低内存模式</th></tr></thead>
+            <tbody>
+              <tr><td>适合场景</td><td>数据量较小、内存充足，优先追求处理速度。</td><td>超大数据、上亿行 CSV 或约 16 GB 内存电脑。</td></tr>
+              <tr><td>单个 rlog</td><td>逐个文件完整读取，并按 <code>logMonoTime</code> 稳定排序。</td><td>同样逐个文件完整读取并排序，不设置固定排序窗口。</td></tr>
+              <tr><td>后续 CSV 处理</td><td>部分步骤会完整载入数据。</td><td>评分、剪枝、覆盖度、验证抽样和 Julia 预处理采用分块或流式处理。</td></tr>
+              <tr><td>Julia batch size</td><td><code>16384</code></td><td><code>4096</code></td></tr>
+              <tr><td>速度</td><td>通常更快。</td><td>需要多遍顺序扫描，通常更慢。</td></tr>
+              <tr><td>训练规则</td><td colspan="2">两者都使用 CPU，并保持相同的 18 维输入、路线隔离、对称增强、损失规则及模型结构。模式不是“质量高低”选项。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="preset-grid">
+          <div class="mini-panel">
+            <h3>普通数据推荐</h3>
+            <p><strong>CPU 标准模式</strong></p>
+            <p>数据能轻松放入内存，或已有经验表明训练不会造成系统换页时使用。</p>
+          </div>
+          <div class="mini-panel">
+            <h3>低内存/超大数据推荐</h3>
+            <p><strong>CPU 流式低内存模式</strong></p>
+            <p>16 GB 内存、数千万至上亿行、标准模式内存不足时使用，同时确保输出磁盘空间充足。</p>
+          </div>
+        </div>
+
+        <h3>容错模式与严格模式</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模式</th><th>损坏或未写完整的 rlog</th><th>适用情况</th></tr></thead>
+            <tbody>
+              <tr><td><strong>容错模式（默认）</strong></td><td>记录路径和原因，跳过该文件，继续处理剩余日志。</td><td>日志从设备下载时可能仍在写入，或数据来源较多时。</td></tr>
+              <tr><td><strong>严格模式</strong></td><td>立即停止提取，保留旧输出，不用部分文件覆盖已有有效 CSV。</td><td>要求每一个日志都必须完整，希望尽早发现采集或传输问题时。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warning"><strong>容错不等于忽略数据质量。</strong>训练结束前应查看日志中的跳过清单。如果大量 rlog 被跳过，剩余样本可能不足或覆盖不完整，应重新下载对应日志后再训练。</div>
+      </section>
+
+      <section id="run">
+        <h2>6. 开始训练与运行期间操作</h2>
+        <ol class="steps">
+          <li><strong>确认输入目录</strong>目录必须存在，并且内部至少包含一个受支持的 rlog 文件。</li>
+          <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
+          <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
+          <li><strong>选择模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。</li>
+          <li><strong>点击开始训练</strong>运行日志会先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。</li>
+          <li><strong>观察日志</strong>进度条表示任务仍在运行，不表示准确百分比；右侧计时显示已运行时间。</li>
+          <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
+        </ol>
+        <div class="callout warning"><strong>首次 Julia 训练可能 3 至 10 分钟没有新输出。</strong>这是 Julia 编译依赖的正常现象。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。</div>
+        <div class="callout danger"><strong>不要直接强制关闭。</strong>训练中点击窗口关闭按钮会询问是否中断。确认退出后，GUI 会结束当前 Python/Julia 子进程树；未完成的模型不会部署。</div>
+        <h3>日志颜色含义</h3>
+        <div class="legend-grid">
+          <div class="color-key"><span class="swatch" style="background:#2563a6"></span><span><strong>蓝色：</strong>普通信息、路径和模式</span></div>
+          <div class="color-key"><span class="swatch" style="background:#16803a"></span><span><strong>绿色：</strong>步骤成功、验证通过</span></div>
+          <div class="color-key"><span class="swatch" style="background:#a15c00"></span><span><strong>橙色：</strong>警告，任务可能仍会继续</span></div>
+          <div class="color-key"><span class="swatch" style="background:#c62828"></span><span><strong>红色：</strong>错误、质量验证失败</span></div>
+          <div class="color-key"><span class="swatch" style="background:#7a3e9d"></span><span><strong>紫色：</strong>标题和阶段总结</span></div>
+          <div class="color-key"><span class="swatch" style="background:#007c91"></span><span><strong>青色：</strong>当前流程步骤</span></div>
+        </div>
+      </section>
+
+      <section id="pipeline">
+        <h2>7. 程序内部的训练流程</h2>
+        <p>生成覆盖度图时共有 8 步；取消该选项时跳过第 5 步，界面显示 7 步。</p>
+        <ol class="steps">
+          <li><strong>提取横向控制数据</strong>递归读取 rlog，单个文件完整按时间排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
+          <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
+          <li><strong>修剪低质量路线</strong>删除低于阈值的路线，生成 <code>routes_pruned.csv</code>。</li>
+          <li><strong>移除干预帧</strong>识别驾驶员修正与机械干扰，生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
+          <li><strong>生成覆盖度图（可选）</strong>输出 <code>coverage.png</code>，用于判断训练数据覆盖是否均衡。</li>
+          <li><strong>Julia CPU 训练</strong>为当前车型准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出模型 JSON 和训练图。</li>
+          <li><strong>验证模型质量</strong>校验 JSON 字段、18 维输入、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
+          <li><strong>部署到输出目录</strong>将验证通过的模型原子复制为输出目录根部的 <code>车型.json</code>。已有同名模型会先备份为 <code>车型.json.bak</code>。</li>
+        </ol>
+        <div class="callout success"><strong>只有质量验证通过才会部署。</strong>训练脚本生成 JSON 不代表流程已经成功；必须看到 GUI 的“训练完成”弹窗和绿色“模型质量验证通过”。</div>
+      </section>
+
+      <section id="outputs">
+        <h2>8. 输出目录和文件用途</h2>
+        <pre><code>NNLC_Output\
+├─ lateral_data.csv                    # rlog 提取后的完整数据
+├─ routes_pruned.csv                   # 路线阈值筛选后数据
+├─ interventions_pruned.csv            # 移除干预后的最终训练数据
+├─ coverage.png                        # 数据覆盖度图（勾选时生成）
+├─ 车型.json                            # 最终可部署模型，最重要的文件
+├─ 车型.json.bak                        # 重训覆盖前的旧模型备份（如有）
+├─ validation\
+│  ├─ lat_accel_vs_torque.png          # 横向加速度与扭矩验证图
+│  └─ torque_vs_speed.png              # 扭矩与车速验证图
+└─ training_input\
+   ├─ 车型.csv                          # 交给 Julia 的训练输入
+   └─ training_results\车型\
+      ├─ 车型.json                      # Julia 原始模型结果
+      ├─ 车型.training.png              # 训练过程图
+      ├─ 车型-a.png / 车型-a.pdf        # Julia 分析图
+      └─ 车型-b.png / 车型-b.pdf        # Julia 分析图</code></pre>
+        <div class="callout"><strong>最终交付文件：</strong>通常使用输出目录根部的 <code>车型.json</code>。它是在质量验证通过后部署的副本，不要误用失败任务留下的中间文件。</div>
+        <h3>关闭“保留完整中间 CSV”之后</h3>
+        <p>该选项只对流式模式生效。整个训练、质量验证和部署均成功后，程序尝试删除：</p>
+        <ul>
+          <li><code>lateral_data.csv</code></li>
+          <li><code>routes_pruned.csv</code></li>
+          <li><code>interventions_pruned.csv</code></li>
+          <li><code>training_input\车型.csv</code></li>
+        </ul>
+        <p>模型、统计图片和训练结果目录会保留。任务失败或取消时不会执行成功后的清理，以便排查。</p>
+        <div class="callout warning"><strong>复用同一个输出目录时要注意：</strong>新训练开始前会清理 <code>training_input</code> 根目录中旧的 CSV，并删除同车型旧的 <code>training_results\车型</code> 结果目录；输出目录根部的同名模型会保留一份 <code>.bak</code> 备份。</div>
+      </section>
+
+      <section id="quality">
+        <h2>9. 怎样判断数据和模型是否合格</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>检查点</th><th>程序判断</th><th>建议处理</th></tr></thead>
+            <tbody>
+              <tr><td>提取数据量</td><td>少于 10,000 行会警告。</td><td>继续训练前优先补充更多有效驾驶数据。</td></tr>
+              <tr><td>路线修剪结果</td><td>0 行直接失败；少于 5,000 行严重不足；少于 20,000 行提示可能过拟合。</td><td>降低路线阈值，检查激活驾驶数据，或补采路线。</td></tr>
+              <tr><td>干预移除结果</td><td>0 行直接失败。</td><td>检查数据是否大多为人工接管、变道、颠簸或无效控制状态。</td></tr>
+              <tr><td>模型结构</td><td>必须包含完整字段、18 个指定输入、正确权重维度和激活函数。</td><td>不要手工修改 Julia 生成的 JSON；结构错误需重新训练。</td></tr>
+              <tr><td>测试损失</td><td><code>0 ≤ model_test_loss &lt; 0.05</code> 才通过。</td><td>未通过时补充更均衡、更干净的数据，再调整阈值重训。</td></tr>
+              <tr><td>验证图</td><td>图表生成失败只会警告，不改变已经完成的数值质量判定。</td><td>模型可以通过结构与损失验证，但仍建议解决绘图错误后人工查看曲线。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>覆盖度图重点看什么</h3>
+        <ul>
+          <li>城市、郊区、高速车速区间是否都有足够样本。</li>
+          <li>左转与右转、正负横向加速度是否明显偏向一侧。</li>
+          <li>低速急弯、高速缓弯等边界区域是否为空。</li>
+          <li>接管比例是否过高，是否存在大量饱和或无效路线。</li>
+        </ul>
+      </section>
+
+      <section id="settings">
+        <h2>10. 上次设置保存在哪里</h2>
+        <p>在 Windows 中，GUI 把用户偏好写入：</p>
+        <pre><code>%APPDATA%\NNLC\settings.json</code></pre>
+        <p>保存内容只有：</p>
+        <ul>
+          <li>上次填写的车型</li>
+          <li>上次选择的训练模式</li>
+          <li>上次选择的日志处理模式</li>
+          <li>是否保留完整中间 CSV</li>
+        </ul>
+        <p>输入目录、输出目录、手动阈值和“生成覆盖度图”不会保存。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。</p>
+        <div class="callout"><strong>恢复默认偏好：</strong>先退出 GUI，再删除 <code>%APPDATA%\NNLC\settings.json</code>。下次启动时会重新创建。</div>
+      </section>
+
+      <section id="errors">
+        <h2>11. 常见问题与排查顺序</h2>
+        <details open>
+          <summary>提示“请选择有效的 reallog 目录”</summary>
+          <div><p>当前填写的路径为空、目录不存在，或移动了原目录。重新点击“浏览...”选择实际存在的目录。路径使用 <code>\</code> 或 <code>/</code> 不影响程序，GUI 会按 Windows 规则统一显示。</p></div>
+        </details>
+        <details>
+          <summary>提示“数据目录中未找到 rlog 文件”</summary>
+          <div><p>程序只识别文件名完全为 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code> 的日志。<code>rlog.tmp</code>、<code>rlog.part</code> 或其他临时文件不会计入。检查下载是否完成，并确认选择的是包含这些文件的上层目录。</p></div>
+        </details>
+        <details>
+          <summary>容错模式跳过了文件</summary>
+          <div><p>常见原因是设备端日志仍在写入时就被下载、压缩流截断、传输不完整或 Cap'n Proto 数据损坏。记录日志中列出的文件路径，重新从设备下载；如果跳过比例很低且剩余数据充足，可以继续，但应检查覆盖度。</p></div>
+        </details>
+        <details>
+          <summary>长时间停在 Julia 训练开始位置</summary>
+          <div><p>首次运行会编译 Julia 依赖，约 3 至 10 分钟无输出可能正常。查看任务管理器中的 CPU、磁盘活动和可用内存。若最终出现非零退出码，保留从“命令:”开始到错误末尾的完整日志。</p></div>
+        </details>
+        <details>
+          <summary>路线剪枝后没有剩余数据</summary>
+          <div><p>手动阈值可能过高，或有效激活路线质量不足。先改回“自动推荐”；仍失败时降低阈值，并检查是否存在足够长的激活驾驶、过多停车、变道、饱和或接管。</p></div>
+        </details>
+        <details>
+          <summary>标准模式内存占用过高</summary>
+          <div><p>切换到“CPU 流式低内存模式”。流式模式对大型 CSV 分块处理，内存不会随总行数线性增加，但会增加顺序扫描次数和总耗时。输出磁盘需预留足够空间。</p></div>
+        </details>
+        <details>
+          <summary>模型质量验证未通过</summary>
+          <div><p>程序不会把该模型部署为最终模型。查看日志中列出的 JSON 结构问题或 <code>model_test_loss</code>。不要仅通过反复提高或降低阈值碰运气，应结合 <code>coverage.png</code> 补齐缺失工况并减少污染数据。</p></div>
+        </details>
+        <details>
+          <summary>验证图生成失败，但日志显示质量判定通过</summary>
+          <div><p>模型结构与测试损失验证在前，绘图在后。两张验证图生成失败会显示警告，但不会把已通过的数值质量判定改为失败。仍建议保留日志并修复绘图问题，以便人工检查模型曲线。</p></div>
+        </details>
+        <details>
+          <summary>双击 EXE 后缺少模块、Julia 或 DLL</summary>
+          <div><p>通常是只复制了 EXE、压缩包没有完整解压，或安全软件隔离了 <code>_internal</code> 文件。重新完整解压整个 <code>NNLC_Trainer</code> 文件夹，并确认 <code>_internal\julia-runtime\bin\julia.exe</code> 存在。</p></div>
+        </details>
+        <details>
+          <summary>输出目录空间不足</summary>
+          <div><p>停止后把输出目录改到容量更大的磁盘。不要在训练中移动或删除正在增长的 CSV。流式模式关闭“保留完整中间 CSV”只能在整个任务成功后清理文件，不能降低训练过程中的磁盘峰值。</p></div>
+        </details>
+        <details>
+          <summary>怎样提供一份可分析的错误日志</summary>
+          <div><p>不要只截取最后一行。应包含：GUI 选择的模式、阈值、从失败步骤标题开始的全部内容、执行命令、Traceback 或 Julia 错误、退出码，以及被跳过的 rlog 清单。路径中的个人用户名可以打码，但应保留目录层级和文件名。</p></div>
+        </details>
+      </section>
+
+      <section id="checklist">
+        <h2>12. 训练完成后的检查清单</h2>
+        <ol class="steps">
+          <li><strong>确认 GUI 明确显示“训练完成”</strong>不能只依据 Julia 输出了 JSON 判断完成。</li>
+          <li><strong>确认质量验证通过</strong>日志应显示 JSON 结构正确、测试损失小于 <code>0.05</code>。</li>
+          <li><strong>确认最终模型位置</strong>输出目录根部应存在与车型名称一致的 <code>车型.json</code>。</li>
+          <li><strong>检查跳过日志清单</strong>使用容错模式时，确认被跳过的数量不会显著破坏数据覆盖。</li>
+          <li><strong>检查覆盖度与验证图</strong>打开 <code>coverage.png</code> 和 <code>validation</code> 中的两张曲线图，确认没有明显空白或异常形状。</li>
+          <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志；同名旧模型通常位于 <code>车型.json.bak</code>。</li>
+        </ol>
+        <div class="callout danger"><strong>道路验证注意安全。</strong>新模型应先在可控环境中低风险验证，并随时准备接管。离线质量验证通过不等于覆盖了所有车辆状态和道路工况。</div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <p>NNLC GUI 详细使用说明</p>
+    <p>纯静态单文件页面，无网络请求，可直接双击打开或打印为 PDF。</p>
+  </footer>
+</body>
+</html>
