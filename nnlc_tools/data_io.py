@@ -4,6 +4,8 @@ import os
 
 import pandas as pd
 
+from nnlc_tools.route_utils import extract_route_id
+
 
 class DataLoadError(ValueError):
     """Raised when an input data file or rlog directory cannot be read."""
@@ -28,7 +30,7 @@ def load_data(input_path):
     if os.path.isdir(input_path):
         import tempfile
         from nnlc_tools.extract_lateral_data import (
-            find_rlogs, extract_segment, _StreamingCsvWriter, extract_route_id,
+            find_rlogs, extract_segment, _StreamingCsvWriter,
         )
 
         rlog_files = find_rlogs(input_path)
