@@ -11,12 +11,12 @@ Usage:
 
 import argparse
 import os
-import re
 import sys
 
 import pandas as pd
 
 from nnlc_tools.bool_utils import parse_bool_series
+from nnlc_tools.route_utils import extract_route_id
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
 
 CRITERIA = [
@@ -42,30 +42,6 @@ def parse_score_threshold(value):
     if not 0 <= threshold <= 100:
         raise argparse.ArgumentTypeError("--min-score must be an integer from 0 to 100")
     return threshold
-
-
-def extract_route_id(path):
-    """Extract route ID from rlog path by stripping --segment_num suffix.
-
-    Paths look like: .../2024-01-15--12-30-45/0/rlog.zst
-    Route ID is: 2024-01-15--12-30-45
-    """
-    parts = path.replace("\\", "/").split("/")
-    for part in reversed(parts):
-        # Match openpilot route ID pattern: hex|date--time
-        if re.match(r"^[0-9a-f]+\|?\d{4}-\d{2}-\d{2}--\d{2}-\d{2}-\d{2}$", part):
-            return part
-        if re.match(r"^\d{4}-\d{2}-\d{2}--\d{2}-\d{2}-\d{2}$", part):
-            return part
-    # Fallback: use parent directory name
-    for i, part in enumerate(parts):
-        if part in ("rlog", "rlog.zst", "rlog.bz2"):
-            # Go up 2 levels (skip segment number directory)
-            if i >= 2:
-                return parts[i - 2]
-            elif i >= 1:
-                return parts[i - 1]
-    return "unknown"
 
 
 def score_route(df):
@@ -113,7 +89,7 @@ def load_data_with_routes(input_path):
         # Process rlogs directly — need per-file tracking for route grouping
         import tempfile
         from nnlc_tools.extract_lateral_data import (
-            find_rlogs, extract_segment, _StreamingCsvWriter, extract_route_id,
+            find_rlogs, extract_segment, _StreamingCsvWriter,
         )
         rlog_files = find_rlogs(input_path)
         if not rlog_files:

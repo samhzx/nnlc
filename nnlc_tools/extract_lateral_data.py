@@ -25,6 +25,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from nnlc_tools.bool_utils import parse_bool
+from nnlc_tools.route_utils import extract_route_id
 
 # Temporal offsets matching nnlc.py's past_times and future_times
 PAST_TIMES = [-0.3, -0.2, -0.1]
@@ -164,22 +165,6 @@ def find_rlogs(input_dir):
                 for part in re.split(r"(\d+)", normalized)]
 
     return sorted(set(files), key=natural_path_key)
-
-
-def extract_route_id(path):
-    """Return the route ID represented by an openpilot rlog path."""
-    parts = os.fspath(path).replace("\\", "/").split("/")
-    pattern = re.compile(r"^(?:[0-9a-fA-F]+\|)?\d{4}-\d{2}-\d{2}--\d{2}-\d{2}-\d{2}$")
-    for part in reversed(parts):
-        if pattern.fullmatch(part):
-            return part
-    for index in range(len(parts) - 1, -1, -1):
-        if parts[index] in {"rlog", "rlog.zst", "rlog.bz2"}:
-            if index >= 2:
-                return parts[index - 2]
-            if index >= 1:
-                return parts[index - 1]
-    return "unknown"
 
 
 def extract_segment(rlog_path, row_callback=None):
