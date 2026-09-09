@@ -14,8 +14,12 @@ import argparse
 import csv
 from collections import deque
 import glob
+import io
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,6 +30,10 @@ from tqdm import tqdm
 
 from nnlc_tools.bool_utils import parse_bool
 from nnlc_tools.route_utils import extract_route_id
+
+
+RLOG_WORKER_MODULE = "nnlc_tools.extract_rlog_worker"
+MAX_RLOGS_PER_WORKER = 100
 
 # Temporal offsets matching nnlc.py's past_times and future_times
 PAST_TIMES = [-0.3, -0.2, -0.1]
@@ -333,6 +341,23 @@ def _replace_with_retry(source_path, target_path, attempts=5, delay=0.5):
     raise RuntimeError(f"无法替换输出文件：{target_path}")
 
 
+def _remove_with_retry(path, attempts=5, delay=0.1):
+    """Best-effort removal for temporary files under transient Windows locks."""
+    for attempt in range(attempts):
+        try:
+            os.unlink(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except PermissionError:
+            if os.name != "nt" or attempt + 1 >= attempts:
+                return False
+            time.sleep(delay)
+        except OSError:
+            return False
+    return False
+
+
 class _StreamingCsvWriter:
     """Write extracted rows while retaining only the temporal look-ahead window."""
 
@@ -402,30 +427,6 @@ class _StreamingCsvWriter:
         self.finish_segment()
         self.handle.flush()
 
-    def begin_segment(self):
-        """Record a rollback point before extracting one rlog segment."""
-        if self.pending or self.past:
-            raise RuntimeError("previous rlog segment was not finalized")
-        self.handle.flush()
-        return (
-            self.handle.tell(),
-            self.rows_written,
-            self.rows_seen,
-            self.rows_filtered,
-        )
-
-    def rollback_segment(self, checkpoint):
-        """Remove every row written since ``checkpoint`` and reset buffers."""
-        position, rows_written, rows_seen, rows_filtered = checkpoint
-        self.pending.clear()
-        self.past.clear()
-        self.handle.flush()
-        self.handle.seek(position)
-        self.handle.truncate()
-        self.rows_written = rows_written
-        self.rows_seen = rows_seen
-        self.rows_filtered = rows_filtered
-
     def finish_segment(self):
         while self.pending:
             self._emit_ready()
@@ -434,6 +435,254 @@ class _StreamingCsvWriter:
 
     def close(self):
         self.handle.close()
+
+
+class RlogWorkerCrash(RuntimeError):
+    """Raised when the isolated native rlog parser exits unexpectedly."""
+
+    def __init__(self, returncode, stderr_text=""):
+        self.returncode = returncode
+        self.stderr_text = stderr_text.strip()
+        if returncode is None:
+            code_text = "unknown"
+        elif os.name == "nt" or returncode > 0x7FFFFFFF:
+            code_text = f"{returncode} (0x{returncode & 0xFFFFFFFF:08X})"
+        else:
+            code_text = str(returncode)
+        message = f"rlog worker exited unexpectedly with code {code_text}"
+        if self.stderr_text:
+            message += f": {self.stderr_text}"
+        super().__init__(message)
+
+
+def _rlog_worker_command():
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--run-module", RLOG_WORKER_MODULE]
+    return [sys.executable, "-m", RLOG_WORKER_MODULE]
+
+
+class _RlogWorker:
+    """Keep native rlog parsing outside the parent extraction process."""
+
+    def __init__(self):
+        self._stderr = tempfile.TemporaryFile(mode="w+b")
+        try:
+            self._process = subprocess.Popen(
+                _rlog_worker_command(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._stderr,
+            )
+        except Exception:
+            self._stderr.close()
+            raise
+        self.files_processed = 0
+
+    def _stderr_since(self, offset):
+        self._stderr.flush()
+        self._stderr.seek(offset)
+        text = self._stderr.read().decode("utf-8", errors="replace")
+        self._stderr.seek(0, os.SEEK_END)
+        return text
+
+    def process(self, request):
+        if self._process.poll() is not None:
+            raise RlogWorkerCrash(
+                self._process.returncode,
+                self._stderr_since(0),
+            )
+        self._stderr.seek(0, os.SEEK_END)
+        stderr_offset = self._stderr.tell()
+        payload = json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
+        try:
+            self._process.stdin.write(payload)
+            self._process.stdin.flush()
+            response_line = self._process.stdout.readline()
+        except (BrokenPipeError, OSError) as exc:
+            try:
+                returncode = self._process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                returncode = self._process.poll()
+            details = self._stderr_since(stderr_offset) or str(exc)
+            raise RlogWorkerCrash(returncode, details) from exc
+
+        if not response_line:
+            returncode = self._process.wait()
+            raise RlogWorkerCrash(
+                returncode,
+                self._stderr_since(stderr_offset),
+            )
+        try:
+            response = json.loads(response_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            details = self._stderr_since(stderr_offset)
+            if not details:
+                details = f"invalid worker response: {response_line[:200]!r}"
+            raise RlogWorkerCrash(self._process.poll(), details) from exc
+        self.files_processed += 1
+        return response
+
+    def close(self):
+        process = getattr(self, "_process", None)
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    process.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+            for pipe in (process.stdin, process.stdout):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+            self._process = None
+        stderr = getattr(self, "_stderr", None)
+        if stderr is not None:
+            stderr.close()
+            self._stderr = None
+
+
+def _csv_header_bytes(columns):
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator="\n").writerow(columns)
+    return buffer.getvalue().encode("utf-8")
+
+
+def _append_worker_csv(source_path, output_handle, expected_header):
+    with open(source_path, "rb") as source:
+        actual_header = source.readline()
+        if actual_header.rstrip(b"\r\n") != expected_header.rstrip(b"\r\n"):
+            raise RuntimeError(f"rlog worker produced an invalid CSV header: {source_path}")
+        shutil.copyfileobj(source, output_handle, length=1024 * 1024)
+
+
+def _discard_worker_output(path):
+    if not _remove_with_retry(path):
+        print(f"WARNING: Unable to remove temporary rlog output: {path}", flush=True)
+
+
+def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
+                         filter_overrides=False, skip_corrupt=False,
+                         show_progress=True, worker_factory=None):
+    """Extract rlogs through a restartable native-parser worker.
+
+    The worker is recycled periodically to bound native-library resource
+    accumulation. In tolerant mode a native crash is retried once in a fresh
+    worker before the current rlog is classified as unreadable and skipped.
+    """
+    worker_factory = worker_factory or _RlogWorker
+    output_columns = COLUMNS + (
+        [spec[2] for spec in _temporal_column_specs()] if temporal else []
+    ) + ["route_id"]
+    expected_header = _csv_header_bytes(output_columns)
+    skipped_rlogs = []
+    rows_written = rows_seen = rows_filtered = 0
+    worker = None
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    progress = tqdm(rlog_files, desc="Processing rlogs", disable=not show_progress)
+    try:
+        with open(output_path, "wb") as output:
+            output.write(expected_header)
+            for index, rlog_path in enumerate(progress, start=1):
+                rlog_path = os.fspath(rlog_path)
+                if show_progress:
+                    print(
+                        f"Current rlog [{index}/{len(rlog_files)}]: {rlog_path}",
+                        flush=True,
+                    )
+                crash_retries = 0
+                while True:
+                    segment_file = tempfile.NamedTemporaryFile(
+                        prefix=".nnlc_rlog_", suffix=".csv",
+                        dir=os.path.dirname(os.path.abspath(output_path)),
+                        delete=False,
+                    )
+                    segment_path = segment_file.name
+                    segment_file.close()
+                    try:
+                        if worker is None:
+                            worker = worker_factory()
+                        response = worker.process({
+                            "rlog_path": rlog_path,
+                            "output_path": segment_path,
+                            "temporal": temporal,
+                            "filter_overrides": filter_overrides,
+                            "route_id": extract_route_id(rlog_path),
+                        })
+                    except RlogWorkerCrash as exc:
+                        if worker is not None:
+                            worker.close()
+                            worker = None
+                        _discard_worker_output(segment_path)
+                        if skip_corrupt and crash_retries == 0:
+                            crash_retries += 1
+                            print(
+                                f"WARNING: rlog worker crashed while processing: {rlog_path}",
+                                flush=True,
+                            )
+                            print(f"  Reason: {exc}", flush=True)
+                            print("  Retrying once in a fresh worker...", flush=True)
+                            continue
+                        reason = str(exc)
+                        if skip_corrupt:
+                            skipped_rlogs.append((rlog_path, reason))
+                            print(f"WARNING: Skipping unreadable rlog: {rlog_path}", flush=True)
+                            print(f"  Reason: {reason}", flush=True)
+                            break
+                        raise RuntimeError(
+                            f"rlog worker crashed while processing {rlog_path}: {reason}"
+                        ) from exc
+                    except Exception:
+                        _discard_worker_output(segment_path)
+                        raise
+
+                    try:
+                        if response.get("status") != "ok":
+                            reason = (
+                                f"{response.get('error_type', 'Error')}: "
+                                f"{response.get('error', 'unknown worker error')}"
+                            )
+                            if skip_corrupt:
+                                skipped_rlogs.append((rlog_path, reason))
+                                print(f"WARNING: Skipping unreadable rlog: {rlog_path}", flush=True)
+                                print(f"  Reason: {reason}", flush=True)
+                                break
+                            raise RuntimeError(f"Error processing {rlog_path}: {reason}")
+
+                        _append_worker_csv(segment_path, output, expected_header)
+                        output.flush()
+                        rows_written += int(response["rows_written"])
+                        rows_seen += int(response["rows_seen"])
+                        rows_filtered += int(response["rows_filtered"])
+                        break
+                    finally:
+                        _discard_worker_output(segment_path)
+
+                if worker is not None and worker.files_processed >= MAX_RLOGS_PER_WORKER:
+                    worker.close()
+                    worker = None
+    finally:
+        progress.close()
+        if worker is not None:
+            worker.close()
+
+    return {
+        "rows_written": rows_written,
+        "rows_seen": rows_seen,
+        "rows_filtered": rows_filtered,
+        "skipped_rlogs": skipped_rlogs,
+    }
 
 
 def add_temporal_columns(df):
@@ -483,23 +732,6 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(rlog_files)} rlog files")
-    skipped_rlogs = []
-
-    def process_rlog(rlog_path, stream):
-        """Extract one file, optionally continuing after a corrupt segment."""
-        checkpoint = stream.begin_segment()
-        stream.route_id = extract_route_id(rlog_path)
-        try:
-            extract_segment(rlog_path, row_callback=stream.accept)
-        except Exception as exc:
-            stream.rollback_segment(checkpoint)
-            if not args.skip_corrupt:
-                raise
-            skipped_rlogs.append((rlog_path, str(exc)))
-            print(f"WARNING: Skipping unreadable rlog: {rlog_path}")
-            print(f"  Reason: {exc}")
-            return
-        stream.finish_segment()
 
     # Determine output format
     fmt = args.format
@@ -524,27 +756,21 @@ def main():
         temp_path = temp_file.name
         temp_file.close()
         success = False
-        stream = None
         try:
-            stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
-                                         filter_overrides=args.filter_overrides)
-            for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-                process_rlog(rlog_path, stream)
-            stream.finish()
-            rows_written = stream.rows_written
-            rows_seen = stream.rows_seen
-            rows_filtered = stream.rows_filtered
+            stats = extract_rlogs_to_csv(
+                rlog_files,
+                temp_path,
+                temporal=args.temporal,
+                filter_overrides=args.filter_overrides,
+                skip_corrupt=args.skip_corrupt,
+            )
+            rows_written = stats["rows_written"]
+            rows_seen = stats["rows_seen"]
+            rows_filtered = stats["rows_filtered"]
             if rows_written > 0:
-                # Windows does not allow renaming an open file. Close the
-                # writer before replacing the destination; Linux permits the
-                # old order, which hid this portability bug.
-                stream.close()
-                stream = None
                 _replace_with_retry(temp_path, args.output)
                 success = True
         finally:
-            if stream is not None:
-                stream.close()
             if not success:
                 try:
                     os.unlink(temp_path)
@@ -552,9 +778,9 @@ def main():
                     pass
 
         if rows_written == 0:
-            if skipped_rlogs:
-                print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
-                for path, reason in skipped_rlogs:
+            if stats["skipped_rlogs"]:
+                print(f"Skipped {len(stats['skipped_rlogs'])} corrupt/unreadable rlog files")
+                for path, reason in stats["skipped_rlogs"]:
                     print(f"  - {path}: {reason}")
             print("ERROR: No data extracted from any rlog files")
             sys.exit(1)
@@ -572,17 +798,16 @@ def main():
         temp_path = temp_file.name
         temp_file.close()
         extraction_success = False
-        stream = None
         try:
-            stream = _StreamingCsvWriter(temp_path, temporal=args.temporal,
-                                         filter_overrides=args.filter_overrides)
-            for rlog_path in tqdm(rlog_files, desc="Processing rlogs"):
-                process_rlog(rlog_path, stream)
-            stream.finish()
-            extraction_success = stream.rows_written > 0
+            stats = extract_rlogs_to_csv(
+                rlog_files,
+                temp_path,
+                temporal=args.temporal,
+                filter_overrides=args.filter_overrides,
+                skip_corrupt=args.skip_corrupt,
+            )
+            extraction_success = stats["rows_written"] > 0
         finally:
-            if stream is not None:
-                stream.close()
             if not extraction_success:
                 try:
                     os.unlink(temp_path)
@@ -594,9 +819,9 @@ def main():
                 os.unlink(temp_path)
             except FileNotFoundError:
                 pass
-            if skipped_rlogs:
-                print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
-                for path, reason in skipped_rlogs:
+            if stats["skipped_rlogs"]:
+                print(f"Skipped {len(stats['skipped_rlogs'])} corrupt/unreadable rlog files")
+                for path, reason in stats["skipped_rlogs"]:
                     print(f"  - {path}: {reason}")
             print("ERROR: No data extracted from any rlog file")
             sys.exit(1)
@@ -621,9 +846,9 @@ def main():
                 except FileNotFoundError:
                     pass
 
-    if skipped_rlogs:
-        print(f"Skipped {len(skipped_rlogs)} corrupt/unreadable rlog files")
-        for path, reason in skipped_rlogs:
+    if stats["skipped_rlogs"]:
+        print(f"Skipped {len(stats['skipped_rlogs'])} corrupt/unreadable rlog files")
+        for path, reason in stats["skipped_rlogs"]:
             print(f"  - {path}: {reason}")
     print(f"Saved to {args.output} ({fmt})")
 

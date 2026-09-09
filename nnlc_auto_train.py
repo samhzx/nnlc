@@ -154,6 +154,7 @@ EXPECTED_LAYER_JSON_SHAPES = ((7, 18), (13, 7), (3, 13), (1, 3))
 EXPECTED_LAYER_OUTPUT_SIZES = (7, 13, 3, 1)
 BUNDLED_WORKER_MODULES = frozenset({
     "nnlc_tools.extract_lateral_data",
+    "nnlc_tools.extract_rlog_worker",
     "nnlc_tools.score_routes",
     "nnlc_tools.prune_routes",
     "nnlc_tools.analyze_interventions",

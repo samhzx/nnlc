@@ -16,7 +16,6 @@ import sys
 import pandas as pd
 
 from nnlc_tools.bool_utils import parse_bool_series
-from nnlc_tools.route_utils import extract_route_id
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
 
 CRITERIA = [
@@ -86,36 +85,16 @@ def load_data_with_routes(input_path):
         return df, "route_id" if "route_id" in df.columns else None
 
     if os.path.isdir(input_path):
-        # Process rlogs directly — need per-file tracking for route grouping
-        import tempfile
-        from nnlc_tools.extract_lateral_data import (
-            find_rlogs, extract_segment, _StreamingCsvWriter,
-        )
-        rlog_files = find_rlogs(input_path)
-        if not rlog_files:
-            print(f"ERROR: No rlog files found in {input_path}")
-            sys.exit(1)
-
-        temp_file = tempfile.NamedTemporaryFile(prefix="nnlc_score_", suffix=".csv", delete=False)
-        temp_path = temp_file.name
-        temp_file.close()
-        stream = _StreamingCsvWriter(temp_path)
+        from nnlc_tools.data_io import DataLoadError, load_data
         try:
-            for rlog_path in rlog_files:
-                stream.route_id = extract_route_id(rlog_path)
-                extract_segment(rlog_path, row_callback=stream.accept)
-                stream.finish_segment()
-            stream.finish()
-            if stream.rows_written == 0:
-                print(f"ERROR: No data extracted from {input_path}")
-                sys.exit(1)
-            return pd.read_csv(temp_path), "route_id"
-        finally:
-            stream.close()
-            try:
-                os.unlink(temp_path)
-            except FileNotFoundError:
-                pass
+            df = load_data(input_path)
+        except DataLoadError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        if df is None:
+            print(f"ERROR: No data extracted from {input_path}")
+            sys.exit(1)
+        return df, "route_id" if "route_id" in df.columns else None
 
     print(f"ERROR: Input not found: {input_path}")
     sys.exit(1)

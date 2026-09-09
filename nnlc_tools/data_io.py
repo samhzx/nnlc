@@ -4,8 +4,6 @@ import os
 
 import pandas as pd
 
-from nnlc_tools.route_utils import extract_route_id
-
 
 class DataLoadError(ValueError):
     """Raised when an input data file or rlog directory cannot be read."""
@@ -30,7 +28,7 @@ def load_data(input_path):
     if os.path.isdir(input_path):
         import tempfile
         from nnlc_tools.extract_lateral_data import (
-            find_rlogs, extract_segment, _StreamingCsvWriter,
+            extract_rlogs_to_csv, find_rlogs,
         )
 
         rlog_files = find_rlogs(input_path)
@@ -39,20 +37,16 @@ def load_data(input_path):
         temp_file = tempfile.NamedTemporaryFile(prefix="nnlc_data_", suffix=".csv", delete=False)
         temp_path = temp_file.name
         temp_file.close()
-        stream = _StreamingCsvWriter(temp_path)
         try:
-            for path in rlog_files:
-                stream.route_id = extract_route_id(path)
-                extract_segment(path, row_callback=stream.accept)
-                stream.finish_segment()
-            stream.finish()
-            if stream.rows_written == 0:
+            stats = extract_rlogs_to_csv(
+                rlog_files, temp_path, show_progress=False,
+            )
+            if stats["rows_written"] == 0:
                 return None
             return pd.read_csv(temp_path)
         except (OSError, ValueError, ImportError, RuntimeError) as exc:
             raise DataLoadError(f"无法读取 rlog 数据目录 {input_path}: {exc}") from exc
         finally:
-            stream.close()
             try:
                 os.unlink(temp_path)
             except FileNotFoundError:

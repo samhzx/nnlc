@@ -106,5 +106,34 @@ Write-Host "Testing bundled Julia runtime ..."
 if ($LASTEXITCODE -ne 0) {
     throw "one-dir build validation failed: bundled Julia did not start ($LASTEXITCODE)"
 }
+Write-Host "Testing isolated rlog worker startup and pipe communication ..."
+$WorkerStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$WorkerStartInfo.FileName = $BundleExe
+$WorkerStartInfo.Arguments = "--run-module nnlc_tools.extract_rlog_worker"
+$WorkerStartInfo.UseShellExecute = $false
+$WorkerStartInfo.CreateNoWindow = $true
+$WorkerStartInfo.RedirectStandardInput = $true
+$WorkerStartInfo.RedirectStandardOutput = $true
+$WorkerStartInfo.RedirectStandardError = $true
+$WorkerProcess = [System.Diagnostics.Process]::Start($WorkerStartInfo)
+$WorkerProcess.StandardInput.WriteLine("{}")
+$WorkerProcess.StandardInput.Close()
+if (-not $WorkerProcess.WaitForExit(30000)) {
+    $WorkerProcess.Kill()
+    throw "one-dir build validation failed: isolated rlog worker did not exit after stdin closed"
+}
+$WorkerStdout = $WorkerProcess.StandardOutput.ReadToEnd()
+$WorkerStderr = $WorkerProcess.StandardError.ReadToEnd()
+if ($WorkerProcess.ExitCode -ne 0) {
+    throw "one-dir build validation failed: isolated rlog worker exited with $($WorkerProcess.ExitCode): $WorkerStderr"
+}
+try {
+    $WorkerResponse = $WorkerStdout | ConvertFrom-Json
+} catch {
+    throw "one-dir build validation failed: isolated rlog worker returned invalid JSON: $WorkerStdout"
+}
+if ($WorkerResponse.status -ne "error") {
+    throw "one-dir build validation failed: isolated rlog worker returned an unexpected response: $WorkerStdout"
+}
 Write-Host "Validated one-dir bundle: $BundleFileCount files"
 Write-Host "Done: $BundleExe"

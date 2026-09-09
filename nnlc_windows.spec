@@ -117,6 +117,7 @@ hiddenimports = [
     "nnlc_tools",
     "nnlc_tools.logreader",
     "nnlc_tools.extract_lateral_data",
+    "nnlc_tools.extract_rlog_worker",
     "nnlc_tools.score_routes",
     "nnlc_tools.prune_routes",
     "nnlc_tools.analyze_interventions",
