@@ -43,11 +43,6 @@ TRAINING_MODES = {
     "CPU 标准模式": 16384,
     "CPU 流式低内存模式": 4096,
 }
-CORRUPT_LOG_MODES = {
-    "容错模式（跳过损坏日志）": True,
-    "严格模式（遇到损坏日志停止）": False,
-}
-DEFAULT_CORRUPT_LOG_MODE = "容错模式（跳过损坏日志）"
 LEGACY_TRAINING_MODES = {
     "标准模式": "CPU 标准模式",
     "低内存模式": "CPU 流式低内存模式",
@@ -88,10 +83,6 @@ class NNLCApp:
         if not isinstance(saved_mode, str) or saved_mode not in TRAINING_MODES:
             saved_mode = "CPU 标准模式"
 
-        saved_corrupt_mode = saved_preferences.get("corrupt_log_mode")
-        if not isinstance(saved_corrupt_mode, str) or saved_corrupt_mode not in CORRUPT_LOG_MODES:
-            saved_corrupt_mode = DEFAULT_CORRUPT_LOG_MODE
-
         saved_car = saved_preferences.get("car")
         if not isinstance(saved_car, str) or not saved_car.strip():
             saved_car = "BYD_TANG_DMI_24"
@@ -101,7 +92,6 @@ class NNLCApp:
         self.car_var = tk.StringVar(value=saved_car)
         self.threshold_var = tk.StringVar()
         self.training_mode_var = tk.StringVar(value=saved_mode)
-        self.corrupt_log_mode_var = tk.StringVar(value=saved_corrupt_mode)
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.keep_intermediates_var = tk.BooleanVar(
@@ -156,9 +146,6 @@ class NNLCApp:
         training_mode = LEGACY_TRAINING_MODES.get(training_mode, training_mode)
         if training_mode not in TRAINING_MODES:
             training_mode = "CPU 标准模式"
-        corrupt_log_mode = self.corrupt_log_mode_var.get()
-        if corrupt_log_mode not in CORRUPT_LOG_MODES:
-            corrupt_log_mode = DEFAULT_CORRUPT_LOG_MODE
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +155,6 @@ class NNLCApp:
                     {
                         "car": car,
                         "training_mode": training_mode,
-                        "corrupt_log_mode": corrupt_log_mode,
                         "keep_intermediates": bool(self.keep_intermediates_var.get()),
                     },
                     handle,
@@ -184,21 +170,50 @@ class NNLCApp:
     def _build_widgets(self) -> None:
         root = self.root
         style = ttk.Style(root)
-        style.configure("TButton", padding=(10, 6))
-        style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(18, 8))
-        style.configure("Section.TLabelframe", padding=10)
-        style.configure("Section.TLabelframe.Label", font=("Microsoft YaHei UI", 10, "bold"))
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("App.TFrame", background="#f4f7fb")
+        style.configure("Header.TFrame", background="#16324f")
+        style.configure("HeaderTitle.TLabel", background="#16324f", foreground="#ffffff",
+                        font=("Microsoft YaHei UI", 18, "bold"))
+        style.configure("HeaderSubtitle.TLabel", background="#16324f", foreground="#c9d8e8",
+                        font=("Microsoft YaHei UI", 9))
+        style.configure("TLabel", background="#ffffff", foreground="#25364a")
+        style.configure("Hint.TLabel", background="#ffffff", foreground="#718096",
+                        font=("Microsoft YaHei UI", 9))
+        style.configure("TCheckbutton", background="#ffffff", foreground="#25364a")
+        style.configure("Section.TLabelframe", background="#ffffff", padding=12,
+                        bordercolor="#d9e2ec", relief="solid", borderwidth=1)
+        style.configure("Section.TLabelframe.Label", background="#ffffff", foreground="#16324f",
+                        font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure("TEntry", padding=(8, 6), fieldbackground="#ffffff")
+        style.configure("TCombobox", padding=(6, 4), fieldbackground="#ffffff")
+        style.configure("TButton", padding=(11, 7), font=("Microsoft YaHei UI", 9))
+        style.configure("Primary.TButton", background="#1f6feb", foreground="#ffffff",
+                        font=("Microsoft YaHei UI", 10, "bold"), padding=(20, 9))
+        style.map("Primary.TButton", background=[("active", "#1558b0"), ("disabled", "#a7bdd8")])
+        style.configure("Status.TLabel", background="#e8f0f8", foreground="#36516d",
+                        padding=(10, 7), font=("Microsoft YaHei UI", 9))
+        root.configure(background="#f4f7fb")
 
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
 
-        container = ttk.Frame(root, padding=(20, 16, 20, 14))
+        container = ttk.Frame(root, padding=(22, 18, 22, 16), style="App.TFrame")
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(6, weight=1)
 
-        ttk.Label(container, text="NNLC 横向控制模型训练", font=("Microsoft YaHei UI", 17, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 12)
+        header = ttk.Frame(container, style="Header.TFrame", padding=(18, 15, 18, 14))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="NNLC 横向控制模型训练", style="HeaderTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(header, text="从 reallog 提取数据，完成评分、训练与模型部署", style="HeaderSubtitle.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(5, 0)
         )
 
         path_frame = ttk.LabelFrame(container, text="目录设置", style="Section.TLabelframe")
@@ -215,7 +230,7 @@ class NNLCApp:
         ttk.Label(options_frame, text="车型").grid(row=0, column=0, sticky="w", pady=6)
         self.car_entry = ttk.Entry(options_frame, textvariable=self.car_var)
         self.car_entry.grid(row=0, column=1, sticky="ew", padx=(12, 10), pady=6)
-        ttk.Label(options_frame, text="示例：BYD_TANG_DMI_24").grid(row=0, column=2, sticky="w", pady=6)
+        ttk.Label(options_frame, text="示例：BYD_TANG_DMI_24", style="Hint.TLabel").grid(row=0, column=2, sticky="w", pady=6)
         self.config_widgets.append(self.car_entry)
 
         ttk.Label(options_frame, text="路线阈值").grid(row=1, column=0, sticky="w", pady=6)
@@ -239,48 +254,30 @@ class NNLCApp:
         self.config_widgets.extend((self.auto_threshold_check, self.visualize_check))
 
         ttk.Label(options_frame, text="训练模式").grid(row=2, column=0, sticky="w", pady=6)
+        training_mode_frame = ttk.Frame(options_frame)
+        training_mode_frame.grid(row=2, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
         self.training_mode_combo = ttk.Combobox(
-            options_frame,
+            training_mode_frame,
             textvariable=self.training_mode_var,
             values=tuple(TRAINING_MODES),
             state="readonly",
             width=16,
         )
-        self.training_mode_combo.grid(row=2, column=1, sticky="w", padx=(12, 10), pady=6)
+        self.training_mode_combo.pack(side="left")
         self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_changed)
-        ttk.Label(options_frame, text="流式模式适合超大数据和 16GB 内存电脑").grid(
-            row=2, column=2, sticky="w", pady=6
-        )
         self.config_widgets.append(self.training_mode_combo)
 
-        ttk.Label(options_frame, text="日志处理模式").grid(row=3, column=0, sticky="w", pady=6)
-        self.corrupt_log_mode_combo = ttk.Combobox(
-            options_frame,
-            textvariable=self.corrupt_log_mode_var,
-            values=tuple(CORRUPT_LOG_MODES),
-            state="readonly",
-            width=30,
-        )
-        self.corrupt_log_mode_combo.grid(row=3, column=1, sticky="w", padx=(12, 10), pady=6)
-        self.corrupt_log_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_preferences())
-        ttk.Label(options_frame, text="容错模式会跳过损坏 rlog 并记录文件").grid(row=3, column=2, sticky="w", pady=6)
-        self.config_widgets.append(self.corrupt_log_mode_combo)
-
         self.keep_intermediates_check = ttk.Checkbutton(
-            options_frame,
+            training_mode_frame,
             text="保留完整中间 CSV（默认）",
             variable=self.keep_intermediates_var,
             command=self._save_preferences,
         )
-        self.keep_intermediates_check.grid(row=4, column=1,
-                                           sticky="w", padx=(12, 0), pady=6)
-        ttk.Label(options_frame, text="关闭后仅在流式训练成功时清理中间文件").grid(
-            row=4, column=2, sticky="e", pady=6
-        )
+        self.keep_intermediates_check.pack(side="left", padx=(18, 0))
         self.config_widgets.append(self.keep_intermediates_check)
         self._update_streaming_options()
 
-        controls = ttk.Frame(container)
+        controls = ttk.Frame(container, style="App.TFrame")
         controls.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         controls.columnconfigure(1, weight=1)
         self.start_button = ttk.Button(controls, text="开始训练", style="Primary.TButton", command=self.start)
@@ -303,6 +300,10 @@ class NNLCApp:
             state="disabled",
             height=16,
             font=("Consolas", 9),
+            background="#fbfdff",
+            foreground="#26384a",
+            insertbackground="#26384a",
+            selectbackground="#cfe2f5",
             borderwidth=0,
             padx=8,
             pady=8,
@@ -318,7 +319,7 @@ class NNLCApp:
         self.log.tag_configure("heading", foreground="#7a3e9d")
         self.log.tag_configure("step", foreground="#007c91")
 
-        ttk.Label(container, textvariable=self.status_var, relief="sunken", anchor="w", padding=(8, 5)).grid(
+        ttk.Label(container, textvariable=self.status_var, style="Status.TLabel", anchor="w").grid(
             row=7, column=0, sticky="ew", pady=(10, 0)
         )
 
@@ -420,7 +421,6 @@ class NNLCApp:
             # Comboboxes are intentionally readonly; restoring every widget
             # to ``normal`` would let an invalid training mode be typed in.
             self.training_mode_combo.configure(state="readonly")
-            self.corrupt_log_mode_combo.configure(state="readonly")
             self._update_streaming_options()
 
     def _update_elapsed(self) -> None:
@@ -500,15 +500,10 @@ class NNLCApp:
             self._set_running(False)
             return
         skip_visualize = not self.skip_viz_var.get()
-        corrupt_log_mode = self.corrupt_log_mode_var.get().strip()
-        if corrupt_log_mode not in CORRUPT_LOG_MODES:
-            corrupt_log_mode = DEFAULT_CORRUPT_LOG_MODE
-            self.corrupt_log_mode_var.set(corrupt_log_mode)
-        skip_corrupt_rlogs = CORRUPT_LOG_MODES[corrupt_log_mode]
         self.worker = threading.Thread(
             target=self._run_worker,
             args=(data_dir, output_dir, car, min_score, skip_visualize,
-                  skip_corrupt_rlogs, batch_size,
+                  batch_size,
                   training_mode == "CPU 流式低内存模式",
                   bool(self.keep_intermediates_var.get()),
                   self.cancel_event, self.process_holder),
@@ -524,7 +519,6 @@ class NNLCApp:
         car,
         min_score,
         skip_visualize,
-        skip_corrupt_rlogs,
         batch_size,
         streaming_mode,
         keep_intermediates,
@@ -539,7 +533,7 @@ class NNLCApp:
                     car,
                     min_score=min_score,
                     skip_visualize=skip_visualize,
-                    skip_corrupt_rlogs=skip_corrupt_rlogs,
+                    skip_corrupt_rlogs=True,
                     output_dir=output_dir,
                     deploy_dir=output_dir,
                     batch_size=batch_size,

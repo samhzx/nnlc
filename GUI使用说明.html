@@ -596,7 +596,7 @@
         <a href="#prepare">2. 训练前准备</a>
         <a href="#overview">3. 界面总览</a>
         <a href="#fields">4. 参数说明</a>
-        <a href="#modes">5. 模式选择</a>
+        <a href="#modes">5. 模式与日志处理</a>
         <a href="#run">6. 开始训练</a>
         <a href="#pipeline">7. 训练流程</a>
         <a href="#outputs">8. 输出文件</a>
@@ -693,23 +693,18 @@
                 <span class="gui-hint">流式模式适合超大数据和 16GB 内存电脑</span>
               </div>
               <div class="gui-row">
-                <span class="gui-label">日志处理模式 <span class="marker">6</span></span>
-                <span class="gui-select">容错模式（跳过损坏日志）　⌄</span>
-                <span class="gui-hint">容错模式会跳过损坏 rlog 并记录文件</span>
-              </div>
-              <div class="gui-row">
                 <span></span>
-                <span class="check">保留完整中间 CSV（默认） <span class="marker">7</span></span>
+                <span class="check">保留完整中间 CSV（默认） <span class="marker">6</span></span>
                 <span class="gui-hint">仅在流式模式下可以修改</span>
               </div>
             </div>
             <div class="gui-controls">
-              <span class="gui-button primary">开始训练 <span class="marker">8</span></span>
+              <span class="gui-button primary">开始训练 <span class="marker">7</span></span>
               <span class="progress-track"><span class="progress-value"></span></span>
-              <span class="gui-button">打开输出目录 <span class="marker">9</span></span>
+              <span class="gui-button">打开输出目录 <span class="marker">8</span></span>
               <span class="gui-button">清空日志</span>
             </div>
-            <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/8] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">10</span></div>
+            <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/8] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">9</span></div>
             <div class="gui-status">训练中，请保持窗口打开...</div>
           </div>
         </div>
@@ -729,18 +724,17 @@
               <tr><td><strong>4. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
               <tr><td><strong>生成覆盖度图</strong></td><td>生成 <code>coverage.png</code>，用于检查车速、横向加速度和接管等覆盖情况。建议保持勾选。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
               <tr><td><strong>5. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>6. 日志处理模式</strong></td><td>容错模式会跳过无法读取的 rlog 并打印清单；严格模式遇到第一个损坏文件就停止。</td><td><span class="badge default">容错模式</span></td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>7. 保留完整中间 CSV</strong></td><td>只在流式模式中可修改。取消后，仅当整个训练和质量验证成功时才删除大型中间 CSV；失败时仍保留现场文件。</td><td><span class="badge default">已勾选</span></td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>8. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>9. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>10. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保留或复制完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
+              <tr><td><strong>6. 保留完整中间 CSV</strong></td><td>只在流式模式中可修改。取消后，仅当整个训练和质量验证成功时才删除大型中间 CSV；失败时仍保留现场文件。</td><td><span class="badge default">已勾选</span></td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>7. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>8. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>9. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保留或复制完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
       <section id="modes">
-        <h2>5. 训练模式与日志模式选择</h2>
+        <h2>5. 训练模式与日志处理说明</h2>
         <h3>CPU 标准模式与流式模式</h3>
         <div class="table-wrap">
           <table>
@@ -768,17 +762,8 @@
           </div>
         </div>
 
-        <h3>容错模式与严格模式</h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>模式</th><th>损坏或未写完整的 rlog</th><th>适用情况</th></tr></thead>
-            <tbody>
-              <tr><td><strong>容错模式（默认）</strong></td><td>记录路径和原因，跳过该文件，继续处理剩余日志。原生解析进程崩溃时会先在全新进程中重试一次。</td><td>日志从设备下载时可能仍在写入，或数据来源较多时。</td></tr>
-              <tr><td><strong>严格模式</strong></td><td>显示导致失败的完整 rlog 路径和退出码后立即停止，保留旧输出，不用部分文件覆盖已有有效 CSV。</td><td>要求每一个日志都必须完整，希望尽早发现采集或传输问题时。</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="callout warning"><strong>容错不等于忽略数据质量。</strong>训练结束前应查看日志中的跳过清单。如果大量 rlog 被跳过，剩余样本可能不足或覆盖不完整，应重新下载对应日志后再训练。</div>
+        <h3>日志处理方式</h3>
+        <div class="callout warning"><strong>GUI 固定使用容错模式。</strong>程序会记录无法读取的 rlog 路径和原因，跳过该文件并继续处理剩余日志；原生解析进程崩溃时会先在全新进程中重试一次。训练结束前应查看跳过清单，如果数量较多，应重新下载对应日志。</div>
       </section>
 
       <section id="run">
@@ -787,7 +772,7 @@
           <li><strong>确认输入目录</strong>目录必须存在，并且内部至少包含一个受支持的 rlog 文件。</li>
           <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
           <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
-          <li><strong>选择模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。</li>
+          <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。</li>
           <li><strong>点击开始训练</strong>运行日志会先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。</li>
           <li><strong>观察日志</strong>进度条表示任务仍在运行，不表示准确百分比；右侧计时显示已运行时间。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
@@ -885,7 +870,6 @@
         <ul>
           <li>上次填写的车型</li>
           <li>上次选择的训练模式</li>
-          <li>上次选择的日志处理模式</li>
           <li>是否保留完整中间 CSV</li>
         </ul>
         <p>输入目录、输出目录、手动阈值和“生成覆盖度图”不会保存。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。</p>
@@ -946,7 +930,7 @@
           <li><strong>确认 GUI 明确显示“训练完成”</strong>不能只依据 Julia 输出了 JSON 判断完成。</li>
           <li><strong>确认质量验证通过</strong>日志应显示 JSON 结构正确、测试损失小于 <code>0.05</code>。</li>
           <li><strong>确认最终模型位置</strong>输出目录根部应存在与车型名称一致的 <code>车型.json</code>。</li>
-          <li><strong>检查跳过日志清单</strong>使用容错模式时，确认被跳过的数量不会显著破坏数据覆盖。</li>
+          <li><strong>检查跳过日志清单</strong>确认被跳过的数量不会显著破坏数据覆盖。</li>
           <li><strong>检查覆盖度与验证图</strong>打开 <code>coverage.png</code> 和 <code>validation</code> 中的两张曲线图，确认没有明显空白或异常形状。</li>
           <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志；同名旧模型通常位于 <code>车型.json.bak</code>。</li>
         </ol>
