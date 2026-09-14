@@ -1,50 +1,29 @@
-"""PyInstaller spec for the self-contained Windows NNLC trainer.
+"""PyInstaller spec for the one-file Windows NNLC trainer.
 
-The build script stages a Windows Julia distribution and its package depot in
-the project root before invoking this file.  The resulting one-dir bundle is
-large (Julia + Flux/Plots artifacts are intentionally included) but does not
-require Python, Julia, or any package installation on the target computer.
+Python, project code, training scripts, and schemas live in the EXE. The large
+Julia runtime and depot are distributed once as a separate reusable ZIP.
 """
 
 from pathlib import Path
 import sys
 import sysconfig
 
-from PyInstaller.building.build_main import Analysis, EXE, PYZ, COLLECT
+from PyInstaller.building.build_main import Analysis, EXE, PYZ
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 PROJECT_DIR = Path(SPECPATH).resolve()
-JULIA_RUNTIME = PROJECT_DIR / "julia-runtime"
-JULIA_DEPOT = PROJECT_DIR / "julia-depot"
-if not JULIA_RUNTIME.is_dir():
-    raise SystemExit(f"Missing {JULIA_RUNTIME}; run build_windows.ps1 first")
-if not JULIA_DEPOT.is_dir():
-    raise SystemExit(f"Missing {JULIA_DEPOT}; run build_windows.ps1 first")
 
 def directory_datas(source_dir: Path, target_dir: str):
-    """Return runtime files using Analysis(datas=...)'s 2-tuples.
+    """Return resource files using Analysis(datas=...)'s 2-tuples.
 
     The second item in each tuple is a destination directory, not a complete
     destination filename.  Including the filename there creates an extra
     directory layer such as ``bin/julia.exe/julia.exe``.
-
-    Julia runtime and depot files stay complete because package source files
-    outside the usual test directories can still be required during Julia
-    precompilation.
     """
-    def is_runtime_file(path: Path) -> bool:
+    def is_resource_file(path: Path) -> bool:
         relative_path = path.relative_to(source_dir)
         relative_parts = {part.lower() for part in relative_path.parts}
-        target_parts = {part.lower() for part in Path(target_dir).parts}
-
-        # Keep the Julia runtime and package depot intact.  Only transient
-        # depot caches are removed by the build script before this runs.
-        if target_parts == {"julia-runtime"}:
-            return True
-        if target_parts == {"julia-depot"}:
-            top_level = relative_path.parts[0].lower() if relative_path.parts else ""
-            return top_level not in {"scratchspaces", "logs", "clones"}
 
         if "cmake" in relative_parts:
             return False
@@ -60,7 +39,7 @@ def directory_datas(source_dir: Path, target_dir: str):
             str(Path(target_dir) / path.relative_to(source_dir).parent),
         )
         for path in source_dir.rglob("*")
-        if path.is_file() and is_runtime_file(path)
+        if path.is_file() and is_resource_file(path)
     ]
 
 
@@ -69,7 +48,7 @@ def standard_library_extensions(module_name: str):
 
     PyInstaller normally discovers these through imports, but the
     multiprocessing runtime hook can execute before the regular import graph
-    is restored. Explicitly bundling ``_socket.pyd`` prevents a one-dir build
+    is restored. Explicitly bundling ``_socket.pyd`` prevents the frozen app
     from starting with ``No module named '_socket'``.
     """
     roots = set()
@@ -103,8 +82,7 @@ def standard_library_extensions(module_name: str):
 datas = [
     *directory_datas(PROJECT_DIR / "training", "training"),
     *directory_datas(PROJECT_DIR / "nnlc_tools" / "cereal", "nnlc_tools/cereal"),
-    *directory_datas(JULIA_RUNTIME, "julia-runtime"),
-    *directory_datas(JULIA_DEPOT, "julia-depot"),
+    (str(PROJECT_DIR / "windows_runtime.json"), "."),
 ]
 binaries = standard_library_extensions("_socket")
 hiddenimports = [
@@ -114,6 +92,7 @@ hiddenimports = [
     "multiprocessing.context",
     "multiprocessing.reduction",
     "nnlc_gui",
+    "nnlc_runtime",
     "nnlc_tools",
     "nnlc_tools.logreader",
     "nnlc_tools.extract_lateral_data",
@@ -155,8 +134,9 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,
     name="NNLC_Trainer",
     debug=False,
     bootloader_ignore_signals=False,
@@ -164,12 +144,4 @@ exe = EXE(
     upx=False,
     console=False,
     icon=None,
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    name="NNLC_Trainer",
 )

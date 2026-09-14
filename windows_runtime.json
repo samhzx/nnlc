@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "runtime_version": "1",
+  "platform": "windows-x64",
+  "julia_version": "1.10.11",
+  "runtime_directory": "NNLC_Runtime",
+  "archive_name": "NNLC_Julia_Runtime-windows-x64-v1.zip",
+  "release_tag": "julia-runtime-v1",
+  "release_url": "https://github.com/samhzx/nnlc/releases/tag/julia-runtime-v1"
+}

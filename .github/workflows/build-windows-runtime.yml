@@ -1,0 +1,133 @@
+name: Build Windows Julia Runtime
+
+run-name: ${{ inputs.run_name || format('Build Windows Julia Runtime ({0})', github.ref_name) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_name:
+        description: "运行标题"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-runtime:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read runtime configuration
+        id: runtime
+        shell: pwsh
+        run: |
+          $config = Get-Content windows_runtime.json -Raw | ConvertFrom-Json
+          "julia_version=$($config.julia_version)" >> $env:GITHUB_OUTPUT
+          "runtime_version=$($config.runtime_version)" >> $env:GITHUB_OUTPUT
+          "runtime_directory=$($config.runtime_directory)" >> $env:GITHUB_OUTPUT
+          "archive_name=$($config.archive_name)" >> $env:GITHUB_OUTPUT
+          "release_tag=$($config.release_tag)" >> $env:GITHUB_OUTPUT
+
+      - name: Reject an existing immutable runtime release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.runtime.outputs.release_tag }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $env:RELEASE_TAG already exists. Bump runtime_version and the release tag before rebuilding."
+          }
+          exit 0
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ steps.runtime.outputs.julia_version }}
+          arch: x64
+
+      - name: Build reusable Julia runtime ZIP
+        shell: pwsh
+        run: |
+          $juliaExe = (Get-Command julia).Source
+          $juliaDir = Split-Path (Split-Path $juliaExe -Parent) -Parent
+          .\build_julia_runtime.ps1 -JuliaDir $juliaDir
+
+      - name: Verify ZIP after relocation
+        shell: pwsh
+        env:
+          ARCHIVE_NAME: ${{ steps.runtime.outputs.archive_name }}
+          RUNTIME_DIRECTORY: ${{ steps.runtime.outputs.runtime_directory }}
+          RUNTIME_VERSION: ${{ steps.runtime.outputs.runtime_version }}
+          JULIA_VERSION: ${{ steps.runtime.outputs.julia_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archivePath = Join-Path $PWD "dist\$env:ARCHIVE_NAME"
+          $smokeRoot = Join-Path $PWD "runtime-smoke"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $smokeRoot
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $smokeRoot
+          $runtimeDir = Join-Path $smokeRoot $env:RUNTIME_DIRECTORY
+          $manifestPath = Join-Path $runtimeDir "runtime-manifest.json"
+          $juliaExe = Join-Path $runtimeDir "julia-runtime\bin\julia.exe"
+          $depot = Join-Path $runtimeDir "julia-depot"
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "Runtime manifest is missing: $manifestPath"
+          }
+          if (-not (Test-Path -LiteralPath $juliaExe -PathType Leaf)) {
+            throw "Julia executable is missing: $juliaExe"
+          }
+          if (-not (Test-Path -LiteralPath $depot -PathType Container)) {
+            throw "Julia depot is missing: $depot"
+          }
+          $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.runtime_version -ne $env:RUNTIME_VERSION) {
+            throw "Runtime manifest version mismatch: $($manifest.runtime_version)"
+          }
+          $versionOutput = (& $juliaExe --startup-file=no --version 2>&1 | Out-String).Trim()
+          Write-Host $versionOutput
+          if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($env:JULIA_VERSION)) {
+            throw "Relocated Julia version check failed"
+          }
+          $env:JULIA_DEPOT_PATH = $depot
+          $env:NNLC_WINDOWS_CPU_BUILD = "1"
+          $env:NNLC_PRECOMPILE_ONLY = "1"
+          & $juliaExe --startup-file=no "training\install_packages.jl"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Relocated Julia dependency import test failed ($LASTEXITCODE)"
+          }
+          Remove-Item Env:\NNLC_PRECOMPILE_ONLY -ErrorAction SilentlyContinue
+          $emptyInput = Join-Path $smokeRoot "empty-training-input"
+          New-Item -ItemType Directory -Force $emptyInput | Out-Null
+          & $juliaExe --startup-file=no "training\latmodel_temporal.jl" $emptyInput --cpu --batch-size=1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Relocated Julia training-script startup test failed ($LASTEXITCODE)"
+          }
+          Remove-Item -Recurse -Force $smokeRoot
+
+      - name: Publish immutable runtime release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE_NAME: ${{ steps.runtime.outputs.archive_name }}
+          RELEASE_TAG: ${{ steps.runtime.outputs.release_tag }}
+          RUNTIME_VERSION: ${{ steps.runtime.outputs.runtime_version }}
+          JULIA_VERSION: ${{ steps.runtime.outputs.julia_version }}
+        run: |
+          $archivePath = Join-Path $PWD "dist\$env:ARCHIVE_NAME"
+          $notes = @"
+          Windows x64 CPU Julia runtime for NNLC Trainer.
+
+          Runtime version: $env:RUNTIME_VERSION
+          Julia version: $env:JULIA_VERSION
+
+          Place this ZIP beside NNLC_Trainer.exe. The trainer extracts it automatically on first launch.
+          "@
+          gh release create $env:RELEASE_TAG $archivePath `
+            --repo $env:GITHUB_REPOSITORY `
+            --target $env:GITHUB_SHA `
+            --title "NNLC Julia Runtime v$env:RUNTIME_VERSION" `
+            --notes $notes

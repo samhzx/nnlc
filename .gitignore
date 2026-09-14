@@ -13,3 +13,4 @@ data/
 .DS_Store
 julia-runtime/
 julia-depot/
+NNLC_Runtime/

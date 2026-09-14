@@ -580,10 +580,10 @@
       <h1>NNLC GUI 详细使用说明</h1>
       <p class="lede">从准备 rlog、选择参数，到训练完成、检查模型与排查错误。本说明与当前项目中的 <code>nnlc_gui.py</code> 行为保持一致。</p>
       <div class="meta-row" aria-label="文档适用范围">
-        <span class="tag">适用：NNLC_Trainer one-dir 版本</span>
+        <span class="tag">适用：NNLC_Trainer 独立 EXE + 可复用 Julia 环境</span>
         <span class="tag">训练设备：Windows x64</span>
         <span class="tag">训练后端：CPU</span>
-        <span class="tag">更新日期：2026-09-07</span>
+        <span class="tag">更新日期：2026-09-14</span>
       </div>
     </div>
   </header>
@@ -611,13 +611,14 @@
       <section id="start">
         <h2>1. 下载、解压与启动</h2>
         <ol class="steps">
-          <li><strong>下载构建产物</strong>在 GitHub Actions 对应的成功构建中，下载 <code>NNLC_Trainer-windows-x64-onedir-7z</code>。构建产物保留 14 天，请及时下载。</li>
-          <li><strong>完成两层解压</strong>GitHub 通常先下载一个 ZIP 包；先解开外层 ZIP，得到 <code>NNLC_Trainer-windows-x64-onedir.7z</code>，再使用 7-Zip 或 WinRAR 解开内层 7z。不要直接在压缩软件预览窗口中运行程序。</li>
-          <li><strong>保留整个目录</strong>进入解压后的 <code>NNLC_Trainer</code> 文件夹，确认其中同时存在 <code>NNLC_Trainer.exe</code> 和 <code>_internal</code> 文件夹。</li>
-          <li><strong>启动 GUI</strong>双击 <code>NNLC_Trainer.exe</code>。程序是 one-dir 形式，目标电脑无需另外安装 Python、Julia 或项目依赖。</li>
+          <li><strong>下载程序</strong>在 GitHub Actions 对应的成功构建中下载 <code>NNLC_Trainer-windows-x64-exe</code>，解开 GitHub 外层 ZIP 后得到 <code>NNLC_Trainer.exe</code>。</li>
+          <li><strong>首次下载环境</strong>从 <code>julia-runtime-v1</code> GitHub Release 下载 <code>NNLC_Julia_Runtime-windows-x64-v1.zip</code>，不要手工解开这个环境 ZIP。</li>
+          <li><strong>放在同一目录</strong>确认 <code>NNLC_Trainer.exe</code> 与环境 ZIP 位于同一个普通可写目录，不要直接在压缩软件预览窗口中运行程序。</li>
+          <li><strong>启动 GUI</strong>双击 <code>NNLC_Trainer.exe</code>。首次启动会自动验证并解压为 <code>NNLC_Runtime</code>，目标电脑无需另外安装 Python、Julia 或项目依赖。</li>
         </ol>
-        <div class="callout danger"><strong>不能只复制 EXE。</strong>Julia、Python 包、训练脚本和运行库位于同目录的 <code>_internal</code> 中。只拿走 <code>NNLC_Trainer.exe</code> 会导致程序启动或训练失败。</div>
-        <div class="callout warning"><strong>Windows 安全提示：</strong>如果系统提示“未知发布者”，请先确认压缩包来自你自己的 GitHub Actions 构建，再选择“更多信息”并运行。不要运行来源不明的程序包。</div>
+        <div class="callout"><strong>后续只更新 EXE。</strong>首次成功生成 <code>NNLC_Runtime</code> 后，可以删除环境 ZIP。以后下载新版程序时只替换 <code>NNLC_Trainer.exe</code>，保留原来的 <code>NNLC_Runtime</code> 即可。</div>
+        <div class="callout danger"><strong>不要只复制半个运行环境。</strong><code>NNLC_Runtime</code> 必须同时包含环境清单、<code>julia-runtime</code> 和 <code>julia-depot</code>。环境缺失、损坏或版本不匹配时，请重新下载完整 ZIP。</div>
+        <div class="callout warning"><strong>Windows 安全提示：</strong>如果系统提示“未知发布者”，请先确认 EXE 和环境 ZIP 来自本仓库的 GitHub Actions 或 Release，再选择“更多信息”并运行。不要运行来源不明的文件。</div>
       </section>
 
       <section id="prepare">
@@ -913,7 +914,7 @@
         </details>
         <details>
           <summary>双击 EXE 后缺少模块、Julia 或 DLL</summary>
-          <div><p>通常是只复制了 EXE、压缩包没有完整解压，或安全软件隔离了 <code>_internal</code> 文件。重新完整解压整个 <code>NNLC_Trainer</code> 文件夹，并确认 <code>_internal\julia-runtime\bin\julia.exe</code> 存在。</p></div>
+          <div><p>确认 <code>NNLC_Runtime\runtime-manifest.json</code>、<code>NNLC_Runtime\julia-runtime\bin\julia.exe</code> 和 <code>NNLC_Runtime\julia-depot</code> 同时存在。如果程序提示环境缺失、损坏或版本不匹配，将正确名称的环境 ZIP 放到 EXE 旁并重新启动；程序会先验证新环境，再自动替换旧目录，错误窗口也可直接打开下载页面。</p></div>
         </details>
         <details>
           <summary>输出目录空间不足</summary>

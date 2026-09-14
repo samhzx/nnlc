@@ -25,7 +25,9 @@ nnlc/
 │   ├── latmodel_temporal.jl   # 主训练脚本（GUI 和自动流程使用）
 │   ├── run.sh                 # Julia 训练启动脚本
 │   └── 其他 *.jl              # 实验或对比模型，不参与默认流程
-├── build_windows.ps1          # Windows one-dir 构建脚本
+├── build_windows.ps1          # Windows one-file EXE 构建脚本
+├── build_julia_runtime.ps1    # 可复用 Julia 环境 ZIP 构建脚本
+├── windows_runtime.json       # Windows 环境版本与下载配置
 └── nnlc_windows.spec          # PyInstaller 配置
 ```
 
@@ -49,7 +51,20 @@ Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命�
 
 流式模式需要对 CSV 进行多遍顺序扫描，因此处理时间可能比标准模式长，但内存不会随总行数线性增长。它保持完整路线隔离、固定随机种子、训练分箱每箱最多 20 条、测试集最多 10 万条、18 维输入、对称增强及原有损失规则。由于流程中会生成多个大型 CSV，处理上亿行数据时建议输出磁盘至少预留 100GB；程序启动时会显示剩余空间并在不足时警告。
 
-one-dir 程序无需安装目标电脑上的 Python、Julia 或依赖包，但必须整体保留 `NNLC_Trainer` 文件夹，不能只复制 `NNLC_Trainer.exe`。GitHub Actions 会将它打包为 `NNLC_Trainer-windows-x64-onedir.7z`；下载后使用 7-Zip、WinRAR 等工具完整解压，再运行 `NNLC_Trainer\NNLC_Trainer.exe`。
+Windows 发布物分成两个文件：
+
+- `NNLC_Trainer.exe`：包含 Python、项目代码和训练脚本。日常功能更新只需下载并替换这个文件。
+- `NNLC_Julia_Runtime-windows-x64-v1.zip`：包含固定的 Julia 1.10.11、CPU 训练依赖和 depot，长期发布在 `julia-runtime-v1` GitHub Release 中。
+
+首次使用时，将 EXE 和环境 ZIP 放在同一个目录并双击 EXE。程序会验证 ZIP，并自动解压为 `NNLC_Runtime`；准备完成后即可训练。只要 `NNLC_Runtime` 完整且版本匹配，ZIP 可以删除，以后更新程序时只替换 `NNLC_Trainer.exe`，不需要重新下载 Julia 环境。
+
+如果 `NNLC_Runtime` 缺失、损坏或版本过旧，程序会要求重新放入正确名称的环境 ZIP，并可打开对应的 GitHub Release 下载页面。不要手工拼接或复制 `NNLC_Runtime` 内部的部分目录。
+
+### Windows 构建与发布
+
+- 日常应用更新：手动运行 GitHub Actions 的 `Build Windows EXE`，下载 `NNLC_Trainer-windows-x64-exe`；该工作流不安装或打包 Julia。
+- 首次环境发布：手动运行 `Build Windows Julia Runtime`。工作流会生成环境 ZIP，完成解压、Julia 版本、依赖导入和训练脚本启动检查，然后发布到配置指定的 GitHub Release。
+- Julia 版本或 `training/install_packages.jl` 依赖集合发生变化时，必须同时提升 `windows_runtime.json` 中的 `runtime_version`、ZIP 文件名、Release 标签和下载地址。环境 Release 不允许覆盖已有标签。
 
 ## 现有车型 NNLC 模型
 

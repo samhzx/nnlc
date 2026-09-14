@@ -1,9 +1,5 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$JuliaDir,
-    [string]$Python = "py -3.11",
-    [string]$JuliaDepot = "",
-    [switch]$SkipJuliaPackages
+    [string]$Python = "py -3.11"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,59 +8,8 @@ Set-Location $ProjectDir
 
 function Invoke-Python {
     param([Parameter(Mandatory = $true)][string]$CommandLine)
-    # Accept one command string so pip flags such as ``-e`` are passed through
-    # to Python instead of being interpreted as PowerShell function parameters.
     & cmd.exe /c "$Python -m $CommandLine"
     if ($LASTEXITCODE -ne 0) { throw "Python command failed ($LASTEXITCODE)" }
-}
-
-$JuliaDir = (Resolve-Path $JuliaDir).Path
-$JuliaDepotSource = ""
-if ($JuliaDepot) {
-    $JuliaDepotSource = (Resolve-Path $JuliaDepot).Path
-}
-$RuntimeTarget = [IO.Path]::GetFullPath((Join-Path $ProjectDir "julia-runtime"))
-$DepotTarget = [IO.Path]::GetFullPath((Join-Path $ProjectDir "julia-depot"))
-if ([IO.Path]::GetFullPath($JuliaDir) -eq $RuntimeTarget) {
-    throw "JuliaDir cannot be the build output directory: $RuntimeTarget"
-}
-if ($JuliaDepotSource -and [IO.Path]::GetFullPath($JuliaDepotSource) -eq $DepotTarget) {
-    throw "JuliaDepot cannot be the build output directory: $DepotTarget"
-}
-if ($SkipJuliaPackages -and -not $JuliaDepotSource) {
-    throw "-SkipJuliaPackages requires -JuliaDepot containing preinstalled packages"
-}
-if (-not (Test-Path (Join-Path $JuliaDir "bin\julia.exe"))) {
-    throw "JuliaDir must point to a Julia installation containing bin\julia.exe"
-}
-
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "julia-runtime"
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "julia-depot"
-Copy-Item -Recurse -Force $JuliaDir "julia-runtime"
-if ($JuliaDepot) {
-    Copy-Item -Recurse -Force $JuliaDepotSource "julia-depot"
-} else {
-    New-Item -ItemType Directory -Force "julia-depot" | Out-Null
-}
-$env:JULIA_DEPOT_PATH = (Resolve-Path "julia-depot").Path
-$env:NNLC_WINDOWS_CPU_BUILD = "1"
-
-if (-not $JuliaDepot -and -not $SkipJuliaPackages) {
-    Write-Host "Installing Julia packages into $env:JULIA_DEPOT_PATH ..."
-    $env:JULIA_PKG_PRECOMPILE_AUTO = "0"
-    $env:NNLC_SKIP_PRECOMPILE = "1"
-    try {
-        & "julia-runtime\bin\julia.exe" --startup-file=no "training\install_packages.jl"
-        if ($LASTEXITCODE -ne 0) { throw "Julia package installation failed ($LASTEXITCODE)" }
-    } finally {
-        Remove-Item Env:\JULIA_PKG_PRECOMPILE_AUTO -ErrorAction SilentlyContinue
-        Remove-Item Env:\NNLC_SKIP_PRECOMPILE -ErrorAction SilentlyContinue
-    }
-}
-
-Write-Host "Removing Julia package-manager caches ..."
-foreach ($CacheDir in @("julia-depot\scratchspaces", "julia-depot\logs", "julia-depot\clones")) {
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $CacheDir
 }
 
 Write-Host "Installing Python dependencies and PyInstaller ..."
@@ -75,37 +20,24 @@ Write-Host "Cleaning previous PyInstaller output ..."
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "build"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "dist"
 
-Write-Host "Building NNLC_Trainer.exe ..."
+Write-Host "Building one-file NNLC_Trainer.exe ..."
 Invoke-Python "PyInstaller --clean --noconfirm nnlc_windows.spec"
-$BundleDir = Join-Path $ProjectDir "dist\NNLC_Trainer"
-$BundleExe = Join-Path $BundleDir "NNLC_Trainer.exe"
-if (-not (Test-Path $BundleExe)) {
-    throw "one-dir build validation failed: missing $BundleExe"
+$BundleExe = Join-Path $ProjectDir "dist\NNLC_Trainer.exe"
+if (-not (Test-Path -LiteralPath $BundleExe -PathType Leaf)) {
+    throw "one-file build validation failed: missing $BundleExe"
 }
-if (Test-Path (Join-Path $ProjectDir "dist\NNLC_Trainer.exe")) {
-    throw "one-dir build validation failed: unexpected one-file executable was created"
+if (Test-Path -LiteralPath (Join-Path $ProjectDir "dist\NNLC_Trainer") -PathType Container) {
+    throw "one-file build validation failed: unexpected one-dir output was created"
 }
-$BundleFileCount = @(Get-ChildItem -Recurse -File $BundleDir).Count
-if ($BundleFileCount -lt 10) {
-    throw "one-dir build validation failed: bundle contains only $BundleFileCount files"
+
+Write-Host "Testing --help without a Julia runtime ..."
+$HelpOutput = (& $BundleExe --help 2>&1 | Out-String)
+$HelpExitCode = $LASTEXITCODE
+Write-Host $HelpOutput
+if ($HelpExitCode -ne 0 -or $HelpOutput -match "Traceback|UnicodeEncodeError") {
+    throw "one-file NNLC_Trainer --help failed or printed a Python traceback ($HelpExitCode)"
 }
-$BundledJulia = Join-Path $BundleDir "_internal\julia-runtime\bin\julia.exe"
-if (-not (Test-Path -LiteralPath $BundledJulia -PathType Leaf)) {
-    throw "one-dir build validation failed: bundled Julia executable is missing or is not a file: $BundledJulia"
-}
-$BundledTrainingScript = Join-Path $BundleDir "_internal\training\latmodel_temporal.jl"
-if (-not (Test-Path -LiteralPath $BundledTrainingScript -PathType Leaf)) {
-    throw "one-dir build validation failed: training script is missing or is not a file: $BundledTrainingScript"
-}
-$BundledSocket = @(Get-ChildItem -LiteralPath (Join-Path $BundleDir "_internal") -Recurse -File -Filter "_socket*.pyd")
-if ($BundledSocket.Count -eq 0) {
-    throw "one-dir build validation failed: Python _socket extension is missing from the bundle"
-}
-Write-Host "Testing bundled Julia runtime ..."
-& $BundledJulia --version
-if ($LASTEXITCODE -ne 0) {
-    throw "one-dir build validation failed: bundled Julia did not start ($LASTEXITCODE)"
-}
+
 Write-Host "Testing isolated rlog worker startup and pipe communication ..."
 $WorkerStartInfo = New-Object System.Diagnostics.ProcessStartInfo
 $WorkerStartInfo.FileName = $BundleExe
@@ -120,20 +52,24 @@ $WorkerProcess.StandardInput.WriteLine("{}")
 $WorkerProcess.StandardInput.Close()
 if (-not $WorkerProcess.WaitForExit(30000)) {
     $WorkerProcess.Kill()
-    throw "one-dir build validation failed: isolated rlog worker did not exit after stdin closed"
+    throw "one-file build validation failed: isolated rlog worker did not exit after stdin closed"
 }
 $WorkerStdout = $WorkerProcess.StandardOutput.ReadToEnd()
 $WorkerStderr = $WorkerProcess.StandardError.ReadToEnd()
 if ($WorkerProcess.ExitCode -ne 0) {
-    throw "one-dir build validation failed: isolated rlog worker exited with $($WorkerProcess.ExitCode): $WorkerStderr"
+    $Message = "one-file build validation failed: isolated rlog worker exited " +
+        "with $($WorkerProcess.ExitCode): $WorkerStderr"
+    throw $Message
 }
 try {
     $WorkerResponse = $WorkerStdout | ConvertFrom-Json
 } catch {
-    throw "one-dir build validation failed: isolated rlog worker returned invalid JSON: $WorkerStdout"
+    throw "one-file build validation failed: worker returned invalid JSON: $WorkerStdout"
 }
 if ($WorkerResponse.status -ne "error") {
-    throw "one-dir build validation failed: isolated rlog worker returned an unexpected response: $WorkerStdout"
+    throw "one-file build validation failed: worker returned an unexpected response: $WorkerStdout"
 }
-Write-Host "Validated one-dir bundle: $BundleFileCount files"
+
+$SizeMb = [math]::Round((Get-Item -LiteralPath $BundleExe).Length / 1MB, 1)
+Write-Host "Validated one-file executable: $SizeMb MB"
 Write-Host "Done: $BundleExe"

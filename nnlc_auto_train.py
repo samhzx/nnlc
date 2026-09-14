@@ -40,6 +40,13 @@ import threading
 import time
 import tempfile
 
+from nnlc_runtime import (
+    RuntimeBootstrapError,
+    ensure_windows_runtime,
+    load_runtime_config,
+    runtime_paths,
+)
+
 
 def _configure_console_encoding():
     """Use UTF-8 when a Windows console is available.
@@ -72,20 +79,16 @@ _configure_console_encoding()
 # 训练库根目录（脚本自动定位，支持目录迁移）
 NNLC_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# PyInstaller extracts a one-file application to ``sys._MEIPASS``.  Keep all
-# resource lookups in one place so the same entry point works from source and
-# from the bundled Windows executable.
+# PyInstaller extracts the application code and training scripts to
+# ``sys._MEIPASS``. The reusable Julia runtime remains beside the EXE.
 RESOURCE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(NNLC_TOOLS_DIR))
 
 
-def _resource_path(*parts):
-    return os.path.join(RESOURCE_DIR, *parts)
-
 # Julia 可执行文件路径（相对于 NNLC_TOOLS_DIR 的上级目录）
 def get_julia_exe():
-    """Return the bundled Julia executable, or the source-tree copy."""
+    """Return the external packaged Julia executable, or the source-tree copy."""
     if getattr(sys, "frozen", False):
-        return _resource_path("julia-runtime", "bin", "julia.exe")
+        return str(runtime_paths().julia_exe)
     return os.path.join(
         os.path.dirname(NNLC_TOOLS_DIR),
         "julia-1.10.11", "julia-1.10.11", "bin", "julia.exe"
@@ -93,10 +96,90 @@ def get_julia_exe():
 
 
 def get_julia_depot():
-    """Return the bundled Julia depot when running from the packaged app."""
+    """Return the external packaged Julia depot when running from the app."""
     if getattr(sys, "frozen", False):
-        return _resource_path("julia-depot")
+        return str(runtime_paths().julia_depot)
     return os.environ.get("JULIA_DEPOT_PATH", "")
+
+
+def _prepare_bundled_runtime(gui_mode):
+    """Prepare the external Julia environment before opening the main app."""
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return
+
+    if not gui_mode:
+        try:
+            config = load_runtime_config()
+            ensure_windows_runtime(config=config)
+        except RuntimeBootstrapError as exc:
+            print_error(str(exc))
+            raise SystemExit(2) from exc
+        return
+
+    import webbrowser
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.withdraw()
+    progress_window = tk.Toplevel(root)
+    progress_window.title("准备 NNLC 训练环境")
+    progress_window.resizable(False, False)
+    progress_window.protocol("WM_DELETE_WINDOW", lambda: None)
+    frame = ttk.Frame(progress_window, padding=20)
+    frame.grid(row=0, column=0, sticky="nsew")
+    status_var = tk.StringVar(value="正在检查 Julia 运行环境...")
+    detail_var = tk.StringVar(value="")
+    ttk.Label(frame, textvariable=status_var, font=("Microsoft YaHei UI", 11, "bold")).grid(
+        row=0, column=0, sticky="w"
+    )
+    progress = ttk.Progressbar(frame, length=460, mode="indeterminate")
+    progress.grid(row=1, column=0, sticky="ew", pady=(14, 8))
+    ttk.Label(frame, textvariable=detail_var, width=64).grid(row=2, column=0, sticky="w")
+    progress.start(12)
+    progress_window.update_idletasks()
+    width = progress_window.winfo_reqwidth()
+    height = progress_window.winfo_reqheight()
+    x = max(0, (progress_window.winfo_screenwidth() - width) // 2)
+    y = max(0, (progress_window.winfo_screenheight() - height) // 2)
+    progress_window.geometry(f"{width}x{height}+{x}+{y}")
+    progress_window.deiconify()
+    progress_window.lift()
+    root.update()
+
+    determinate = False
+    config = None
+
+    def update_progress(completed, total, filename):
+        nonlocal determinate
+        status_var.set("首次运行，正在解压 Julia 环境...")
+        detail_var.set(os.path.basename(filename) or filename)
+        if total > 0:
+            if not determinate:
+                progress.stop()
+                progress.configure(mode="determinate")
+                determinate = True
+            progress.configure(maximum=total)
+            progress["value"] = min(completed, total)
+        root.update()
+
+    try:
+        config = load_runtime_config()
+        ensure_windows_runtime(config=config, progress_callback=update_progress)
+    except RuntimeBootstrapError as exc:
+        progress_window.destroy()
+        release_url = config.release_url if config is not None else ""
+        if release_url:
+            message = f"{exc}\n\n是否打开 Julia 环境下载页面？"
+            if messagebox.askyesno("Julia 运行环境不可用", message, parent=root):
+                webbrowser.open(release_url)
+        else:
+            messagebox.showerror("Julia 运行环境不可用", str(exc), parent=root)
+        root.destroy()
+        raise SystemExit(2) from exc
+    else:
+        progress_window.destroy()
+        root.destroy()
 
 # 训练脚本路径（相对于 NNLC_TOOLS_DIR）
 TRAINING_SCRIPT = "training/latmodel_temporal.jl"
@@ -1421,8 +1504,10 @@ def main():
 
     # Double-clicking the packaged exe opens the GUI.  Source users retain the
     # original terminal prompts unless they explicitly request ``--gui``.
-    if args.gui or (not args.data and not args.car):
+    gui_mode = args.gui or (not args.data and not args.car)
+    if gui_mode:
         if args.gui or getattr(sys, "frozen", False):
+            _prepare_bundled_runtime(gui_mode=True)
             from nnlc_gui import launch_gui
             launch_gui()
         else:
@@ -1435,6 +1520,7 @@ def main():
     if not args.car:
         parser.error("--car 参数必填（或使用交互模式）")
 
+    _prepare_bundled_runtime(gui_mode=False)
     auto_train(
         args.data,
         args.car,

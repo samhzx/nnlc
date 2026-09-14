@@ -1,9 +1,5 @@
 name: Build Windows EXE
 
-# Push-triggered runs use the Git commit subject as their title.  For the
-# current manual workflow, GitHub does not include a commit message in the
-# workflow_dispatch payload, so ``run_name`` is available as an optional
-# fallback in the Actions form.
 run-name: ${{ inputs.run_name || github.event.head_commit.message || format('Build Windows EXE ({0})', github.ref_name) }}
 
 on:
@@ -30,125 +26,40 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Julia
-        uses: julia-actions/setup-julia@v2
-        with:
-          version: "1.10.11"
-          arch: x64
-
-      - name: Build self-contained executable
+      - name: Run unit tests
         shell: pwsh
         run: |
-          $juliaExe = (Get-Command julia).Source
-          $juliaDir = Split-Path (Split-Path $juliaExe -Parent) -Parent
-          .\build_windows.ps1 -JuliaDir $juliaDir
+          py -3.11 -m pip install --upgrade pip
+          py -3.11 -m pip install -e . pytest
+          py -3.11 -m pytest -q
 
-      - name: Verify one-dir bundle
+      - name: Build one-file executable
         shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $bundleDir = "dist\NNLC_Trainer"
-          $bundleExe = Join-Path $bundleDir "NNLC_Trainer.exe"
-          if (-not (Test-Path $bundleExe)) {
-            throw "Expected one-dir executable was not found: $bundleExe"
-          }
-          if (Test-Path "dist\NNLC_Trainer.exe") {
-            throw "Unexpected one-file executable found at dist\NNLC_Trainer.exe"
-          }
-          $bundledJulia = Join-Path $bundleDir "_internal\julia-runtime\bin\julia.exe"
-          if (-not (Test-Path -LiteralPath $bundledJulia -PathType Leaf)) {
-            throw "Bundled Julia executable is missing or is not a file: $bundledJulia"
-          }
-          & $bundledJulia --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "Bundled Julia failed to start ($LASTEXITCODE)"
-          }
-          $env:JULIA_DEPOT_PATH = (Resolve-Path (Join-Path $bundleDir "_internal\julia-depot")).Path
-          $compiledCache = Join-Path $env:JULIA_DEPOT_PATH "compiled"
-          $oldCacheBytes = 0
-          if (Test-Path -LiteralPath $compiledCache) {
-            $oldCacheBytes = (Get-ChildItem -LiteralPath $compiledCache -Recurse -File | Measure-Object -Property Length -Sum).Sum
-            Remove-Item -LiteralPath $compiledCache -Recurse -Force
-          }
-          Write-Host "Removed relocated Julia compiled cache: $([math]::Round($oldCacheBytes / 1MB, 1)) MB"
-          $env:NNLC_WINDOWS_CPU_BUILD = "1"
-          $env:NNLC_PRECOMPILE_ONLY = "1"
-          $precompileScript = Join-Path $bundleDir "_internal\training\install_packages.jl"
-          & $bundledJulia --startup-file=no $precompileScript
-          if ($LASTEXITCODE -ne 0) {
-            throw "Bundled Julia package precompile test failed ($LASTEXITCODE)"
-          }
-          Remove-Item Env:\NNLC_PRECOMPILE_ONLY -ErrorAction SilentlyContinue
-          $newCacheBytes = (Get-ChildItem -LiteralPath $compiledCache -Recurse -File | Measure-Object -Property Length -Sum).Sum
-          Write-Host "Final-location Julia compiled cache: $([math]::Round($newCacheBytes / 1MB, 1)) MB"
-          foreach ($cacheDirName in @("scratchspaces", "logs", "clones")) {
-            Remove-Item -LiteralPath (Join-Path $env:JULIA_DEPOT_PATH $cacheDirName) -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          $trainingScript = Join-Path $bundleDir "_internal\training\latmodel_temporal.jl"
-          if (-not (Test-Path -LiteralPath $trainingScript -PathType Leaf)) {
-            throw "Bundled training script is missing or is not a file: $trainingScript"
-          }
-          $socketExtensions = @(Get-ChildItem -LiteralPath (Join-Path $bundleDir "_internal") -Recurse -File -Filter "_socket*.pyd")
-          if ($socketExtensions.Count -eq 0) {
-            throw "Python _socket extension is missing from the one-dir bundle"
-          }
-          $helpOutput = (& $bundleExe --help 2>&1 | Out-String)
-          $helpExitCode = $LASTEXITCODE
-          Write-Host $helpOutput
-          if ($helpExitCode -ne 0 -or $helpOutput -match "Traceback|UnicodeEncodeError") {
-            throw "Bundled NNLC_Trainer --help failed or printed a Python traceback ($helpExitCode)"
-          }
-          $fileCount = @(Get-ChildItem -Recurse -File $bundleDir).Count
-          if ($fileCount -lt 10) {
-            throw "Bundle contains only $fileCount files; expected a one-dir dependency bundle"
-          }
-          @(
-            "Packaging mode: one-dir"
-            "Commit: $env:GITHUB_SHA"
-            "Files: $fileCount"
-            "Executable: $bundleExe"
-          ) | Set-Content (Join-Path $bundleDir "BUILD_INFO.txt") -Encoding UTF8
-          $bytes = (Get-ChildItem -Recurse -File $bundleDir | Measure-Object -Property Length -Sum).Sum
-          $sizeGb = [math]::Round($bytes / 1GB, 2)
-          Write-Host "Bundle size before archive compression: $sizeGb GB"
-          Get-ChildItem $bundleDir
+        run: .\build_windows.ps1
 
-      - name: Compress one-dir bundle
+      - name: Verify release layout
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
-          if (-not $sevenZip) {
-            $sevenZip = Join-Path ${env:ProgramFiles} "7-Zip\7z.exe"
+          $bundleExe = "dist\NNLC_Trainer.exe"
+          if (-not (Test-Path -LiteralPath $bundleExe -PathType Leaf)) {
+            throw "Expected one-file executable was not found: $bundleExe"
           }
-          if (-not (Test-Path -LiteralPath $sevenZip -PathType Leaf)) {
-            throw "7-Zip was not found on the Windows runner"
+          if (Test-Path -LiteralPath "dist\NNLC_Trainer" -PathType Container) {
+            throw "Unexpected one-dir output found at dist\NNLC_Trainer"
           }
-          $archivePath = Join-Path $PWD "dist\NNLC_Trainer-windows-x64-onedir.7z"
-          Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
-          # Julia's compiled files and artifacts are already numerous binary
-          # files.  A solid LZMA2 archive improves cross-file compression and
-          # avoids GitHub's per-file ZIP overhead.
-          & $sevenZip a -t7z -mx=9 -m0=lzma2 -ms=on $archivePath "dist\NNLC_Trainer" | Write-Host
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
-            throw "Failed to create the compressed one-dir archive ($LASTEXITCODE)"
+          $distFiles = @(Get-ChildItem -LiteralPath "dist" -File)
+          if ($distFiles.Count -ne 1 -or $distFiles[0].Name -ne "NNLC_Trainer.exe") {
+            throw "dist must contain only NNLC_Trainer.exe: $($distFiles.Name -join ', ')"
           }
-          & $sevenZip t $archivePath | Write-Host
-          if ($LASTEXITCODE -ne 0) {
-            throw "Compressed one-dir archive failed integrity verification ($LASTEXITCODE)"
-          }
-          $archiveBytes = (Get-Item -LiteralPath $archivePath).Length
-          $archiveMb = [math]::Round($archiveBytes / 1MB, 1)
-          Write-Host "Compressed archive size: $archiveMb MB"
-          Get-Item -LiteralPath $archivePath
+          $sizeMb = [math]::Round((Get-Item -LiteralPath $bundleExe).Length / 1MB, 1)
+          Write-Host "One-file executable size: $sizeMb MB"
 
-      - name: Upload compressed one-dir bundle
+      - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: NNLC_Trainer-windows-x64-onedir-7z
-          path: dist/NNLC_Trainer-windows-x64-onedir.7z
+          name: NNLC_Trainer-windows-x64-exe
+          path: dist/NNLC_Trainer.exe
           if-no-files-found: error
-          # The payload is already solid-compressed by 7-Zip.  Avoid wrapping
-          # it in another expensive ZIP compression pass.
           compression-level: 0
           retention-days: 14
