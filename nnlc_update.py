@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,7 @@ MANIFEST_MAX_BYTES = 64 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
 PROGRESS_INTERVAL_SECONDS = 0.2
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
+CANCEL_POLL_INTERVAL_SECONDS = 0.05
 
 
 class UpdateError(RuntimeError):
@@ -204,6 +206,8 @@ def download_update(
     downloaded = 0
     last_progress = 0.0
     completed = False
+    stop_cancel_watcher = threading.Event()
+    cancel_watcher = None
 
     def emit_progress(force: bool = False) -> None:
         nonlocal last_progress
@@ -217,6 +221,25 @@ def download_update(
 
     try:
         with _urlopen(manifest.url) as response, part_path.open("wb") as handle:
+            if cancel_event is not None:
+                def watch_for_cancel() -> None:
+                    while not stop_cancel_watcher.wait(CANCEL_POLL_INTERVAL_SECONDS):
+                        if not cancel_event.is_set():
+                            continue
+                        close = getattr(response, "close", None)
+                        if close is not None:
+                            try:
+                                close()
+                            except OSError:
+                                pass
+                        return
+
+                cancel_watcher = threading.Thread(
+                    target=watch_for_cancel,
+                    name="nnlc-update-cancel-watcher",
+                    daemon=True,
+                )
+                cancel_watcher.start()
             emit_progress(force=True)
             while True:
                 if cancel_event is not None and cancel_event.is_set():
@@ -241,7 +264,12 @@ def download_update(
     except UpdateError:
         raise
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise UpdateError("已取消下载。") from exc
         raise UpdateError(f"下载更新失败: {exc}") from exc
     finally:
+        stop_cancel_watcher.set()
+        if cancel_watcher is not None and cancel_watcher.is_alive():
+            cancel_watcher.join(timeout=0.2)
         if not completed:
             _cleanup_incomplete_download(part_path)

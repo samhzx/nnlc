@@ -496,6 +496,13 @@ class NNLCApp:
             thread = self.update_thread
             if thread is not None and thread.is_alive():
                 thread.join(timeout=2)
+            manifest = self.pending_update
+            if manifest is not None:
+                partial_path = application_directory() / (manifest.filename + ".part")
+                try:
+                    partial_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self._close_download_window()
         self.root.destroy()
 
@@ -710,7 +717,7 @@ class NNLCApp:
         self.update_thread = threading.Thread(
             target=self._download_update_worker,
             args=(manifest,),
-            daemon=False,
+            daemon=True,
         )
         self.update_thread.start()
 

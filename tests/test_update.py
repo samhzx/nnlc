@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -214,4 +215,47 @@ def test_interrupted_download_deletes_partial_files(tmp_path, monkeypatch):
     with pytest.raises(UpdateError, match="下载更新失败"):
         download_update(manifest, dest_dir=tmp_path)
 
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cancel_closes_blocked_response_and_cleans_partial_file(tmp_path, monkeypatch):
+    content = b"data"
+    manifest = parse_manifest(
+        make_manifest(size=len(content), sha256=hashlib.sha256(content).hexdigest())
+    )
+    cancel_event = threading.Event()
+
+    class BlockingResponse(FakeResponse):
+        def __init__(self):
+            super().__init__(content)
+            self.closed = threading.Event()
+
+        def read(self, size: int = -1):
+            self.closed.wait(2)
+            if not self.closed.is_set():
+                raise TimeoutError("test response remained blocked")
+            raise OSError("response closed")
+
+        def close(self):
+            self.closed.set()
+
+    response = BlockingResponse()
+    monkeypatch.setattr("nnlc_update._urlopen", lambda url: response)
+    errors = []
+
+    def run_download():
+        try:
+            download_update(manifest, dest_dir=tmp_path, cancel_event=cancel_event)
+        except UpdateError as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_download)
+    thread.start()
+    time.sleep(0.05)
+    cancel_event.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert response.closed.is_set()
+    assert errors and "取消" in str(errors[0])
     assert list(tmp_path.iterdir()) == []
