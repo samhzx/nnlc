@@ -194,6 +194,8 @@ uv pip install -e .
 uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
 ```
 
+提取器默认使用 `auto` 并行解析 rlog，最多启动 16 个 worker，并按原始 rlog 顺序合并结果。需要排查问题或在机械硬盘、低内存设备上运行时，可以使用 `--rlog-workers 1` 恢复串行模式，也可以手动指定较小的并行度。SSD 通常适合更高并行度；超线程可能带来一定吞吐提升，但实际收益取决于 rlog 解压、磁盘速度和物理 CPU 核心数，不能简单按逻辑核心数设置。
+
 ## 快速开始
 
 完整流程：**提取 → 评分 → 剪枝路线 → 可视化 → 分类并剪枝 → 训练 → 部署**。请先将设备中的 rlog 文件复制到本地目录，再从下面的第 1 步开始。
@@ -208,6 +210,10 @@ python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv
 
 # 包含时序特征（训练必需）
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv --temporal
+
+# 指定 4 个 rlog worker；--rlog-workers 1 可恢复串行模式
+python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv \
+  --temporal --rlog-workers 4
 
 # Parquet 格式（大型数据集更快）
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parquet --format parquet
@@ -348,7 +354,7 @@ cp my_car_model.json /path/to/openpilot/sunnypilot/neural_network_data/neural_ne
 ### extract_lateral_data
 
 ```
-python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] [--skip-corrupt] input
+python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] [--skip-corrupt] [--rlog-workers N] input
 
   input               包含 rlog 文件的目录
   -o, --output        输出文件路径（默认：lateral_data.csv）
@@ -356,11 +362,12 @@ python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parque
   --temporal          添加 NNLC 训练所需的时序滞后/超前列
   --filter-overrides  删除驾驶员接管的行（steering_pressed=True）
   --skip-corrupt      跳过无法解析的损坏 rlog，继续处理其他文件并在末尾列出
+  --rlog-workers N    rlog 并行解析 worker 数（正整数或 auto，默认 auto；1 为串行模式）
 ```
 
 提取器默认使用严格模式，遇到损坏日志会立即停止。确认部分日志可能在下载时仍处于写入状态时，可使用 `--skip-corrupt` 跳过这些文件；训练前应检查日志中的跳过清单，并确认剩余数据量充足。
 
-每个 rlog 都在主提取进程之外的可重启工作进程中解析，运行日志会即时打印当前文件的完整路径。工作进程每处理 100 个文件会主动重启，避免原生解析库长期运行产生资源累积。若 `pycapnp` 等原生库导致工作进程崩溃，容错模式会在全新进程中重试当前文件一次，仍失败才记录并跳过；严格模式会显示该文件路径和退出码后立即停止。只有工作进程完整返回的分段 CSV 才会合并到最终数据中，崩溃产生的半截文件不会参与训练。
+每个 rlog 都在主提取进程之外的独立工作进程中解析，多个 worker 可以同时处理不同 rlog。运行日志会即时打印完成文件的完整路径，最终 CSV 始终按输入 rlog 顺序合并；每个 rlog 的 temporal 窗口也只在当前 rlog 内计算，不会跨文件串联。工作进程每处理 100 个文件会主动重启，避免原生解析库长期运行产生资源累积。若 `pycapnp` 等原生库导致 worker 崩溃，容错模式会在全新进程中重试当前文件一次，仍失败才记录并跳过；严格模式会显示该文件路径和退出码后立即停止。只有 worker 完整返回的分段 CSV 才会合并到最终数据中，崩溃产生的半截文件不会参与训练。
 
 ### score_routes
 

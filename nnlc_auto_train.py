@@ -484,11 +484,11 @@ def validate_data_dir(data_dir):
 # ============================================================
 
 def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False,
-                 cancel_event=None, process_holder=None):
+                 cancel_event=None, process_holder=None, rlog_workers="auto"):
     """步骤1: 提取横向控制数据。"""
     output_csv = os.path.join(output_dir, "lateral_data.csv")
     command = [python_exe, "-m", "nnlc_tools.extract_lateral_data", data_dir,
-               "-o", output_csv, "--temporal"]
+               "-o", output_csv, "--temporal", "--rlog-workers", str(rlog_workers)]
     if skip_corrupt_rlogs:
         command.append("--skip-corrupt")
     run_command(
@@ -1105,7 +1105,8 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                skip_visualize=False, output_dir=None, deploy_dir=None,
                cancel_event=None, process_holder=None, batch_size=16384,
                force_cpu=True, skip_corrupt_rlogs=False,
-               streaming_mode=False, keep_intermediates=True):
+               streaming_mode=False, keep_intermediates=True,
+               rlog_workers="auto"):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -1121,6 +1122,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         batch_size: Julia 训练批次大小，默认 16384；较小值可降低内存峰值
         force_cpu: 兼容旧调用方的参数；当前训练始终使用 CPU
         skip_corrupt_rlogs: 是否跳过无法解析的损坏 rlog 并继续提取
+        rlog_workers: rlog 并行解析 worker 数，正整数或 auto
         streaming_mode: 是否使用分块评分、剪枝、可视化和 Julia 流式训练
         keep_intermediates: 是否保留完整中间 CSV 文件
 
@@ -1172,6 +1174,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         skip_corrupt_rlogs=skip_corrupt_rlogs,
         cancel_event=cancel_event,
         process_holder=process_holder,
+        rlog_workers=rlog_workers,
     )
 
     # ---- 步骤 2: 评估路线质量 ----
@@ -1399,6 +1402,12 @@ def main():
     parser.add_argument("--cpu", action="store_true", help="兼容参数；训练始终使用 CPU")
     parser.add_argument("--skip-corrupt", action="store_true",
                         help="跳过无法解析的损坏 rlog 并继续提取")
+    parser.add_argument(
+        "--rlog-workers",
+        default="auto",
+        metavar="N",
+        help="rlog 并行解析 worker 数（正整数或 auto；默认 auto，1 为串行模式）",
+    )
     parser.add_argument("--streaming", action="store_true",
                         help="使用流式评分、剪枝、覆盖度统计和 Julia 训练")
     parser.add_argument("--no-keep-intermediates", action="store_true",
@@ -1439,6 +1448,7 @@ def main():
         skip_corrupt_rlogs=args.skip_corrupt,
         streaming_mode=args.streaming,
         keep_intermediates=not args.no_keep_intermediates,
+        rlog_workers=args.rlog_workers,
     )
 
 

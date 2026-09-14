@@ -772,12 +772,13 @@
           <li><strong>确认输入目录</strong>目录必须存在，并且内部至少包含一个受支持的 rlog 文件。</li>
           <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
           <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
-          <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。</li>
+          <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。rlog 提取默认自动使用多个 worker 并行解析。</li>
           <li><strong>点击开始训练</strong>运行日志会先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。</li>
           <li><strong>观察日志</strong>进度条表示任务仍在运行，不表示准确百分比；右侧计时显示已运行时间。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
         </ol>
         <div class="callout warning"><strong>首次 Julia 训练可能 3 至 10 分钟没有新输出。</strong>这是 Julia 编译依赖的正常现象。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。</div>
+        <div class="callout"><strong>rlog 并行提示：</strong>命令行默认自动选择并行度，`--rlog-workers 1` 可恢复串行模式。SSD 通常适合更高并行度，机械硬盘或低内存设备应降低 worker 数。超线程可能提升吞吐，但收益取决于解压、磁盘和物理核心数，建议通过实际基准测试选择。</div>
         <div class="callout danger"><strong>不要直接强制关闭。</strong>训练中点击窗口关闭按钮会询问是否中断。确认退出后，GUI 会结束当前 Python/Julia 子进程树；未完成的模型不会部署。</div>
         <h3>日志颜色含义</h3>
         <div class="legend-grid">

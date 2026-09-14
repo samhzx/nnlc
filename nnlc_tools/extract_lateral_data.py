@@ -13,6 +13,7 @@ Usage:
 import argparse
 import csv
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
 import io
 import json
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -34,6 +36,7 @@ from nnlc_tools.route_utils import extract_route_id
 
 RLOG_WORKER_MODULE = "nnlc_tools.extract_rlog_worker"
 MAX_RLOGS_PER_WORKER = 100
+MAX_RLOG_WORKERS = 16
 
 # Temporal offsets matching nnlc.py's past_times and future_times
 PAST_TIMES = [-0.3, -0.2, -0.1]
@@ -551,6 +554,16 @@ class _RlogWorker:
             stderr.close()
             self._stderr = None
 
+    def interrupt(self):
+        """Stop a blocked request without closing streams from another thread."""
+        process = getattr(self, "_process", None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+        except (OSError, AttributeError):
+            pass
+
 
 def _csv_header_bytes(columns):
     buffer = io.StringIO(newline="")
@@ -571,111 +584,262 @@ def _discard_worker_output(path):
         print(f"WARNING: Unable to remove temporary rlog output: {path}", flush=True)
 
 
+def resolve_rlog_workers(value, rlog_count):
+    """Resolve the requested worker count without overloading the host."""
+    if rlog_count <= 0:
+        return 1
+    if value is None or str(value).strip().lower() == "auto":
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(cpu_count, rlog_count, MAX_RLOG_WORKERS))
+    try:
+        worker_count = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rlog worker 数必须是正整数或 auto") from exc
+    if worker_count <= 0:
+        raise ValueError("rlog worker 数必须是正整数或 auto")
+    return min(worker_count, rlog_count)
+
+
+class _RlogWorkerSlot:
+    """Own one restartable worker process and serialize its requests."""
+
+    def __init__(self, worker_factory):
+        self.worker_factory = worker_factory
+        self.worker = None
+        self._lock = threading.Lock()
+
+    def process(self, request):
+        with self._lock:
+            if self.worker is None:
+                self.worker = self.worker_factory()
+            elif getattr(self.worker, "files_processed", 0) >= MAX_RLOGS_PER_WORKER:
+                self._close_unlocked()
+                self.worker = self.worker_factory()
+            return self.worker.process(request)
+
+    def close(self):
+        with self._lock:
+            self._close_unlocked()
+
+    def terminate(self):
+        """Interrupt an in-flight request without waiting for its lock."""
+        worker = self.worker
+        if worker is not None:
+            worker.interrupt()
+
+    def _close_unlocked(self):
+        if self.worker is not None:
+            self.worker.close()
+            self.worker = None
+
+
+def _extract_one_rlog(slot, index, rlog_path, output_dir, segment_prefix, temporal,
+                      filter_overrides, skip_corrupt, cancel_event=None,
+                      stop_event=None):
+    """Parse one rlog into a private segment file for ordered merging."""
+    crash_retries = 0
+    while True:
+        if ((cancel_event is not None and cancel_event.is_set())
+                or (stop_event is not None and stop_event.is_set())):
+            raise RuntimeError("提取已取消")
+        segment_file = tempfile.NamedTemporaryFile(
+            prefix=f"{segment_prefix}{index:08d}_",
+            suffix=".csv",
+            dir=output_dir,
+            delete=False,
+        )
+        segment_path = segment_file.name
+        segment_file.close()
+        try:
+            response = slot.process({
+                "rlog_path": rlog_path,
+                "output_path": segment_path,
+                "temporal": temporal,
+                "filter_overrides": filter_overrides,
+                "route_id": extract_route_id(rlog_path),
+            })
+        except RlogWorkerCrash as exc:
+            slot.close()
+            _discard_worker_output(segment_path)
+            if skip_corrupt and crash_retries == 0:
+                crash_retries += 1
+                continue
+            reason = str(exc)
+            if skip_corrupt:
+                return {
+                    "index": index,
+                    "rlog_path": rlog_path,
+                    "status": "skipped",
+                    "reason": reason,
+                }
+            raise RuntimeError(
+                f"rlog worker crashed while processing {rlog_path}: {reason}"
+            ) from exc
+        except Exception:
+            _discard_worker_output(segment_path)
+            raise
+
+        if response.get("status") != "ok":
+            reason = (
+                f"{response.get('error_type', 'Error')}: "
+                f"{response.get('error', 'unknown worker error')}"
+            )
+            _discard_worker_output(segment_path)
+            if skip_corrupt:
+                return {
+                    "index": index,
+                    "rlog_path": rlog_path,
+                    "status": "skipped",
+                    "reason": reason,
+                }
+            raise RuntimeError(f"Error processing {rlog_path}: {reason}")
+
+        return {
+            "index": index,
+            "rlog_path": rlog_path,
+            "status": "ok",
+            "segment_path": segment_path,
+            "rows_written": int(response["rows_written"]),
+            "rows_seen": int(response["rows_seen"]),
+            "rows_filtered": int(response["rows_filtered"]),
+        }
+
+
 def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
                          filter_overrides=False, skip_corrupt=False,
-                         show_progress=True, worker_factory=None):
-    """Extract rlogs through a restartable native-parser worker.
+                         show_progress=True, worker_factory=None,
+                         rlog_workers="auto", cancel_event=None):
+    """Extract rlogs through a restartable parallel native-parser worker pool.
 
-    The worker is recycled periodically to bound native-library resource
-    accumulation. In tolerant mode a native crash is retried once in a fresh
-    worker before the current rlog is classified as unreadable and skipped.
+    Each worker is isolated in a child process. Results are merged in the
+    original input order so parallel execution remains deterministic.
     """
     worker_factory = worker_factory or _RlogWorker
+    rlog_files = [os.fspath(path) for path in rlog_files]
+    worker_count = resolve_rlog_workers(rlog_workers, len(rlog_files))
     output_columns = COLUMNS + (
         [spec[2] for spec in _temporal_column_specs()] if temporal else []
     ) + ["route_id"]
     expected_header = _csv_header_bytes(output_columns)
     skipped_rlogs = []
     rows_written = rows_seen = rows_filtered = 0
-    worker = None
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    segment_prefix = f".nnlc_rlog_{os.getpid()}_{time.time_ns()}_"
+    slots = [_RlogWorkerSlot(worker_factory) for _ in range(worker_count)]
+    executor = None
+    pending_segments = set()
+    aborted = False
+    stop_event = threading.Event()
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-    progress = tqdm(rlog_files, desc="Processing rlogs", disable=not show_progress)
+    progress = tqdm(
+        total=len(rlog_files),
+        desc=f"Processing rlogs ({worker_count} workers)",
+        disable=not show_progress,
+    )
     try:
         with open(output_path, "wb") as output:
             output.write(expected_header)
-            for index, rlog_path in enumerate(progress, start=1):
-                rlog_path = os.fspath(rlog_path)
-                if show_progress:
-                    print(
-                        f"Current rlog [{index}/{len(rlog_files)}]: {rlog_path}",
-                        flush=True,
-                    )
-                crash_retries = 0
-                while True:
-                    segment_file = tempfile.NamedTemporaryFile(
-                        prefix=".nnlc_rlog_", suffix=".csv",
-                        dir=os.path.dirname(os.path.abspath(output_path)),
-                        delete=False,
-                    )
-                    segment_path = segment_file.name
-                    segment_file.close()
-                    try:
-                        if worker is None:
-                            worker = worker_factory()
-                        response = worker.process({
-                            "rlog_path": rlog_path,
-                            "output_path": segment_path,
-                            "temporal": temporal,
-                            "filter_overrides": filter_overrides,
-                            "route_id": extract_route_id(rlog_path),
-                        })
-                    except RlogWorkerCrash as exc:
-                        if worker is not None:
-                            worker.close()
-                            worker = None
-                        _discard_worker_output(segment_path)
-                        if skip_corrupt and crash_retries == 0:
-                            crash_retries += 1
-                            print(
-                                f"WARNING: rlog worker crashed while processing: {rlog_path}",
-                                flush=True,
-                            )
-                            print(f"  Reason: {exc}", flush=True)
-                            print("  Retrying once in a fresh worker...", flush=True)
-                            continue
-                        reason = str(exc)
-                        if skip_corrupt:
-                            skipped_rlogs.append((rlog_path, reason))
-                            print(f"WARNING: Skipping unreadable rlog: {rlog_path}", flush=True)
-                            print(f"  Reason: {reason}", flush=True)
-                            break
-                        raise RuntimeError(
-                            f"rlog worker crashed while processing {rlog_path}: {reason}"
-                        ) from exc
-                    except Exception:
-                        _discard_worker_output(segment_path)
-                        raise
+            executor = ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="nnlc-rlog-dispatch",
+            )
+            task_iter = iter(enumerate(rlog_files))
+            future_to_slot = {}
+            completed = {}
+            next_index = 0
 
-                    try:
-                        if response.get("status") != "ok":
-                            reason = (
-                                f"{response.get('error_type', 'Error')}: "
-                                f"{response.get('error', 'unknown worker error')}"
-                            )
-                            if skip_corrupt:
-                                skipped_rlogs.append((rlog_path, reason))
-                                print(f"WARNING: Skipping unreadable rlog: {rlog_path}", flush=True)
-                                print(f"  Reason: {reason}", flush=True)
-                                break
-                            raise RuntimeError(f"Error processing {rlog_path}: {reason}")
+            def submit_next(slot):
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                try:
+                    index, rlog_path = next(task_iter)
+                except StopIteration:
+                    return
+                future = executor.submit(
+                    _extract_one_rlog,
+                    slot,
+                    index,
+                    rlog_path,
+                    output_dir,
+                    segment_prefix,
+                    temporal,
+                    filter_overrides,
+                    skip_corrupt,
+                    cancel_event,
+                    stop_event,
+                )
+                future_to_slot[future] = slot
 
-                        _append_worker_csv(segment_path, output, expected_header)
+            for slot in slots:
+                submit_next(slot)
+
+            while future_to_slot:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("提取已取消")
+                done, _ = wait(
+                    tuple(future_to_slot),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    slot = future_to_slot.pop(future)
+                    result = future.result()
+                    completed[result["index"]] = result
+                    if result["status"] == "ok":
+                        pending_segments.add(result["segment_path"])
+                    submit_next(slot)
+
+                while next_index in completed:
+                    result = completed.pop(next_index)
+                    rlog_path = result["rlog_path"]
+                    if result["status"] == "skipped":
+                        skipped_rlogs.append((rlog_path, result["reason"]))
+                        print(
+                            f"WARNING: Skipping unreadable rlog: {rlog_path}",
+                            flush=True,
+                        )
+                        print(f"  Reason: {result['reason']}", flush=True)
+                    else:
+                        _append_worker_csv(
+                            result["segment_path"], output, expected_header,
+                        )
                         output.flush()
-                        rows_written += int(response["rows_written"])
-                        rows_seen += int(response["rows_seen"])
-                        rows_filtered += int(response["rows_filtered"])
-                        break
-                    finally:
-                        _discard_worker_output(segment_path)
-
-                if worker is not None and worker.files_processed >= MAX_RLOGS_PER_WORKER:
-                    worker.close()
-                    worker = None
+                        rows_written += result["rows_written"]
+                        rows_seen += result["rows_seen"]
+                        rows_filtered += result["rows_filtered"]
+                        pending_segments.discard(result["segment_path"])
+                        _discard_worker_output(result["segment_path"])
+                    progress.update(1)
+                    if show_progress:
+                        print(
+                            f"Completed rlog [{next_index + 1}/{len(rlog_files)}]: "
+                            f"{rlog_path}",
+                            flush=True,
+                        )
+                    next_index += 1
+    except BaseException:
+        aborted = True
+        stop_event.set()
+        raise
     finally:
         progress.close()
-        if worker is not None:
-            worker.close()
+        if aborted or (cancel_event is not None and cancel_event.is_set()):
+            # Closing the child processes first wakes tasks blocked in
+            # readline(), allowing the dispatcher threads to exit cleanly.
+            for slot in slots:
+                slot.terminate()
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+        for slot in slots:
+            slot.close()
+        for segment_path in pending_segments:
+            _discard_worker_output(segment_path)
+        # A worker may have finished successfully while the main thread was
+        # handling another worker's failure. Remove any segment not yet
+        # reported back to the merger.
+        for name in os.listdir(output_dir):
+            if name.startswith(segment_prefix) and name.endswith(".csv"):
+                _discard_worker_output(os.path.join(output_dir, name))
 
     return {
         "rows_written": rows_written,
@@ -720,6 +884,12 @@ def main():
                         help="Drop rows where driver overrides (steering_pressed=True)")
     parser.add_argument("--skip-corrupt", action="store_true",
                         help="Skip unreadable/corrupt rlog files and continue; report them at the end")
+    parser.add_argument(
+        "--rlog-workers",
+        default="auto",
+        metavar="N",
+        help="rlog 并行解析 worker 数（正整数或 auto，默认 auto；1 为串行模式）",
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.input):
@@ -763,6 +933,7 @@ def main():
                 temporal=args.temporal,
                 filter_overrides=args.filter_overrides,
                 skip_corrupt=args.skip_corrupt,
+                rlog_workers=args.rlog_workers,
             )
             rows_written = stats["rows_written"]
             rows_seen = stats["rows_seen"]
@@ -805,6 +976,7 @@ def main():
                 temporal=args.temporal,
                 filter_overrides=args.filter_overrides,
                 skip_corrupt=args.skip_corrupt,
+                rlog_workers=args.rlog_workers,
             )
             extraction_success = stats["rows_written"] > 0
         finally:
