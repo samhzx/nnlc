@@ -8,6 +8,55 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 
+function Remove-JuliaPackageOptionalDirectories {
+    param([Parameter(Mandatory = $true)][string]$DepotPath)
+
+    $PackagesRoot = Join-Path $DepotPath "packages"
+    if (-not (Test-Path -LiteralPath $PackagesRoot -PathType Container)) {
+        return
+    }
+
+    $OptionalDirectoryNames = @(
+        ".github",
+        "benchmark",
+        "benchmarks",
+        "docs"
+    )
+    $RemovedCount = 0
+    foreach ($PackageDir in (Get-ChildItem -LiteralPath $PackagesRoot -Directory -Force)) {
+        foreach ($PackageVersionDir in (Get-ChildItem -LiteralPath $PackageDir.FullName -Directory -Force)) {
+            foreach ($DirectoryName in $OptionalDirectoryNames) {
+                $Candidate = Join-Path $PackageVersionDir.FullName $DirectoryName
+                if (Test-Path -LiteralPath $Candidate) {
+                    Remove-Item -LiteralPath $Candidate -Recurse -Force
+                    $RemovedCount += 1
+                }
+            }
+        }
+    }
+    Write-Host "Removed $RemovedCount Julia package documentation/CI/benchmark directories."
+}
+
+function Remove-UnreadableJuliaDepotItems {
+    param([Parameter(Mandatory = $true)][string]$DepotPath)
+
+    if (-not (Test-Path -LiteralPath $DepotPath -PathType Container)) {
+        return
+    }
+
+    $RemovedCount = 0
+    Get-ChildItem -LiteralPath $DepotPath -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            $RemovedCount += 1
+            Write-Host "Removed unreadable Julia depot item: $($_.FullName)"
+        }
+    if ($RemovedCount -gt 0) {
+        Write-Host "Removed $RemovedCount unreadable Julia depot items."
+    }
+}
+
 $Config = Get-Content (Join-Path $ProjectDir "windows_runtime.json") -Raw | ConvertFrom-Json
 $JuliaDir = (Resolve-Path $JuliaDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $JuliaDir "bin\julia.exe") -PathType Leaf)) {
@@ -66,6 +115,8 @@ try {
 foreach ($CacheDirName in @("scratchspaces", "logs", "clones")) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $DepotTarget $CacheDirName)
 }
+Remove-JuliaPackageOptionalDirectories -DepotPath $DepotTarget
+Remove-UnreadableJuliaDepotItems -DepotPath $DepotTarget
 
 $VersionOutput = (& $JuliaExe --startup-file=no --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $VersionOutput -notmatch [regex]::Escape($Config.julia_version)) {
