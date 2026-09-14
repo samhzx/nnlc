@@ -25,6 +25,9 @@ nnlc/
 │   ├── latmodel_temporal.jl   # 主训练脚本（GUI 和自动流程使用）
 │   ├── run.sh                 # Julia 训练启动脚本
 │   └── 其他 *.jl              # 实验或对比模型，不参与默认流程
+├── nnlc_version.py            # 应用版本读取
+├── nnlc_update.py             # Windows EXE 更新检查与下载
+├── build_tools/               # 构建时生成版本资源
 ├── build_windows.ps1          # Windows one-file EXE 构建脚本
 ├── build_julia_runtime.ps1    # 可复用 Julia 环境 ZIP 构建脚本
 ├── windows_runtime.json       # Windows 环境版本与下载配置
@@ -53,16 +56,18 @@ Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命�
 
 Windows 发布物分成两个文件：
 
-- `NNLC_Trainer.exe`：包含 Python、项目代码和训练脚本。日常功能更新只需下载并替换这个文件。
+- `NNLC_Trainer.exe`：包含 Python、项目代码和训练脚本。GUI 顶部显示当前版本；打包后的 Windows 程序启动后会静默检查一次更新。
 - `NNLC_Julia_Runtime-windows-x64-v1.zip`：包含固定的 Julia 1.10.11、CPU 训练依赖和 depot，长期发布在 `julia-runtime-v1` GitHub Release 中。
 
-首次使用时，将 EXE 和环境 ZIP 放在同一个目录并双击 EXE。程序会验证 ZIP，并自动解压为 `NNLC_Runtime`；准备完成后即可训练。只要 `NNLC_Runtime` 完整且版本匹配，ZIP 可以删除，以后更新程序时只替换 `NNLC_Trainer.exe`，不需要重新下载 Julia 环境。
+首次使用时，将 EXE 和环境 ZIP 放在同一个目录并双击 EXE。程序会验证 ZIP，并自动解压为 `NNLC_Runtime`；准备完成后即可训练。只要 `NNLC_Runtime` 完整且版本匹配，ZIP 可以删除。日常更新会把带版本号的新 EXE 下载到当前程序目录，例如 `NNLC_Trainer-1.0.1-windows-x64.exe`，不会覆盖正在运行的文件。关闭当前程序后运行新 EXE 即可，原来的 Julia 环境可以继续使用。
+
+如果 Julia 版本或训练依赖发生变化，不要使用自动更新，改为手动下载新的 EXE 和 Runtime ZIP。
 
 如果 `NNLC_Runtime` 缺失、损坏或版本过旧，程序会要求重新放入正确名称的环境 ZIP，并可打开对应的 GitHub Release 下载页面。不要手工拼接或复制 `NNLC_Runtime` 内部的部分目录。
 
 ### Windows 构建与发布
 
-- 日常应用更新：手动运行 GitHub Actions 的 `Build Windows EXE`，下载 `NNLC_Trainer-windows-x64-exe`；该工作流不安装或打包 Julia。
+- 日常应用更新：手动运行 GitHub Actions 的 `Build Windows EXE`，可填写 `notes`。工作流会生成 `NNLC_Trainer.exe`、版本化 EXE 和 `update.json`。先把版本化 EXE 上传到 `https://file.897242746.xyz/data/NNLC_Trainer/`，确认文件名与 `update.json` 中的 `filename` 一致后，再上传 `update.json`。该工作流不安装或打包 Julia。
 - 首次环境发布：手动运行 `Build Windows Julia Runtime`。工作流会生成环境 ZIP，完成解压、Julia 版本、依赖导入和训练脚本启动检查，然后发布到配置指定的 GitHub Release。
 - Julia 版本或 `training/install_packages.jl` 依赖集合发生变化时，必须同时提升 `windows_runtime.json` 中的 `runtime_version`、ZIP 文件名、Release 标签和下载地址。环境 Release 不允许覆盖已有标签。
 

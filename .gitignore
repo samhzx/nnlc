@@ -14,3 +14,4 @@ data/
 julia-runtime/
 julia-depot/
 NNLC_Runtime/
+release/

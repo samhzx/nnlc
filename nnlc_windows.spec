@@ -84,10 +84,20 @@ def standard_library_extensions(module_name: str):
     return binaries
 
 
+VERSION_ASSETS_DIR = PROJECT_DIR / "build" / "version-assets"
+BUILD_INFO_PATH = VERSION_ASSETS_DIR / "build_info.json"
+VERSION_INFO_PATH = VERSION_ASSETS_DIR / "version_info.txt"
+if not BUILD_INFO_PATH.is_file() or not VERSION_INFO_PATH.is_file():
+    raise SystemExit(
+        "Missing generated version assets. Run "
+        "`python -m build_tools.generate_version_assets` before PyInstaller."
+    )
+
 datas = [
     *directory_datas(PROJECT_DIR / "training", "training"),
     *directory_datas(PROJECT_DIR / "nnlc_tools" / "cereal", "nnlc_tools/cereal"),
     (str(PROJECT_DIR / "windows_runtime.json"), "."),
+    (str(BUILD_INFO_PATH), "."),
 ]
 binaries = standard_library_extensions("_socket")
 hiddenimports = [
@@ -98,6 +108,8 @@ hiddenimports = [
     "multiprocessing.reduction",
     "nnlc_gui",
     "nnlc_runtime",
+    "nnlc_update",
+    "nnlc_version",
     "nnlc_tools",
     "nnlc_tools.logreader",
     "nnlc_tools.extract_lateral_data",
@@ -159,4 +171,5 @@ exe = EXE(
     upx=False,
     console=False,
     icon=None,
+    version=str(VERSION_INFO_PATH),
 )

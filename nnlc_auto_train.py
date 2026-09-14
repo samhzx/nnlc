@@ -46,6 +46,7 @@ from nnlc_runtime import (
     load_runtime_config,
     runtime_paths,
 )
+from nnlc_version import VersionError, get_version
 
 
 def _configure_console_encoding():
@@ -1435,6 +1436,22 @@ def interactive_mode():
     auto_train(data_dir, car_name, min_score, skip_deploy, skip_visualize)
 
 
+def _application_version():
+    try:
+        return get_version()
+    except VersionError as exc:
+        raise SystemExit(f"无法读取程序版本: {exc}") from exc
+
+
+class _PrintVersionAction(argparse.Action):
+    def __init__(self, option_strings, dest, nargs=0, **kwargs):
+        super().__init__(option_strings, dest, nargs=nargs, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(_application_version())
+        parser.exit()
+
+
 def run_bundled_module(module_name, module_args):
     """Run one bundled CLI module in a child EXE process.
 
@@ -1496,6 +1513,11 @@ def main():
     parser.add_argument("--no-keep-intermediates", action="store_true",
                         help="流式模式成功后删除完整中间 CSV")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
+    parser.add_argument(
+        "--version",
+        action=_PrintVersionAction,
+        help="显示程序版本并退出",
+    )
 
     args = parser.parse_args()
 

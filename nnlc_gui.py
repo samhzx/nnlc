@@ -22,6 +22,9 @@ except ImportError:  # Some minimal Python builds (including CI macOS) omit Tk.
     filedialog = messagebox = ttk = None
 
 from nnlc_auto_train import _terminate_process_tree, auto_train
+from nnlc_runtime import application_directory
+from nnlc_update import UpdateError, check_for_update, download_update, format_bytes
+from nnlc_version import get_version
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -99,9 +102,24 @@ class NNLCApp:
         )
         self.status_var = tk.StringVar(value="就绪")
         self.elapsed_var = tk.StringVar(value="")
+        try:
+            self.app_version = get_version()
+        except Exception:
+            self.app_version = "unknown"
+        self.pending_update = None
+        self.update_prompt_shown = False
+        self.update_in_progress = False
+        self.update_cancel_event = threading.Event()
+        self.update_thread = None
+        self.download_window = None
+        self.download_progress = None
+        self.download_status_var = None
+        self._closing = False
         self._build_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_messages()
+        if getattr(sys, "frozen", False) and sys.platform == "win32":
+            self.root.after(1000, self._start_update_check)
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -214,6 +232,11 @@ class NNLCApp:
         )
         ttk.Label(header, text="从 reallog 提取数据，完成评分、训练与模型部署", style="HeaderSubtitle.TLabel").grid(
             row=1, column=0, sticky="w", pady=(5, 0)
+        )
+        style.configure("HeaderVersion.TLabel", background="#16324f", foreground="#d7e6f5",
+                        font=("Microsoft YaHei UI", 11, "bold"))
+        ttk.Label(header, text=f"v{self.app_version}", style="HeaderVersion.TLabel").grid(
+            row=0, column=1, rowspan=2, sticky="e"
         )
 
         path_frame = ttk.LabelFrame(container, text="目录设置", style="Section.TLabelframe")
@@ -405,11 +428,12 @@ class NNLCApp:
         self._append_log(f"[{time.strftime('%H:%M:%S')}] {text}\n", tag)
 
     def _set_running(self, running: bool) -> None:
-        state = "disabled" if running else "normal"
+        busy = running or self.update_in_progress
+        state = "disabled" if busy else "normal"
         for widget in self.config_widgets:
             widget.configure(state=state)
         self.threshold_entry.configure(
-            state="disabled" if running or self.auto_threshold_var.get() else "normal"
+            state="disabled" if busy or self.auto_threshold_var.get() else "normal"
         )
         self.start_button.configure(state=state)
         self.open_output_button.configure(state=state)
@@ -418,10 +442,11 @@ class NNLCApp:
             self.progress.start(12)
         else:
             self.progress.stop()
-            # Comboboxes are intentionally readonly; restoring every widget
-            # to ``normal`` would let an invalid training mode be typed in.
-            self.training_mode_combo.configure(state="readonly")
-            self._update_streaming_options()
+            if not busy:
+                # Comboboxes are intentionally readonly; restoring every widget
+                # to ``normal`` would let an invalid training mode be typed in.
+                self.training_mode_combo.configure(state="readonly")
+                self._update_streaming_options()
 
     def _update_elapsed(self) -> None:
         if not self.worker or not self.worker.is_alive() or self.started_at is None:
@@ -438,9 +463,19 @@ class NNLCApp:
     def _finish_running(self, status: str) -> None:
         self._set_running(False)
         self.status_var.set(status)
+        if self.pending_update is not None and not self.update_prompt_shown:
+            self.root.after(200, self._prompt_pending_update)
 
     def _on_close(self) -> None:
         self._save_preferences()
+        if self.update_in_progress:
+            should_close = messagebox.askyesno(
+                "正在下载更新",
+                "关闭窗口会取消当前更新下载，确定要退出吗？",
+                icon="warning",
+            )
+            if not should_close:
+                return
         if self.worker and self.worker.is_alive():
             should_close = messagebox.askyesno(
                 "训练仍在进行",
@@ -453,9 +488,21 @@ class NNLCApp:
             process = self.process_holder.get("process")
             if process is not None and process.poll() is None:
                 _terminate_process_tree(process)
+        self._closing = True
+        if self.update_in_progress:
+            self.update_cancel_event.set()
+            if self.download_status_var is not None:
+                self.download_status_var.set("正在取消...")
+            thread = self.update_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=2)
+            self._close_download_window()
         self.root.destroy()
 
     def start(self) -> None:
+        if self.update_in_progress:
+            messagebox.showinfo("正在下载更新", "请等待更新下载完成后再开始训练。")
+            return
         if self.worker and self.worker.is_alive():
             return
         data_dir = self._normalize_path(self.data_var.get())
@@ -560,9 +607,231 @@ class NNLCApp:
                     self._finish_running("训练失败")
                     self._append_event(f"训练失败：{payload}", "error")
                     messagebox.showerror("训练失败", str(payload))
+                elif kind == "update_available":
+                    self._handle_update_available(payload)
+                elif kind == "update_download_progress":
+                    self._update_download_progress(*payload)
+                elif kind == "update_downloaded":
+                    self._finish_download_success(payload)
+                elif kind == "update_failed":
+                    self._finish_download_failure(payload)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_messages)
+
+    def _should_check_for_updates(self) -> bool:
+        return bool(
+            getattr(sys, "frozen", False)
+            and sys.platform == "win32"
+            and self.app_version
+            and self.app_version != "unknown"
+        )
+
+    def _start_update_check(self) -> None:
+        if not self._should_check_for_updates():
+            return
+        thread = threading.Thread(target=self._check_for_update_worker, daemon=True)
+        thread.start()
+
+    def _check_for_update_worker(self) -> None:
+        try:
+            manifest = check_for_update(self.app_version)
+        except Exception:
+            return
+        if manifest is not None:
+            self.messages.put(("update_available", manifest))
+
+    def _handle_update_available(self, manifest) -> None:
+        self.pending_update = manifest
+        if self.worker and self.worker.is_alive():
+            self._append_event(f"发现新版本 v{manifest.version}，将在训练结束后提示。", "info")
+            return
+        self._prompt_pending_update()
+
+    def _prompt_pending_update(self) -> None:
+        manifest = self.pending_update
+        if manifest is None or self.update_prompt_shown or self.update_in_progress:
+            return
+        if self.worker and self.worker.is_alive():
+            return
+        self.update_prompt_shown = True
+        notes = manifest.notes.strip() or "无更新说明。"
+        message = (
+            f"当前版本：v{self.app_version}\n"
+            f"最新版本：v{manifest.version}\n"
+            f"文件大小：{format_bytes(manifest.size)}\n\n"
+            f"{notes}\n\n"
+            "下载后不会替换正在运行的程序。关闭当前程序后，运行新的版本化 EXE 即可。"
+        )
+        dialog = tk.Toplevel(self.root)
+        dialog.title("发现新版本")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        choice = {"download": False}
+
+        frame = ttk.Frame(dialog, padding=18)
+        frame.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(frame, text=message, justify="left", wraplength=460).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=1, column=0, columnspan=2, sticky="e", pady=(16, 0))
+
+        def choose(download: bool) -> None:
+            choice["download"] = download
+            dialog.destroy()
+
+        ttk.Button(button_row, text="稍后", command=lambda: choose(False)).pack(side="right")
+        ttk.Button(button_row, text="立即下载", command=lambda: choose(True)).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        dialog.update_idletasks()
+        width = dialog.winfo_reqwidth()
+        height = dialog.winfo_reqheight()
+        x = max(0, (dialog.winfo_screenwidth() - width) // 2)
+        y = max(0, (dialog.winfo_screenheight() - height) // 2)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.wait_window(dialog)
+        if choice["download"]:
+            self._start_update_download(manifest)
+        else:
+            self._append_event(f"已跳过 v{manifest.version} 更新下载。", "info")
+
+    def _start_update_download(self, manifest) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("训练进行中", "请等待训练结束后再下载更新。")
+            self.update_prompt_shown = False
+            return
+        self.update_in_progress = True
+        self.update_cancel_event = threading.Event()
+        self._set_running(False)
+        self.status_var.set("正在下载更新...")
+        self._show_download_window(manifest)
+        self.update_thread = threading.Thread(
+            target=self._download_update_worker,
+            args=(manifest,),
+            daemon=False,
+        )
+        self.update_thread.start()
+
+    def _show_download_window(self, manifest) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("下载更新")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self._request_cancel_download)
+        frame = ttk.Frame(window, padding=18)
+        frame.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(frame, text=f"正在下载 {manifest.filename}", font=("Microsoft YaHei UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        self.download_status_var = tk.StringVar(value="准备下载...")
+        ttk.Label(frame, textvariable=self.download_status_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 8))
+        progress = ttk.Progressbar(frame, length=420, maximum=100, mode="determinate")
+        progress.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(frame, text="取消", command=self._request_cancel_download).grid(
+            row=3, column=1, sticky="e", pady=(12, 0)
+        )
+        window.update_idletasks()
+        width = window.winfo_reqwidth()
+        height = window.winfo_reqheight()
+        x = max(0, (window.winfo_screenwidth() - width) // 2)
+        y = max(0, (window.winfo_screenheight() - height) // 2)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        self.download_window = window
+        self.download_progress = progress
+
+    def _request_cancel_download(self) -> None:
+        if not self.update_in_progress:
+            return
+        should_cancel = messagebox.askyesno(
+            "取消下载",
+            "确定要取消当前更新下载吗？",
+            icon="warning",
+        )
+        if should_cancel:
+            self.update_cancel_event.set()
+            if self.download_status_var is not None:
+                self.download_status_var.set("正在取消...")
+
+    def _update_download_progress(self, downloaded: int, total: int, percent: int) -> None:
+        if self.download_progress is not None:
+            self.download_progress["value"] = percent
+        if self.download_status_var is not None:
+            self.download_status_var.set(
+                f"{format_bytes(downloaded)} / {format_bytes(total)}  ({percent}%)"
+            )
+
+    def _download_update_worker(self, manifest) -> None:
+        try:
+            path = download_update(
+                manifest,
+                dest_dir=application_directory(),
+                progress_callback=lambda downloaded, total, percent: self.messages.put(
+                    ("update_download_progress", (downloaded, total, percent))
+                ),
+                cancel_event=self.update_cancel_event,
+            )
+            self.messages.put(("update_downloaded", path))
+        except Exception as exc:
+            self.messages.put(("update_failed", exc))
+
+    def _close_download_window(self) -> None:
+        window = self.download_window
+        self.download_window = None
+        self.download_progress = None
+        self.download_status_var = None
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+    def _finish_download_success(self, path) -> None:
+        self.update_in_progress = False
+        self.update_thread = None
+        self._close_download_window()
+        if self._closing:
+            return
+        self._set_running(False)
+        self.status_var.set("更新已下载")
+        self._append_event(f"新版本已准备好：{path}", "success")
+        should_open = messagebox.askyesno(
+            "更新已下载",
+            "新程序已准备好：\n"
+            f"{path}\n\n"
+            "关闭当前程序后运行这个新 EXE 即可，原来的 Julia 环境可以继续使用。\n\n"
+            "是否打开所在目录？",
+        )
+        if should_open:
+            self._open_path(Path(path).parent)
+
+    def _finish_download_failure(self, exc) -> None:
+        self.update_in_progress = False
+        self.update_thread = None
+        self._close_download_window()
+        if self._closing:
+            return
+        self._set_running(False)
+        self.status_var.set("更新下载失败")
+        message = str(exc)
+        if isinstance(exc, UpdateError) and "取消" in message:
+            self._append_event("已取消更新下载。", "warning")
+            messagebox.showinfo("已取消下载", "未完成的下载文件已删除。")
+            return
+        self._append_event(f"更新下载失败：{message}", "error")
+        messagebox.showerror("更新下载失败", f"{message}\n未完成的下载文件已删除。")
+
+    def _open_path(self, path: Path) -> None:
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as exc:
+            messagebox.showerror("打开失败", str(exc))
 
 
 def launch_gui() -> None:

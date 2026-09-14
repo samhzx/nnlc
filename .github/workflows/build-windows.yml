@@ -9,6 +9,11 @@ on:
         description: "运行标题（可填写本次 Git 提交标题）"
         required: false
         type: string
+      notes:
+        description: "本次更新说明"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -55,11 +60,64 @@ jobs:
           $sizeMb = [math]::Round((Get-Item -LiteralPath $bundleExe).Length / 1MB, 1)
           Write-Host "One-file executable size: $sizeMb MB"
 
+      - name: Create versioned release files
+        shell: pwsh
+        env:
+          UPDATE_NOTES: ${{ inputs.notes }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content -LiteralPath "build\version-assets\version.txt" -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Invalid generated version: $version"
+          }
+          $releaseDir = "release"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $releaseDir
+          New-Item -ItemType Directory -Force $releaseDir | Out-Null
+          $releaseName = "NNLC_Trainer-$version-windows-x64.exe"
+          $releaseExe = Join-Path $releaseDir $releaseName
+          Copy-Item -LiteralPath "dist\NNLC_Trainer.exe" -Destination $releaseExe
+          $notes = [string]$env:UPDATE_NOTES
+          $manifestPath = Join-Path $releaseDir "update.json"
+          py -3.11 -m build_tools.create_update_manifest --exe $releaseExe --version $version --notes $notes --output $manifestPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "failed to create update.json"
+          }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.filename -ne $releaseName) {
+            throw "update.json filename mismatch: $($manifest.filename)"
+          }
+          $actualHash = (Get-FileHash -LiteralPath $releaseExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.sha256 -ne $actualHash) {
+            throw "update.json sha256 mismatch: $($manifest.sha256) != $actualHash"
+          }
+          $actualSize = [int64](Get-Item -LiteralPath $releaseExe).Length
+          if ([int64]$manifest.size -ne $actualSize) {
+            throw "update.json size mismatch: $($manifest.size) != $actualSize"
+          }
+          $releaseFiles = @(Get-ChildItem -LiteralPath $releaseDir -File | Sort-Object Name)
+          $expected = @("NNLC_Trainer-$version-windows-x64.exe", "update.json")
+          if (@($releaseFiles.Name) -join "," -ne ($expected -join ",")) {
+            throw "release must contain exactly $($expected -join ' and '): $($releaseFiles.Name -join ', ')"
+          }
+          Write-Host "Created $releaseExe ($($manifest.size) bytes)"
+          Write-Host "SHA256 $($manifest.sha256)"
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: NNLC_Trainer-windows-x64-exe
           path: dist/NNLC_Trainer.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload versioned release
+        uses: actions/upload-artifact@v4
+        with:
+          name: NNLC_Trainer-windows-x64-release
+          path: |
+            release/NNLC_Trainer-*-windows-x64.exe
+            release/update.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
