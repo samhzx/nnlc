@@ -84,12 +84,12 @@ def test_resolve_rlog_workers(monkeypatch):
         extractor.resolve_rlog_workers("0", 2)
 
 
-def test_worker_slot_restarts_after_limit(monkeypatch):
+def test_worker_slot_restarts_after_limit(monkeypatch, tmp_path):
     state = new_state({"a": 1, "b": 2})
     factory = FakeWorkerFactory(state)
     slot = extractor._RlogWorkerSlot(factory)
     monkeypatch.setattr(extractor, "MAX_RLOGS_PER_WORKER", 1)
-    output_dir = Path("/tmp")
+    output_dir = tmp_path
 
     first = output_dir / "nnlc-test-worker-1.csv"
     second = output_dir / "nnlc-test-worker-2.csv"
@@ -112,4 +112,3 @@ def test_worker_slot_restarts_after_limit(monkeypatch):
         slot.close()
         first.unlink(missing_ok=True)
         second.unlink(missing_ok=True)
-
