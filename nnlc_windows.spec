@@ -9,7 +9,6 @@ import sys
 import sysconfig
 
 from PyInstaller.building.build_main import Analysis, EXE, PYZ
-from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 PROJECT_DIR = Path(SPECPATH).resolve()
@@ -63,17 +62,23 @@ def standard_library_extensions(module_name: str):
     roots.add(Path(sys.executable).parent / "DLLs")
     binaries = []
     seen = set()
+    extension_patterns = (
+        [f"{module_name}*.pyd"]
+        if sys.platform == "win32"
+        else [f"{module_name}*.so", f"{module_name}*.dylib"]
+    )
     for root in roots:
         if not root.is_dir():
             continue
-        for path in root.glob(f"{module_name}*.pyd"):
-            resolved = path.resolve()
-            if resolved not in seen:
-                binaries.append((str(path), "."))
-                seen.add(resolved)
+        for pattern in extension_patterns:
+            for path in root.glob(pattern):
+                resolved = path.resolve()
+                if resolved not in seen:
+                    binaries.append((str(path), "."))
+                    seen.add(resolved)
     if not binaries:
         raise SystemExit(
-            f"Could not locate {module_name}.pyd in the Python standard library; "
+            f"Could not locate {module_name} extension in the Python standard library; "
             "the Windows bundle would be incomplete"
         )
     return binaries
@@ -103,20 +108,12 @@ hiddenimports = [
     "nnlc_tools.visualize_coverage",
     "nnlc_tools.visualize_model",
     "nnlc_tools.steering_classifier",
+    "nnlc_tools.steering_classifier.cascade",
+    "nnlc_tools.steering_classifier.config",
+    "nnlc_tools.steering_classifier.features",
+    "nnlc_tools.steering_classifier.filters",
+    "nnlc_tools.steering_classifier.types",
 ]
-
-for package in ("numpy", "pandas", "matplotlib", "scipy", "zstandard", "capnp", "tqdm"):
-    try:
-        d, b, h = collect_all(package)
-        datas += d
-        binaries += b
-        hiddenimports += h
-    except Exception:
-        # Some package names differ between import name and distribution name;
-        # PyInstaller's normal analysis will still report a useful error.
-        hiddenimports += collect_submodules(package)
-
-hiddenimports += collect_submodules("nnlc_tools")
 
 a = Analysis(
     [str(PROJECT_DIR / "nnlc_auto_train.py")],
@@ -124,10 +121,28 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
-    hooksconfig={},
+    hookspath=[str(PROJECT_DIR / "pyinstaller_hooks")],
+    hooksconfig={"matplotlib": {"backends": ["Agg"]}},
     runtime_hooks=[],
-    excludes=["tkinter.test"],
+    excludes=[
+        "tkinter.test",
+        "numpy.tests",
+        "numpy.testing",
+        "pandas.tests",
+        "matplotlib.tests",
+        "matplotlib.testing",
+        "matplotlib.backends._backend_gtk",
+        "matplotlib.backends.backend_gtk3",
+        "matplotlib.backends.backend_gtk3agg",
+        "matplotlib.backends.backend_macosx",
+        "matplotlib.backends.backend_qt",
+        "matplotlib.backends.backend_qt5",
+        "matplotlib.backends.backend_qtagg",
+        "matplotlib.backends.backend_wx",
+        "matplotlib.backends.backend_wxagg",
+        "matplotlib.backends.backend_tkagg",
+        "matplotlib.backends._backend_tk",
+    ],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
