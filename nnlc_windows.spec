@@ -103,6 +103,7 @@ binaries = standard_library_extensions("_socket")
 hiddenimports = [
     "_socket",
     "socket",
+    "numpy.testing",
     "multiprocessing",
     "multiprocessing.context",
     "multiprocessing.reduction",
@@ -139,7 +140,6 @@ a = Analysis(
     excludes=[
         "tkinter.test",
         "numpy.tests",
-        "numpy.testing",
         "pandas.tests",
         "matplotlib.tests",
         "matplotlib.testing",

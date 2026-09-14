@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nnlc-tools"
-version = "1.0.0"
+version = "1.0.1"
 description = "NNLC (Neural Network Lateral Control) training tools for openpilot"
 requires-python = ">=3.11"
 dependencies = [
