@@ -8,39 +8,6 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ProjectDir
 
-function Remove-JuliaPackageDevelopmentFiles {
-    param([Parameter(Mandatory = $true)][string]$DepotPath)
-
-    $PackagesRoot = Join-Path $DepotPath "packages"
-    if (-not (Test-Path -LiteralPath $PackagesRoot -PathType Container)) {
-        return
-    }
-
-    $OptionalDirectoryNames = @(
-        ".github",
-        "benchmark",
-        "benchmarks",
-        "docs",
-        "example",
-        "examples",
-        "test",
-        "tests"
-    )
-    $RemovedCount = 0
-    foreach ($PackageDir in (Get-ChildItem -LiteralPath $PackagesRoot -Directory -Force)) {
-        foreach ($PackageVersionDir in (Get-ChildItem -LiteralPath $PackageDir.FullName -Directory -Force)) {
-            foreach ($DirectoryName in $OptionalDirectoryNames) {
-                $Candidate = Join-Path $PackageVersionDir.FullName $DirectoryName
-                if (Test-Path -LiteralPath $Candidate) {
-                    Remove-Item -LiteralPath $Candidate -Recurse -Force
-                    $RemovedCount += 1
-                }
-            }
-        }
-    }
-    Write-Host "Removed $RemovedCount Julia package documentation/test directories."
-}
-
 $Config = Get-Content (Join-Path $ProjectDir "windows_runtime.json") -Raw | ConvertFrom-Json
 $JuliaDir = (Resolve-Path $JuliaDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $JuliaDir "bin\julia.exe") -PathType Leaf)) {
@@ -99,7 +66,6 @@ try {
 foreach ($CacheDirName in @("scratchspaces", "logs", "clones")) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $DepotTarget $CacheDirName)
 }
-Remove-JuliaPackageDevelopmentFiles -DepotPath $DepotTarget
 
 $VersionOutput = (& $JuliaExe --startup-file=no --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $VersionOutput -notmatch [regex]::Escape($Config.julia_version)) {
@@ -120,19 +86,9 @@ $Manifest | ConvertTo-Json | Set-Content (Join-Path $RuntimeDir "runtime-manifes
 Write-Host "Creating ZIP archive ..."
 $SevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
 if ($SevenZip) {
-    $ArchiveExcludes = @(
-        "-xr!.github",
-        "-xr!benchmark",
-        "-xr!benchmarks",
-        "-xr!docs",
-        "-xr!example",
-        "-xr!examples",
-        "-xr!test",
-        "-xr!tests"
-    )
     Push-Location $StagingRoot
     try {
-        & $SevenZip a -tzip -mx=9 $ArchivePath $Config.runtime_directory @ArchiveExcludes | Write-Host
+        & $SevenZip a -tzip -mx=9 $ArchivePath $Config.runtime_directory | Write-Host
         if ($LASTEXITCODE -ne 0) { throw "7-Zip archive creation failed ($LASTEXITCODE)" }
     } finally {
         Pop-Location
