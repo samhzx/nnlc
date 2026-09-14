@@ -66,16 +66,110 @@ class _QueueWriter(io.TextIOBase):
         return None
 
 
+APP_TITLE = "NNLC 横向控制模型训练"
+APP_SUBTITLE = "从 reallog 提取数据，完成评分、训练与模型部署"
+C_HEADER_BG = "#16324f"
+C_HEADER_SUB = "#8fb0d1"
+C_BADGE_BG = "#274d72"
+C_BADGE_FG = "#d5e4f4"
+C_PAGE_BG = "#f2f4f8"
+C_CARD_BG = "#ffffff"
+C_BORDER = "#e2e7ef"
+C_ACCENT = "#2f7de1"
+C_ACCENT_HOVER = "#2060b8"
+C_ACCENT_DISABLED = "#9db8d2"
+C_TEXT = "#2b333d"
+C_MUTED = "#7d8590"
+C_BTN_BORDER = "#d6dce5"
+C_BTN_HOVER = "#f0f3f7"
+C_STATUS_BG = "#e8ecf3"
+C_DISABLED = "#f5f6f8"
+F_TITLE = ("Microsoft YaHei UI", 16, "bold")
+F_VERSION = ("Microsoft YaHei UI", 9, "bold")
+F_SUB = ("Microsoft YaHei UI", 9)
+F_SECTION = ("Microsoft YaHei UI", 11, "bold")
+F_BASE = ("Microsoft YaHei UI", 10)
+F_BOLD = ("Microsoft YaHei UI", 10, "bold")
+F_LOG = ("Consolas", 10)
+PAD_PAGE = 20
+PAD_CARD = 18
+PAD_ROW = 7
+INPUT_H = 34
+LABEL_W = 92
+
+
+if tk is not None:
+    class PathPicker(tk.Frame):
+        """Path entry plus a compact browse control."""
+
+        def __init__(self, parent, variable, browse_command):
+            super().__init__(
+                parent,
+                bg=C_CARD_BG,
+                height=INPUT_H,
+                highlightthickness=1,
+                highlightbackground=C_BORDER,
+                highlightcolor=C_ACCENT,
+            )
+            self.pack_propagate(False)
+            self.grid_propagate(False)
+            self.variable = variable
+            self.browse_command = browse_command
+            self._enabled = True
+
+            self.entry = tk.Entry(
+                self,
+                textvariable=variable,
+                font=F_BASE,
+                bd=0,
+                highlightthickness=0,
+                fg=C_TEXT,
+                bg=C_CARD_BG,
+                disabledbackground=C_DISABLED,
+                disabledforeground=C_MUTED,
+            )
+            self.entry.pack(side="left", fill="both", expand=True, padx=(10, 0))
+            self.entry.bind("<FocusIn>", lambda _e: self.configure(highlightbackground=C_ACCENT))
+            self.entry.bind("<FocusOut>", lambda _e: self.configure(highlightbackground=C_BORDER))
+
+            tk.Frame(self, bg=C_BORDER, width=1).pack(side="left", fill="y", pady=8)
+            self.btn = tk.Label(
+                self,
+                text="···",
+                font=("Microsoft YaHei UI", 11, "bold"),
+                bg=C_CARD_BG,
+                fg=C_MUTED,
+                cursor="hand2",
+                padx=10,
+                anchor="center",
+            )
+            self.btn.pack(side="left", fill="both")
+            self.btn.bind("<Button-1>", self._on_browse)
+            self.btn.bind("<Enter>", lambda _e: self.btn.configure(fg=C_ACCENT if self._enabled else C_MUTED))
+            self.btn.bind("<Leave>", lambda _e: self.btn.configure(fg=C_MUTED))
+
+        def _on_browse(self, _event=None):
+            if self._enabled:
+                self.browse_command()
+
+        def set_enabled(self, enabled: bool) -> None:
+            self._enabled = enabled
+            fill = C_CARD_BG if enabled else C_DISABLED
+            self.entry.configure(state="normal" if enabled else "disabled", bg=fill)
+            self.configure(bg=fill)
+            self.btn.configure(bg=fill, cursor="hand2" if enabled else "arrow")
+
+
 class NNLCApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("NNLC 横向控制模型训练")
-        self.root.geometry("900x720")
-        self.root.minsize(760, 600)
+        self.root.geometry("1200x880")
+        self.root.minsize(1060, 780)
         self.messages: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
         self.config_widgets = []
+        self.path_pickers = []
         self._ansi_log_tag: str | None = None
         self.cancel_event = threading.Event()
         self.process_holder = {}
@@ -97,15 +191,14 @@ class NNLCApp:
         self.training_mode_var = tk.StringVar(value=saved_mode)
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
-        self.keep_intermediates_var = tk.BooleanVar(
-            value=bool(saved_preferences.get("keep_intermediates", True))
-        )
+        self.keep_intermediates_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
-        self.elapsed_var = tk.StringVar(value="")
+        self.elapsed_var = tk.StringVar(value="未开始")
         try:
             self.app_version = get_version()
         except Exception:
             self.app_version = "unknown"
+        self.root.title(f"{APP_TITLE} v{self.app_version}")
         self.pending_update = None
         self.update_prompt_shown = False
         self.update_in_progress = False
@@ -186,155 +279,222 @@ class NNLCApp:
             pass
 
     def _build_widgets(self) -> None:
-        root = self.root
-        style = ttk.Style(root)
+        self._build_style()
+        self.root.configure(bg=C_PAGE_BG)
+        self._build_header()
+        self._build_body()
+        self._build_statusbar()
+        self._build_log()
+
+    def _build_style(self) -> None:
+        style = ttk.Style(self.root)
         try:
-            style.theme_use("clam")
+            style.theme_use("vista")
         except tk.TclError:
-            pass
-        style.configure("App.TFrame", background="#f4f7fb")
-        style.configure("Header.TFrame", background="#16324f")
-        style.configure("HeaderTitle.TLabel", background="#16324f", foreground="#ffffff",
-                        font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("HeaderSubtitle.TLabel", background="#16324f", foreground="#c9d8e8",
-                        font=("Microsoft YaHei UI", 9))
-        style.configure("TLabel", background="#ffffff", foreground="#25364a")
-        style.configure("Hint.TLabel", background="#ffffff", foreground="#718096",
-                        font=("Microsoft YaHei UI", 9))
-        style.configure("TCheckbutton", background="#ffffff", foreground="#25364a")
-        style.configure("Section.TLabelframe", background="#ffffff", padding=12,
-                        bordercolor="#d9e2ec", relief="solid", borderwidth=1)
-        style.configure("Section.TLabelframe.Label", background="#ffffff", foreground="#16324f",
-                        font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("TEntry", padding=(8, 6), fieldbackground="#ffffff")
-        style.configure("TCombobox", padding=(6, 4), fieldbackground="#ffffff")
-        style.configure("TButton", padding=(11, 7), font=("Microsoft YaHei UI", 9))
-        style.configure("Primary.TButton", background="#1f6feb", foreground="#ffffff",
-                        font=("Microsoft YaHei UI", 10, "bold"), padding=(20, 9))
-        style.map("Primary.TButton", background=[("active", "#1558b0"), ("disabled", "#a7bdd8")])
-        style.configure("Status.TLabel", background="#e8f0f8", foreground="#36516d",
-                        padding=(10, 7), font=("Microsoft YaHei UI", 9))
-        root.configure(background="#f4f7fb")
-
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(0, weight=1)
-
-        container = ttk.Frame(root, padding=(22, 18, 22, 16), style="App.TFrame")
-        container.grid(row=0, column=0, sticky="nsew")
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(6, weight=1)
-
-        header = ttk.Frame(container, style="Header.TFrame", padding=(18, 15, 18, 14))
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
-        header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="NNLC 横向控制模型训练", style="HeaderTitle.TLabel").grid(
-            row=0, column=0, sticky="w"
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+        style.configure("TCombobox", padding=(8, 2))
+        style.configure("Dialog.TFrame", background=C_PAGE_BG)
+        style.configure("DialogCard.TFrame", background=C_CARD_BG)
+        style.configure(
+            "DialogTitle.TLabel",
+            background=C_CARD_BG,
+            foreground=C_HEADER_BG,
+            font=("Microsoft YaHei UI", 12, "bold"),
         )
-        ttk.Label(header, text="从 reallog 提取数据，完成评分、训练与模型部署", style="HeaderSubtitle.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(5, 0)
+        style.configure(
+            "DialogBody.TLabel",
+            background=C_CARD_BG,
+            foreground="#36516d",
+            font=F_SUB,
         )
-        style.configure("HeaderVersion.TLabel", background="#16324f", foreground="#d7e6f5",
-                        font=("Microsoft YaHei UI", 11, "bold"))
-        ttk.Label(header, text=f"v{self.app_version}", style="HeaderVersion.TLabel").grid(
-            row=0, column=1, rowspan=2, sticky="e"
+        style.configure(
+            "DialogNotes.TLabel",
+            background="#f7faff",
+            foreground="#36516d",
+            padding=(10, 8),
+            font=F_SUB,
+        )
+        style.configure(
+            "DialogPrimary.TButton",
+            background=C_ACCENT,
+            foreground="#ffffff",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padding=(16, 7),
+        )
+        style.map("DialogPrimary.TButton", background=[("active", C_ACCENT_HOVER)])
+        style.configure(
+            "Modern.Horizontal.TProgressbar",
+            troughcolor="#e8eef5",
+            background=C_ACCENT,
+            bordercolor="#e8eef5",
+            lightcolor=C_ACCENT,
+            darkcolor=C_ACCENT,
         )
 
-        path_frame = ttk.LabelFrame(container, text="目录设置", style="Section.TLabelframe")
-        path_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        path_frame.columnconfigure(1, weight=1)
-        data_widgets = self._path_row(path_frame, 0, "reallog 目录", self.data_var, self._choose_data)
-        output_widgets = self._path_row(path_frame, 1, "输出目录", self.output_var, self._choose_output)
-        self.config_widgets.extend((*data_widgets, *output_widgets))
+    def _build_header(self) -> None:
+        header = tk.Frame(self.root, bg=C_HEADER_BG, height=84)
+        header.pack(fill="x")
+        header.pack_propagate(False)
 
-        options_frame = ttk.LabelFrame(container, text="训练参数", style="Section.TLabelframe")
-        options_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        options_frame.columnconfigure(1, weight=1)
+        left = tk.Frame(header, bg=C_HEADER_BG)
+        left.pack(side="left", padx=24, pady=13, fill="y")
+        tk.Label(left, text=APP_TITLE, font=F_TITLE, bg=C_HEADER_BG, fg="#ffffff").pack(anchor="w")
+        tk.Label(left, text=APP_SUBTITLE, font=F_SUB, bg=C_HEADER_BG, fg=C_HEADER_SUB).pack(
+            anchor="w", pady=(4, 0)
+        )
+        tk.Label(
+            header,
+            text=f" v{self.app_version} ",
+            font=F_VERSION,
+            bg=C_BADGE_BG,
+            fg=C_BADGE_FG,
+            padx=8,
+            pady=3,
+        ).pack(side="right", padx=24)
 
-        ttk.Label(options_frame, text="车型").grid(row=0, column=0, sticky="w", pady=6)
-        self.car_entry = ttk.Entry(options_frame, textvariable=self.car_var)
-        self.car_entry.grid(row=0, column=1, sticky="ew", padx=(12, 10), pady=6)
-        ttk.Label(options_frame, text="示例：BYD_TANG_DMI_24", style="Hint.TLabel").grid(row=0, column=2, sticky="w", pady=6)
+    def _build_body(self) -> None:
+        body = tk.Frame(self.root, bg=C_PAGE_BG)
+        body.pack(fill="x", padx=PAD_PAGE, pady=(16, 0))
+        body.columnconfigure(0, weight=1, uniform="col")
+        body.columnconfigure(1, weight=1, uniform="col")
+
+        dir_card, dir_inner = self._make_card(body, "目录设置")
+        dir_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        dir_inner.columnconfigure(0, minsize=LABEL_W)
+        dir_inner.columnconfigure(1, weight=1)
+
+        data_picker = PathPicker(dir_inner, self.data_var, self._choose_data)
+        self._form_row(dir_inner, 0, "reallog 目录", data_picker)
+        output_picker = PathPicker(dir_inner, self.output_var, self._choose_output)
+        self._form_row(dir_inner, 1, "输出目录", output_picker)
+        self.path_pickers = [data_picker, output_picker]
+
+        param_card, param_inner = self._make_card(body, "训练参数")
+        param_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        param_inner.columnconfigure(0, minsize=LABEL_W)
+        param_inner.columnconfigure(1, weight=1)
+
+        tk.Label(param_inner, text="车型", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+            row=0, column=0, sticky="e", pady=PAD_ROW
+        )
+        self.car_box = self._fixed_box(param_inner)
+        self.car_box.grid(row=0, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
+        self.car_entry = self._make_form_entry(self.car_box, self.car_var)
         self.config_widgets.append(self.car_entry)
 
-        ttk.Label(options_frame, text="路线阈值").grid(row=1, column=0, sticky="w", pady=6)
-        threshold_frame = ttk.Frame(options_frame)
-        threshold_frame.grid(row=1, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
-        self.threshold_entry = ttk.Entry(threshold_frame, textvariable=self.threshold_var, width=12, state="disabled")
-        self.threshold_entry.pack(side="left")
-        self.auto_threshold_check = ttk.Checkbutton(
-            threshold_frame,
-            text="自动推荐（默认）",
-            variable=self.auto_threshold_var,
-            command=self._toggle_threshold,
+        tk.Label(param_inner, text="训练模式", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+            row=0, column=2, sticky="e", pady=PAD_ROW
         )
-        self.auto_threshold_check.pack(side="left", padx=(12, 0))
-        self.visualize_check = ttk.Checkbutton(
-            threshold_frame,
-            text="生成覆盖度图（默认）",
-            variable=self.skip_viz_var,
-        )
-        self.visualize_check.pack(side="left", padx=(28, 0))
-        self.config_widgets.extend((self.auto_threshold_check, self.visualize_check))
-
-        ttk.Label(options_frame, text="训练模式").grid(row=2, column=0, sticky="w", pady=6)
-        training_mode_frame = ttk.Frame(options_frame)
-        training_mode_frame.grid(row=2, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
+        self.mode_box = self._fixed_box(param_inner, width=200)
+        self.mode_box.grid(row=0, column=3, sticky="w", padx=(10, 0), pady=PAD_ROW)
         self.training_mode_combo = ttk.Combobox(
-            training_mode_frame,
+            self.mode_box,
             textvariable=self.training_mode_var,
             values=tuple(TRAINING_MODES),
             state="readonly",
-            width=16,
+            font=F_BASE,
         )
-        self.training_mode_combo.pack(side="left")
+        self.training_mode_combo.pack(fill="both", expand=True)
         self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_changed)
         self.config_widgets.append(self.training_mode_combo)
 
-        self.keep_intermediates_check = ttk.Checkbutton(
-            training_mode_frame,
-            text="保留完整中间 CSV（默认）",
-            variable=self.keep_intermediates_var,
-            command=self._save_preferences,
+        tk.Label(param_inner, text="路线阈值", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+            row=1, column=0, sticky="e", pady=PAD_ROW
         )
-        self.keep_intermediates_check.pack(side="left", padx=(18, 0))
-        self.config_widgets.append(self.keep_intermediates_check)
-        self._update_streaming_options()
+        self.thr_box = self._fixed_box(param_inner)
+        self.thr_box.grid(row=1, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
+        self.threshold_entry = self._make_form_entry(self.thr_box, self.threshold_var)
 
-        controls = ttk.Frame(container, style="App.TFrame")
-        controls.grid(row=5, column=0, sticky="ew", pady=(0, 10))
-        controls.columnconfigure(1, weight=1)
-        self.start_button = ttk.Button(controls, text="开始训练", style="Primary.TButton", command=self.start)
-        self.start_button.grid(row=0, column=0, sticky="w")
-        self.progress = ttk.Progressbar(controls, mode="indeterminate", length=220)
-        self.progress.grid(row=0, column=1, sticky="ew", padx=14)
-        ttk.Label(controls, textvariable=self.elapsed_var, width=13, anchor="e").grid(row=0, column=2)
-        self.open_output_button = ttk.Button(controls, text="打开输出目录", command=self._open_output)
-        self.open_output_button.grid(row=0, column=3, padx=(12, 0))
-        self.clear_log_button = ttk.Button(controls, text="清空日志", command=self.clear_log)
-        self.clear_log_button.grid(row=0, column=4, padx=(8, 0))
+        check_frame = tk.Frame(param_inner, bg=C_CARD_BG)
+        check_frame.grid(row=1, column=2, columnspan=2, sticky="w", pady=PAD_ROW)
+        auto_lbl = tk.Label(
+            check_frame,
+            text="自动推荐",
+            font=F_BASE,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+            cursor="hand2",
+        )
+        auto_lbl.pack(side="left")
+        self.auto_threshold_check = tk.Checkbutton(
+            check_frame,
+            variable=self.auto_threshold_var,
+            bg=C_CARD_BG,
+            activebackground=C_CARD_BG,
+            selectcolor=C_CARD_BG,
+            command=self._toggle_threshold,
+        )
+        self.auto_threshold_check.pack(side="left")
+        auto_lbl.bind("<Button-1>", lambda _e: self.auto_threshold_check.invoke())
+        self.config_widgets.append(self.auto_threshold_check)
+        self._toggle_threshold()
 
-        log_frame = ttk.LabelFrame(container, text="运行日志", style="Section.TLabelframe")
-        log_frame.grid(row=6, column=0, sticky="nsew")
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
+    def _build_log(self) -> None:
+        card, inner = self._make_card(self.root, "运行日志")
+        card.pack(fill="both", expand=True, padx=PAD_PAGE, pady=(14, 0))
+
+        actions = tk.Frame(inner, bg=C_CARD_BG)
+        actions.pack(side="bottom", fill="x", pady=(10, 0))
+        tk.Frame(inner, bg=C_BORDER, height=1).pack(side="bottom", fill="x", pady=(12, 0))
+
+        open_box, self.open_output_button = self._make_button(actions, "打开输出目录", self._open_output)
+        open_box.pack(side="left")
+        clear_box, self.clear_log_button = self._make_button(actions, "清空日志", self.clear_log)
+        clear_box.pack(side="left", padx=(8, 0))
+        save_box, self.save_log_button = self._make_button(actions, "保存日志", self.save_log)
+        save_box.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            actions,
+            textvariable=self.elapsed_var,
+            font=F_BASE,
+            bg=C_CARD_BG,
+            fg=C_MUTED,
+        ).pack(side="left", expand=True)
+
+        self.start_button = tk.Button(
+            actions,
+            text="开始训练",
+            font=F_BOLD,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+            bd=0,
+            padx=32,
+            pady=7,
+            cursor="hand2",
+            command=self.start,
+        )
+        self.start_button.pack(side="right")
+        self._bind_hover_primary(self.start_button)
+
+        log_area = tk.Frame(inner, bg=C_CARD_BG)
+        log_area.pack(fill="both", expand=True)
         self.log = tk.Text(
-            log_frame,
+            log_area,
             wrap="word",
             state="disabled",
             height=16,
-            font=("Consolas", 9),
-            background="#fbfdff",
-            foreground="#26384a",
-            insertbackground="#26384a",
+            font=F_LOG,
+            bg="#fbfcfe",
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
             selectbackground="#cfe2f5",
-            borderwidth=0,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            highlightcolor=C_BORDER,
             padx=8,
             pady=8,
         )
-        self.log.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.log.configure(yscrollcommand=scrollbar.set)
+        scroll_y = ttk.Scrollbar(log_area, orient="vertical", command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll_y.set)
+        scroll_y.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
         self.log.tag_configure("info", foreground="#2563a6")
         self.log.tag_configure("success", foreground="#16803a")
         self.log.tag_configure("warning", foreground="#a15c00")
@@ -342,25 +502,168 @@ class NNLCApp:
         self.log.tag_configure("heading", foreground="#7a3e9d")
         self.log.tag_configure("step", foreground="#007c91")
 
-        ttk.Label(container, textvariable=self.status_var, style="Status.TLabel", anchor="w").grid(
-            row=7, column=0, sticky="ew", pady=(10, 0)
-        )
+    def _build_statusbar(self) -> None:
+        bar = tk.Frame(self.root, bg=C_STATUS_BG, height=28)
+        bar.pack(fill="x", side="bottom", pady=(14, 0))
+        bar.pack_propagate(False)
+        tk.Label(
+            bar,
+            textvariable=self.status_var,
+            font=F_SUB,
+            bg=C_STATUS_BG,
+            fg=C_TEXT,
+        ).pack(side="left", padx=14, pady=4)
+        tk.Label(
+            bar,
+            text=f"v{self.app_version}",
+            font=F_SUB,
+            bg=C_STATUS_BG,
+            fg=C_MUTED,
+        ).pack(side="right", padx=14, pady=4)
 
-    @staticmethod
-    def _path_row(parent, row, label, variable, browse_command):
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
-        entry = ttk.Entry(parent, textvariable=variable)
-        entry.grid(row=row, column=1, sticky="ew", padx=(12, 10), pady=6)
-        button = ttk.Button(parent, text="浏览...", command=browse_command)
-        button.grid(row=row, column=2, sticky="e", pady=6)
-        return entry, button
+    def _make_card(self, parent, title):
+        wrapper = tk.Frame(parent, bg=C_PAGE_BG)
+        header = tk.Frame(wrapper, bg=C_PAGE_BG)
+        header.pack(anchor="w", pady=(0, 8))
+        bar = tk.Frame(header, bg=C_ACCENT, width=4, height=15)
+        bar.pack(side="left")
+        bar.pack_propagate(False)
+        tk.Label(header, text=title, font=F_SECTION, bg=C_PAGE_BG, fg=C_TEXT).pack(
+            side="left", padx=(8, 0)
+        )
+        card = tk.Frame(
+            wrapper,
+            bg=C_CARD_BG,
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            highlightcolor=C_BORDER,
+            takefocus=0,
+        )
+        card.pack(fill="both", expand=True)
+        inner = tk.Frame(card, bg=C_CARD_BG)
+        inner.pack(fill="both", expand=True, padx=PAD_CARD, pady=PAD_CARD - 4)
+        return wrapper, inner
+
+    def _form_row(self, parent, row, label_text, widget) -> None:
+        tk.Label(parent, text=label_text, font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+            row=row, column=0, sticky="e", pady=PAD_ROW
+        )
+        widget.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
+
+    def _make_form_entry(self, box, variable):
+        entry = tk.Entry(
+            box,
+            textvariable=variable,
+            font=F_BASE,
+            bd=0,
+            highlightthickness=0,
+            fg=C_TEXT,
+            bg=C_CARD_BG,
+            disabledbackground=C_DISABLED,
+            disabledforeground=C_MUTED,
+        )
+        entry.pack(fill="both", expand=True, padx=(10, 0))
+        entry.bind("<FocusIn>", lambda _e: box.configure(highlightbackground=C_ACCENT))
+        entry.bind("<FocusOut>", lambda _e: box.configure(highlightbackground=C_BORDER))
+        return entry
+
+    def _fixed_box(self, parent, width=None):
+        box = tk.Frame(
+            parent,
+            bg=C_CARD_BG,
+            height=INPUT_H,
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            highlightcolor=C_ACCENT,
+        )
+        if width:
+            box.configure(width=width)
+        box.pack_propagate(False)
+        box.grid_propagate(False)
+        return box
+
+    def _make_button(self, parent, text, command=None):
+        box = tk.Frame(parent, bg=C_BTN_BORDER)
+        btn = tk.Button(
+            box,
+            text=text,
+            font=F_BASE,
+            command=command,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+            bd=0,
+            padx=13,
+            pady=4,
+            cursor="hand2",
+            activebackground=C_BTN_HOVER,
+        )
+        btn.pack(padx=1, pady=1)
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=C_BTN_HOVER if str(btn["state"]) != "disabled" else C_CARD_BG))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=C_CARD_BG))
+        return box, btn
+
+    def _bind_hover_primary(self, btn) -> None:
+        def on_enter(_event):
+            if str(btn["state"]) != "disabled":
+                btn.configure(bg=C_ACCENT_HOVER)
+
+        def on_leave(_event):
+            if str(btn["state"]) != "disabled":
+                btn.configure(bg=C_ACCENT)
+
+        btn.bind("<Enter>", on_enter)
+        btn.bind("<Leave>", on_leave)
+
+    def _make_dialog_secondary(self, parent, text, command=None):
+        box = tk.Frame(parent, bg=C_BTN_BORDER, width=112, height=34)
+        box.pack_propagate(False)
+        btn = tk.Button(
+            box,
+            text=text,
+            font=F_BASE,
+            command=command,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+            bd=0,
+            cursor="hand2",
+            activebackground=C_BTN_HOVER,
+        )
+        btn.pack(fill="both", expand=True, padx=1, pady=1)
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=C_BTN_HOVER))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=C_CARD_BG))
+        return box
+
+    def _make_dialog_primary(self, parent, text, command=None):
+        box = tk.Frame(parent, bg=C_ACCENT, width=112, height=34)
+        box.pack_propagate(False)
+        btn = tk.Button(
+            box,
+            text=text,
+            font=F_BOLD,
+            command=command,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            bd=0,
+            cursor="hand2",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+        )
+        btn.pack(fill="both", expand=True)
+        self._bind_hover_primary(btn)
+        return box
 
     def _toggle_threshold(self) -> None:
-        self.threshold_entry.configure(state="disabled" if self.auto_threshold_var.get() else "normal")
+        auto = self.auto_threshold_var.get()
+        busy = bool((self.worker and self.worker.is_alive()) or self.update_in_progress)
+        disabled = auto or busy
+        self.threshold_entry.configure(state="disabled" if disabled else "normal")
+        fill = C_DISABLED if disabled else C_CARD_BG
+        if getattr(self, "thr_box", None) is not None:
+            self.thr_box.configure(bg=fill)
+            self.threshold_entry.configure(bg=fill)
 
     def _update_streaming_options(self) -> None:
-        is_streaming = self.training_mode_var.get() == "CPU 流式低内存模式"
-        self.keep_intermediates_check.configure(state="normal" if is_streaming else "disabled")
+        return
 
     def _on_training_mode_changed(self, _event=None) -> None:
         self._update_streaming_options()
@@ -397,6 +700,20 @@ class NNLCApp:
         self.log.configure(state="disabled")
         self._ansi_log_tag = None
 
+    def save_log(self) -> None:
+        content = self.log.get("1.0", "end-1c")
+        if not content.strip():
+            messagebox.showinfo("保存日志", "当前没有可保存的日志。")
+            return
+        filename = time.strftime("%Y%m%d_%H%M%S") + "_log.log"
+        path = application_directory() / filename
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            messagebox.showerror("保存失败", str(exc))
+            return
+        messagebox.showinfo("保存日志", f"日志已保存到：\n{path}")
+
     def _append_log(self, text: str, tag: str | None = None) -> None:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         self.log.configure(state="normal")
@@ -432,21 +749,24 @@ class NNLCApp:
         state = "disabled" if busy else "normal"
         for widget in self.config_widgets:
             widget.configure(state=state)
-        self.threshold_entry.configure(
-            state="disabled" if busy or self.auto_threshold_var.get() else "normal"
-        )
-        self.start_button.configure(state=state)
+        for picker in self.path_pickers:
+            picker.set_enabled(not busy)
+        fill = C_DISABLED if busy else C_CARD_BG
+        if getattr(self, "car_box", None) is not None:
+            self.car_box.configure(bg=fill)
+            self.car_entry.configure(bg=fill)
+        self._toggle_threshold()
+        if busy:
+            self.start_button.configure(state="disabled", bg=C_ACCENT_DISABLED, cursor="arrow")
+        else:
+            self.start_button.configure(state="normal", bg=C_ACCENT, cursor="hand2")
         self.open_output_button.configure(state=state)
         self.clear_log_button.configure(state=state)
-        if running:
-            self.progress.start(12)
-        else:
-            self.progress.stop()
-            if not busy:
-                # Comboboxes are intentionally readonly; restoring every widget
-                # to ``normal`` would let an invalid training mode be typed in.
-                self.training_mode_combo.configure(state="readonly")
-                self._update_streaming_options()
+        if not busy:
+            # Comboboxes are intentionally readonly; restoring every widget
+            # to ``normal`` would let an invalid training mode be typed in.
+            self.training_mode_combo.configure(state="readonly")
+            self._update_streaming_options()
 
     def _update_elapsed(self) -> None:
         if not self.worker or not self.worker.is_alive() or self.started_at is None:
@@ -455,9 +775,9 @@ class NNLCApp:
         minutes, seconds = divmod(seconds, 60)
         hours, minutes = divmod(minutes, 60)
         if hours:
-            self.elapsed_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+            self.elapsed_var.set(f"耗时 {hours:02d}:{minutes:02d}:{seconds:02d}")
         else:
-            self.elapsed_var.set(f"{minutes:02d}:{seconds:02d}")
+            self.elapsed_var.set(f"耗时 {minutes:02d}:{seconds:02d}")
         self.root.after(1000, self._update_elapsed)
 
     def _finish_running(self, status: str) -> None:
@@ -543,7 +863,7 @@ class NNLCApp:
         self._append_event("训练任务已启动", "info")
         self._set_running(True)
         self.status_var.set("训练中，请保持窗口打开...")
-        self.elapsed_var.set("00:00")
+        self.elapsed_var.set("耗时 00:00")
         self.started_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.process_holder = {}
@@ -663,34 +983,50 @@ class NNLCApp:
             return
         self.update_prompt_shown = True
         notes = manifest.notes.strip() or "无更新说明。"
-        message = (
-            f"当前版本：v{self.app_version}\n"
-            f"最新版本：v{manifest.version}\n"
-            f"文件大小：{format_bytes(manifest.size)}\n\n"
-            f"{notes}\n\n"
-            "下载后不会替换正在运行的程序。关闭当前程序后，运行新的版本化 EXE 即可。"
-        )
         dialog = tk.Toplevel(self.root)
         dialog.title("发现新版本")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
+        dialog.configure(background="#eef3f8")
         choice = {"download": False}
 
-        frame = ttk.Frame(dialog, padding=18)
+        frame = ttk.Frame(dialog, padding=(18, 16), style="Dialog.TFrame")
         frame.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(frame, text=message, justify="left", wraplength=460).grid(
-            row=0, column=0, columnspan=2, sticky="w"
+        card = ttk.Frame(frame, padding=(16, 14), style="DialogCard.TFrame")
+        card.grid(row=0, column=0, sticky="ew")
+        ttk.Label(card, text="发现新版本", style="DialogTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
         )
-        button_row = ttk.Frame(frame)
-        button_row.grid(row=1, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        details = (
+            f"当前版本：v{self.app_version}\n"
+            f"最新版本：v{manifest.version}\n"
+            f"文件大小：{format_bytes(manifest.size)}"
+        )
+        ttk.Label(card, text=details, justify="left", style="DialogBody.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(10, 0)
+        )
+        ttk.Label(card, text=notes, justify="left", wraplength=450, style="DialogNotes.TLabel").grid(
+            row=2, column=0, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(
+            card,
+            text="下载后不会替换正在运行的程序。关闭当前程序后，运行新的版本化 EXE 即可。",
+            justify="left",
+            wraplength=450,
+            style="DialogBody.TLabel",
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
+        button_row = tk.Frame(frame, bg=C_PAGE_BG)
+        button_row.grid(row=1, column=0, sticky="e", pady=(16, 0))
 
         def choose(download: bool) -> None:
             choice["download"] = download
             dialog.destroy()
 
-        ttk.Button(button_row, text="稍后", command=lambda: choose(False)).pack(side="right")
-        ttk.Button(button_row, text="立即下载", command=lambda: choose(True)).pack(side="right", padx=(0, 8))
+        self._make_dialog_secondary(button_row, "稍后", lambda: choose(False)).pack(side="right")
+        self._make_dialog_primary(button_row, "立即下载", lambda: choose(True)).pack(
+            side="right", padx=(0, 8)
+        )
         dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
         dialog.update_idletasks()
         width = dialog.winfo_reqwidth()
@@ -727,17 +1063,28 @@ class NNLCApp:
         window.resizable(False, False)
         window.transient(self.root)
         window.protocol("WM_DELETE_WINDOW", self._request_cancel_download)
-        frame = ttk.Frame(window, padding=18)
+        window.configure(background="#eef3f8")
+        frame = ttk.Frame(window, padding=(18, 16), style="Dialog.TFrame")
         frame.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(frame, text=f"正在下载 {manifest.filename}", font=("Microsoft YaHei UI", 10, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w"
+        card = ttk.Frame(frame, padding=(16, 14), style="DialogCard.TFrame")
+        card.grid(row=0, column=0, sticky="ew")
+        ttk.Label(card, text="正在下载更新", style="DialogTitle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(card, text=manifest.filename, style="DialogBody.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
         )
         self.download_status_var = tk.StringVar(value="准备下载...")
-        ttk.Label(frame, textvariable=self.download_status_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 8))
-        progress = ttk.Progressbar(frame, length=420, maximum=100, mode="determinate")
-        progress.grid(row=2, column=0, columnspan=2, sticky="ew")
-        ttk.Button(frame, text="取消", command=self._request_cancel_download).grid(
-            row=3, column=1, sticky="e", pady=(12, 0)
+        ttk.Label(card, textvariable=self.download_status_var, style="DialogBody.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(12, 8)
+        )
+        progress = ttk.Progressbar(card, length=420, maximum=100, mode="determinate",
+                                   style="Modern.Horizontal.TProgressbar")
+        progress.grid(row=3, column=0, sticky="ew")
+        cancel_row = tk.Frame(frame, bg=C_PAGE_BG)
+        cancel_row.grid(row=1, column=0, sticky="e", pady=(12, 0))
+        self._make_dialog_secondary(cancel_row, "取消", self._request_cancel_download).pack(
+            side="right"
         )
         window.update_idletasks()
         width = window.winfo_reqwidth()
