@@ -9,6 +9,7 @@ from nnlc_runtime import (
     MANIFEST_FILENAME,
     RuntimeBootstrapError,
     RuntimeConfig,
+    _create_staging_directory,
     ensure_windows_runtime,
     validate_runtime_directory,
 )
@@ -59,7 +60,19 @@ def create_archive(base_dir: Path, source_root: Path) -> Path:
 
 
 def extraction_staging_dirs(base_dir: Path):
-    return list(base_dir.glob(f".{CONFIG.runtime_directory}.extracting-*"))
+    return list(base_dir.glob(".nnlc-*"))
+
+
+def test_extraction_staging_directory_has_a_short_unique_name(tmp_path):
+    first = _create_staging_directory(tmp_path)
+    second = _create_staging_directory(tmp_path)
+
+    assert first != second
+    assert first.name.startswith(".nnlc-")
+    assert len(first.name) == len(".nnlc-") + 8
+
+    first.rmdir()
+    second.rmdir()
 
 
 def test_valid_runtime_does_not_require_archive(tmp_path):
@@ -214,7 +227,7 @@ def test_interrupted_extraction_does_not_replace_existing_runtime(tmp_path, monk
 
 def test_unwritable_base_directory_reports_clear_error(tmp_path, monkeypatch):
     def fail_mkdir(self, *args, **kwargs):
-        if self.name.startswith(f".{CONFIG.runtime_directory}.extracting-"):
+        if self.name.startswith(".nnlc-"):
             raise PermissionError("read only")
         return original_mkdir(self, *args, **kwargs)
 

@@ -66,6 +66,8 @@ Windows 发布物分成两个文件：
 
 如果 `NNLC_Runtime` 缺失、损坏或版本过旧，程序会要求重新放入正确名称的环境 ZIP，并可打开对应的 GitHub Release 下载页面。不要手工拼接或复制 `NNLC_Runtime` 内部的部分目录。
 
+如果旧版本曾在解压过程中失败并留下 `.NNLC_Runtime.extracting-*` 临时目录，请先退出程序后删除这些目录，再把 EXE 和 ZIP 放到较短、可写的路径（例如 `C:\NNLC`）重试。新版解压使用短临时目录，减少 Windows 路径长度限制导致的失败。
+
 ### Windows 构建与发布
 
 - 日常应用更新：手动运行 GitHub Actions 的 `Build Windows EXE`，可填写 `notes`。工作流会生成 `NNLC_Trainer.exe`、版本化 EXE 和 `update.json`。先把版本化 EXE 上传到 `https://file.897242746.xyz/data/NNLC_Trainer/`，确认文件名与 `update.json` 中的 `filename` 一致后，再上传 `update.json`。该工作流不安装或打包 Julia。

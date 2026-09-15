@@ -696,13 +696,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.0.2</span>
+            <span>NNLC 横向控制模型训练 v1.0.3</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.0.2</span>
+              <span class="gui-version">v1.0.3</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -956,6 +956,10 @@
         <details>
           <summary>双击 EXE 后缺少模块、Julia 或 DLL</summary>
           <div><p>确认 <code>NNLC_Runtime\runtime-manifest.json</code>、<code>NNLC_Runtime\julia-runtime\bin\julia.exe</code> 和 <code>NNLC_Runtime\julia-depot</code> 同时存在。如果程序提示环境缺失、损坏或版本不匹配，将正确名称的环境 ZIP 放到 EXE 旁并重新启动；程序会先验证新环境，再自动替换旧目录，错误窗口也可直接打开下载页面。</p></div>
+        </details>
+        <details>
+          <summary>Julia 环境解压时报 No such file or directory</summary>
+          <div><p>这通常是旧版本的解压临时目录过长，触发了部分 Windows 电脑的路径限制。退出程序后删除 EXE 旁残留的 <code>.NNLC_Runtime.extracting-*</code> 临时目录，再把 EXE 和 ZIP 移到较短、可写的目录（例如 <code>C:\NNLC</code>）并使用新版程序重试。新版使用短临时目录；如果仍失败，请保留完整错误路径。</p></div>
         </details>
         <details>
           <summary>输出目录空间不足</summary>

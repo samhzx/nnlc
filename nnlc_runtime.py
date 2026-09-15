@@ -18,6 +18,8 @@ from typing import Callable
 CONFIG_FILENAME = "windows_runtime.json"
 MANIFEST_FILENAME = "runtime-manifest.json"
 COPY_CHUNK_SIZE = 1024 * 1024
+STAGING_DIRECTORY_PREFIX = ".nnlc-"
+STAGING_TOKEN_LENGTH = 8
 ProgressCallback = Callable[[int, int, str], None]
 
 
@@ -282,6 +284,22 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _create_staging_directory(base_dir: Path) -> Path:
+    """Create a short-lived staging directory with a Windows-friendly name."""
+    for _ in range(10):
+        staging_dir = base_dir / (
+            f"{STAGING_DIRECTORY_PREFIX}{uuid.uuid4().hex[:STAGING_TOKEN_LENGTH]}"
+        )
+        try:
+            staging_dir.mkdir()
+        except FileExistsError:
+            continue
+        return staging_dir
+    raise RuntimeBootstrapError(
+        f"无法创建 Julia 环境临时目录: {base_dir}\n请关闭其他正在准备环境的程序后重试。"
+    )
+
+
 def ensure_windows_runtime(
     *,
     config: RuntimeConfig | None = None,
@@ -309,10 +327,7 @@ def ensure_windows_runtime(
 
     try:
         paths.base_dir.mkdir(parents=True, exist_ok=True)
-        staging_dir = paths.base_dir / (
-            f".{config.runtime_directory}.extracting-{os.getpid()}-{uuid.uuid4().hex}"
-        )
-        staging_dir.mkdir()
+        staging_dir = _create_staging_directory(paths.base_dir)
     except OSError as exc:
         raise RuntimeBootstrapError(
             f"EXE 所在目录不可写，无法准备 Julia 环境: {paths.base_dir}\n{exc}"
