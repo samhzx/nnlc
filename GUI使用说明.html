@@ -324,6 +324,12 @@
 
     .gui-body { padding: 18px; }
 
+    .gui-columns {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+    }
+
     .gui-heading {
       display: flex;
       align-items: baseline;
@@ -369,6 +375,18 @@
     }
 
     .gui-label { white-space: nowrap; }
+
+    .gui-param-row {
+      display: grid;
+      grid-template-columns: 72px minmax(100px, 1fr) 72px minmax(100px, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .gui-param-row + .gui-param-row { margin-top: 8px; }
+
+    .gui-param-row .gui-label { white-space: nowrap; }
 
     .gui-input,
     .gui-select {
@@ -428,7 +446,7 @@
 
     .gui-controls {
       display: grid;
-      grid-template-columns: auto 1fr auto auto;
+      grid-template-columns: auto auto auto 1fr auto;
       gap: 10px;
       align-items: center;
       margin: 13px 0;
@@ -551,6 +569,10 @@
       .toc nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .gui-row { grid-template-columns: 96px minmax(170px, 1fr); }
       .gui-row > :last-child { grid-column: 2; }
+      .gui-columns { grid-template-columns: 1fr; }
+      .gui-param-row { grid-template-columns: 96px minmax(170px, 1fr); }
+      .gui-param-row > :nth-child(3) { grid-column: 1; }
+      .gui-param-row > :nth-child(4) { grid-column: 2; }
       .gui-controls { grid-template-columns: auto 1fr; }
     }
 
@@ -567,6 +589,9 @@
       .gui-body { padding: 12px; }
       .gui-row { grid-template-columns: 1fr; gap: 4px; padding: 5px 0; }
       .gui-row > :last-child { grid-column: auto; }
+      .gui-param-row { grid-template-columns: 1fr; gap: 4px; padding: 5px 0; }
+      .gui-param-row > :nth-child(3),
+      .gui-param-row > :nth-child(4) { grid-column: auto; }
       .gui-controls { grid-template-columns: 1fr 1fr; }
       .progress-track { grid-column: 1 / -1; }
       th, td { min-width: 130px; }
@@ -596,7 +621,7 @@
         <span class="tag">适用：NNLC_Trainer 独立 EXE + 可复用 Julia 环境</span>
         <span class="tag">训练设备：Windows x64</span>
         <span class="tag">训练后端：CPU</span>
-        <span class="tag">更新日期：2026-09-14</span>
+        <span class="tag">更新日期：2026-09-15</span>
       </div>
     </div>
   </header>
@@ -671,55 +696,51 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练</span>
+            <span>NNLC 横向控制模型训练 v1.0.2</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.0.0</span>
+              <span class="gui-version">v1.0.2</span>
             </div>
-            <div class="gui-group">
-              <span class="gui-group-title">目录设置</span>
-              <div class="gui-row">
-                <span class="gui-label">reallog 目录 <span class="marker">1</span></span>
-                <span class="gui-input">D:\reallog</span>
-                <span class="gui-button">浏览...</span>
+            <div class="gui-columns">
+              <div class="gui-group">
+                <span class="gui-group-title">目录设置</span>
+                <div class="gui-row">
+                  <span class="gui-label">reallog 目录 <span class="marker">1</span></span>
+                  <span class="gui-input">D:\reallog</span>
+                  <span class="gui-button">···</span>
+                </div>
+                <div class="gui-row">
+                  <span class="gui-label">输出目录 <span class="marker">2</span></span>
+                  <span class="gui-input">C:\Users\用户名\Documents\NNLC_Output</span>
+                  <span class="gui-button">···</span>
+                </div>
               </div>
-              <div class="gui-row">
-                <span class="gui-label">输出目录 <span class="marker">2</span></span>
-                <span class="gui-input">C:\Users\用户名\Documents\NNLC_Output</span>
-                <span class="gui-button">浏览...</span>
-              </div>
-            </div>
-            <div class="gui-group">
-              <span class="gui-group-title">训练参数</span>
-              <div class="gui-row">
-                <span class="gui-label">车型 <span class="marker">3</span></span>
-                <span class="gui-input">BYD_TANG_DMI_24</span>
-                <span class="gui-hint">示例：BYD_TANG_DMI_24</span>
-              </div>
-              <div class="gui-row">
-                <span class="gui-label">路线阈值 <span class="marker">4</span></span>
-                <span class="gui-checks"><span class="gui-input disabled">70</span><span class="check">自动推荐（默认）</span><span class="check">生成覆盖度图（默认）</span></span>
-                <span class="gui-hint">取消自动推荐后可输入 0-100</span>
-              </div>
-              <div class="gui-row">
-                <span class="gui-label">训练模式 <span class="marker">5</span></span>
-                <span class="gui-select">CPU 标准模式　⌄</span>
-                <span class="gui-hint">流式模式适合超大数据和 16GB 内存电脑</span>
-              </div>
-              <div class="gui-row">
-                <span></span>
-                <span class="check">保留完整中间 CSV（默认） <span class="marker">6</span></span>
-                <span class="gui-hint">仅在流式模式下可以修改</span>
+              <div class="gui-group">
+                <span class="gui-group-title">训练参数</span>
+                <div class="gui-param-row">
+                  <span class="gui-label">车型 <span class="marker">3</span></span>
+                  <span class="gui-input">BYD_TANG_DMI_24</span>
+                  <span class="gui-label">训练模式 <span class="marker">4</span></span>
+                  <span class="gui-select">CPU 标准模式　⌄</span>
+                </div>
+                <div class="gui-param-row">
+                  <span class="gui-label">路线阈值 <span class="marker">5</span></span>
+                  <span class="gui-input disabled">自动推荐</span>
+                  <span class="gui-label">自动推荐</span>
+                  <span class="check">✓</span>
+                </div>
+                <div class="gui-hint">取消自动推荐后可输入 0-100 的整数；流式模式适合超大数据和 16GB 内存电脑。</div>
               </div>
             </div>
             <div class="gui-controls">
-              <span class="gui-button primary">开始训练 <span class="marker">7</span></span>
-              <span class="progress-track"><span class="progress-value"></span></span>
-              <span class="gui-button">打开输出目录 <span class="marker">8</span></span>
-              <span class="gui-button">清空日志</span>
+              <span class="gui-button">打开输出目录 <span class="marker">7</span></span>
+              <span class="gui-button">清空日志 <span class="marker">8</span></span>
+              <span class="gui-button">保存日志 <span class="marker">10</span></span>
+              <span class="gui-hint">耗时 00:12</span>
+              <span class="gui-button primary">开始训练 <span class="marker">6</span></span>
             </div>
             <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/8] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">9</span></div>
             <div class="gui-status">训练中，请保持窗口打开...</div>
@@ -736,15 +757,16 @@
             </thead>
             <tbody>
               <tr><td><strong>1. reallog 目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>空白，必须选择存在的目录。</td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击“浏览...”。</td><td>优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击输入框右侧的 <code>···</code> 浏览按钮。</td><td>优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。</td><td><span class="badge no">不记忆</span></td></tr>
               <tr><td><strong>3. 车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>4. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>生成覆盖度图</strong></td><td>生成 <code>coverage.png</code>，用于检查车速、横向加速度和接管等覆盖情况。建议保持勾选。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>5. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>6. 保留完整中间 CSV</strong></td><td>只在流式模式中可修改。取消后，仅当整个训练和质量验证成功时才删除大型中间 CSV；失败时仍保留现场文件。</td><td><span class="badge default">已勾选</span></td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>7. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>8. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>9. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保留或复制完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
+              <tr><td><strong>4. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>5. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>自动推荐</strong></td><td>控制路线阈值是否由程序自动选择。取消勾选后，路线阈值输入框才可编辑。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>7. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>8. 清空日志</strong></td><td>删除当前窗口中的运行日志，不影响输出目录中的文件。</td><td>只清空界面显示。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>9. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保存完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
+              <tr><td><strong>10. 保存日志</strong></td><td>将当前窗口日志保存为带时间戳的 <code>.log</code> 文件，默认写入 EXE 所在目录。</td><td>没有日志时提示先运行任务。</td><td><span class="badge no">不适用</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -791,7 +813,7 @@
           <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
           <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。rlog 提取默认自动使用多个 worker 并行解析。</li>
           <li><strong>点击开始训练</strong>运行日志会先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。</li>
-          <li><strong>观察日志</strong>进度条表示任务仍在运行，不表示准确百分比；右侧计时显示已运行时间。</li>
+          <li><strong>观察日志</strong>运行日志会实时追加步骤、警告和 Julia 输出；耗时显示会持续更新，但不代表准确百分比。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
         </ol>
         <div class="callout warning"><strong>首次 Julia 训练可能 3 至 10 分钟没有新输出。</strong>这是 Julia 编译依赖的正常现象。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。</div>
@@ -810,13 +832,13 @@
 
       <section id="pipeline">
         <h2>7. 程序内部的训练流程</h2>
-        <p>生成覆盖度图时共有 8 步；取消该选项时跳过第 5 步，界面显示 7 步。</p>
+        <p>GUI 默认执行完整的 8 步流程，并始终生成覆盖度图和完整中间 CSV。GUI 不提供关闭这两个行为的选项。</p>
         <ol class="steps">
           <li><strong>提取横向控制数据</strong>递归读取 rlog，单个文件完整按时间排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
           <li><strong>修剪低质量路线</strong>删除低于阈值的路线，生成 <code>routes_pruned.csv</code>。</li>
           <li><strong>移除干预帧</strong>识别驾驶员修正与机械干扰，生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
-          <li><strong>生成覆盖度图（可选）</strong>输出 <code>coverage.png</code>，用于判断训练数据覆盖是否均衡。</li>
+          <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code>，用于判断训练数据覆盖是否均衡。</li>
           <li><strong>Julia CPU 训练</strong>为当前车型准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出模型 JSON 和训练图。</li>
           <li><strong>验证模型质量</strong>校验 JSON 字段、18 维输入、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
           <li><strong>部署到输出目录</strong>将验证通过的模型原子复制为输出目录根部的 <code>车型.json</code>。已有同名模型会先备份为 <code>车型.json.bak</code>。</li>
@@ -830,7 +852,7 @@
 ├─ lateral_data.csv                    # rlog 提取后的完整数据
 ├─ routes_pruned.csv                   # 路线阈值筛选后数据
 ├─ interventions_pruned.csv            # 移除干预后的最终训练数据
-├─ coverage.png                        # 数据覆盖度图（勾选时生成）
+├─ coverage.png                        # 数据覆盖度图（始终生成）
 ├─ 车型.json                            # 最终可部署模型，最重要的文件
 ├─ 车型.json.bak                        # 重训覆盖前的旧模型备份（如有）
 ├─ validation\
@@ -844,15 +866,15 @@
       ├─ 车型-a.png / 车型-a.pdf        # Julia 分析图
       └─ 车型-b.png / 车型-b.pdf        # Julia 分析图</code></pre>
         <div class="callout"><strong>最终交付文件：</strong>通常使用输出目录根部的 <code>车型.json</code>。它是在质量验证通过后部署的副本，不要误用失败任务留下的中间文件。</div>
-        <h3>关闭“保留完整中间 CSV”之后</h3>
-        <p>该选项只对流式模式生效。整个训练、质量验证和部署均成功后，程序尝试删除：</p>
+        <h3>GUI 始终保留中间 CSV</h3>
+        <p>GUI 会保留完整中间 CSV，方便检查每个步骤和排查失败原因。整个训练、质量验证和部署完成后，以下文件仍会保留：</p>
         <ul>
           <li><code>lateral_data.csv</code></li>
           <li><code>routes_pruned.csv</code></li>
           <li><code>interventions_pruned.csv</code></li>
           <li><code>training_input\车型.csv</code></li>
         </ul>
-        <p>模型、统计图片和训练结果目录会保留。任务失败或取消时不会执行成功后的清理，以便排查。</p>
+        <p>如需在训练成功后清理这些文件，请使用命令行流程的 <code>--no-keep-intermediates</code> 参数；该参数不对应 GUI 控件。任务失败或取消时命令行也不会执行成功后的清理，以便排查。</p>
         <div class="callout warning"><strong>复用同一个输出目录时要注意：</strong>新训练开始前会清理 <code>training_input</code> 根目录中旧的 CSV，并删除同车型旧的 <code>training_results\车型</code> 结果目录；输出目录根部的同名模型会保留一份 <code>.bak</code> 备份。</div>
       </section>
 
@@ -888,9 +910,8 @@
         <ul>
           <li>上次填写的车型</li>
           <li>上次选择的训练模式</li>
-          <li>是否保留完整中间 CSV</li>
         </ul>
-        <p>输入目录、输出目录、手动阈值和“生成覆盖度图”不会保存。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。</p>
+        <p>输入目录、输出目录、手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。</p>
         <div class="callout"><strong>恢复默认偏好：</strong>先退出 GUI，再删除 <code>%APPDATA%\NNLC\settings.json</code>。下次启动时会重新创建。</div>
       </section>
 
@@ -898,7 +919,7 @@
         <h2>11. 常见问题与排查顺序</h2>
         <details open>
           <summary>提示“请选择有效的 reallog 目录”</summary>
-          <div><p>当前填写的路径为空、目录不存在，或移动了原目录。重新点击“浏览...”选择实际存在的目录。路径使用 <code>\</code> 或 <code>/</code> 不影响程序，GUI 会按 Windows 规则统一显示。</p></div>
+          <div><p>当前填写的路径为空、目录不存在，或移动了原目录。重新点击输入框右侧的 <code>···</code> 浏览按钮选择实际存在的目录。路径使用 <code>\</code> 或 <code>/</code> 不影响程序，GUI 会按 Windows 规则统一显示。</p></div>
         </details>
         <details>
           <summary>提示“数据目录中未找到 rlog 文件”</summary>
@@ -938,7 +959,7 @@
         </details>
         <details>
           <summary>输出目录空间不足</summary>
-          <div><p>停止后把输出目录改到容量更大的磁盘。不要在训练中移动或删除正在增长的 CSV。流式模式关闭“保留完整中间 CSV”只能在整个任务成功后清理文件，不能降低训练过程中的磁盘峰值。</p></div>
+          <div><p>停止后把输出目录改到容量更大的磁盘。不要在训练中移动或删除正在增长的 CSV。GUI 始终保留中间 CSV；命令行的 <code>--no-keep-intermediates</code> 只能在整个任务成功后清理文件，不能降低训练过程中的磁盘峰值。</p></div>
         </details>
         <details>
           <summary>怎样提供一份可分析的错误日志</summary>
