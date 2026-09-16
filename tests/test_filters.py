@@ -13,6 +13,10 @@ from nnlc_tools.steering_classifier.filters import (
 
 FILTERS_PATH = Path(__file__).resolve().parents[1] / "nnlc_tools" / "steering_classifier" / "filters.py"
 
+# macOS/Windows libm can differ by ~1 ULP; keep this tighter than classifier thresholds.
+GOLDEN_RTOL = 1e-12
+GOLDEN_ATOL = 1e-12
+
 # Captured from scipy 1.17.1: butter(2, Wn, btype="bandpass", output="sos")
 # with fs=100 Hz and Nyquist-normalized Wn.
 GOLDEN_LOW_SOS = np.array(
@@ -107,8 +111,12 @@ def test_filters_module_does_not_import_scipy():
 
 
 def test_default_bandpass_sos_matches_scipy_golden():
-    np.testing.assert_array_equal(_make_bandpass_sos(0.5, 3.0, 100.0), GOLDEN_LOW_SOS)
-    np.testing.assert_array_equal(_make_bandpass_sos(5.0, 40.0, 100.0), GOLDEN_HIGH_SOS)
+    np.testing.assert_allclose(
+        _make_bandpass_sos(0.5, 3.0, 100.0), GOLDEN_LOW_SOS, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
+    )
+    np.testing.assert_allclose(
+        _make_bandpass_sos(5.0, 40.0, 100.0), GOLDEN_HIGH_SOS, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL
+    )
 
 
 def test_zero_order_bandpass_matches_scipy_identity():
@@ -120,14 +128,14 @@ def test_sosfilt_impulse_matches_scipy_golden():
     impulse = np.zeros(32)
     impulse[0] = 1.0
     filtered = _sosfilt(GOLDEN_LOW_SOS, impulse)
-    np.testing.assert_array_equal(filtered, GOLDEN_LOW_IMPULSE)
+    np.testing.assert_allclose(filtered, GOLDEN_LOW_IMPULSE, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
 
 
 def test_compute_freq_energy_ratio_matches_golden_random_window():
     rng = np.random.default_rng(123)
     signal = rng.normal(size=80)
     ratio = compute_freq_energy_ratio(signal)
-    assert ratio == 0.2267366923452386
+    np.testing.assert_allclose(ratio, 0.2267366923452386, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
 
 
 def test_bandpass_rms_short_signal_is_zero():
@@ -170,7 +178,7 @@ def test_freq_energy_ratio_live_scipy_random_windows():
                 signal, fs=fs, low_band=low, high_band=high
             )
             ref = scipy_ratio(signal, fs=fs, low_band=low, high_band=high)
-            assert ours == ref
+            np.testing.assert_allclose(ours, ref, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
 
 
 def test_sos_and_sosfilt_match_scipy_across_orders():
@@ -185,8 +193,8 @@ def test_sos_and_sosfilt_match_scipy_across_orders():
         wn = [0.5 / 50.0, 3.0 / 50.0]
         sos = _butter_bandpass_sos(order, wn)
         sos_ref = butter(order, wn, btype="bandpass", output="sos")
-        np.testing.assert_array_equal(sos, sos_ref)
-        np.testing.assert_array_equal(_sosfilt(sos, x), sosfilt(sos_ref, x))
+        np.testing.assert_allclose(sos, sos_ref, rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
+        np.testing.assert_allclose(_sosfilt(sos, x), sosfilt(sos_ref, x), rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
 
 
 def test_real_rlog_windows_match_captured_scipy_ratios():
@@ -196,4 +204,4 @@ def test_real_rlog_windows_match_captured_scipy_ratios():
     for i, expected in enumerate(ratios):
         torque = data[f"torque_{i}"]
         got = compute_freq_energy_ratio(torque)
-        assert got == float(expected)
+        np.testing.assert_allclose(got, float(expected), rtol=GOLDEN_RTOL, atol=GOLDEN_ATOL)
