@@ -138,6 +138,8 @@ a = Analysis(
     hooksconfig={"matplotlib": {"backends": ["Agg"]}},
     runtime_hooks=[],
     excludes=[
+        # Pandas' optional imports can collect SciPy from an existing build environment.
+        "scipy",
         "tkinter.test",
         "numpy.tests",
         "pandas.tests",
