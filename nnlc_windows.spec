@@ -110,6 +110,7 @@ hiddenimports = [
     "nnlc_gui",
     "nnlc_runtime",
     "nnlc_update",
+    "nnlc_update_ui",
     "nnlc_version",
     "nnlc_tools",
     "nnlc_tools.logreader",

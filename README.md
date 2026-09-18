@@ -27,6 +27,7 @@ nnlc/
 │   └── 其他 *.jl              # 实验或对比模型，不参与默认流程
 ├── nnlc_version.py            # 应用版本读取
 ├── nnlc_update.py             # Windows EXE 更新检查与下载
+├── nnlc_update_ui.py          # GUI 更新弹窗与下载进度
 ├── build_tools/               # 构建时生成版本资源
 ├── build_windows.ps1          # Windows one-file EXE 构建脚本
 ├── build_julia_runtime.ps1    # 可复用 Julia 环境 ZIP 构建脚本
