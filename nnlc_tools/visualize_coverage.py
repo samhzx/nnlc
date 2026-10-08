@@ -2,7 +2,8 @@
 """Visualize lateral data coverage for NNLC training.
 
 Generates a speed vs lateral acceleration heatmap with gap highlighting,
-a lateral acceleration histogram, and override rate by speed.
+a lateral acceleration histogram, and override rate by speed. Collection
+advice is written next to the image as coverage_gaps.txt.
 
 Usage:
   python -m nnlc_tools.visualize_coverage output.csv -o coverage.png
@@ -21,6 +22,296 @@ from matplotlib.colors import LogNorm
 
 from nnlc_tools.bool_utils import parse_bool_series
 from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
+
+SPEED_BINS = np.linspace(0, 40, 41)
+LAT_BINS = np.linspace(-3, 3, 61)
+ROLL_MILD_ABS = 0.04
+ROLL_STRONG_ABS = 0.08
+MAX_RECOMMENDATIONS = 8
+
+# Named driving regimes used to turn heatmap holes into collection tasks.
+_SCENARIOS = (
+    {
+        "id": "highway_overall",
+        "speed": (25.0, 35.0),
+        "lat_abs": (0.0, 3.0),
+        "missing_below": 800,
+        "low_below": 8000,
+        "priority": 10,
+        "missing": "缺高速公路工况。先补 25-35 m/s 的干净直线和缓弯，再谈高速手感。",
+        "low": "高速公路样本偏少。继续补 25-35 m/s 的路段，避免模型只记住城市速度。",
+    },
+    {
+        "id": "highway_sharp",
+        "speed": (25.0, 35.0),
+        "lat_abs": (1.5, 3.0),
+        "missing_below": 50,
+        "low_below": 400,
+        "priority": 20,
+        "missing": "缺高速大弯。补采高速公路匝道或高速弯道，目标 |横向加速度| > 1.5 m/s²。",
+        "low": "高速大弯样本不足。再补几条 25-35 m/s、横向加速度较大的弯道。",
+    },
+    {
+        "id": "mid_speed_medium",
+        "speed": (20.0, 30.0),
+        "lat_abs": (0.8, 2.0),
+        "missing_below": 80,
+        "low_below": 600,
+        "priority": 30,
+        "missing": "缺 20-30 m/s 的中等横向加速度。补郊区弯道或快速路出入口。",
+        "low": "20-30 m/s 的中等弯道偏少。补几条横向加速度约 0.8-2.0 m/s² 的路段。",
+    },
+    {
+        "id": "city_curve",
+        "speed": (5.0, 15.0),
+        "lat_abs": (0.8, 3.0),
+        "missing_below": 80,
+        "low_below": 600,
+        "priority": 40,
+        "missing": "缺城市弯道。补 5-15 m/s 的路口转弯和小区外围弯道。",
+        "low": "城市弯道样本偏少。继续补低速转弯，避免模型只会走直线。",
+    },
+    {
+        "id": "suburban_curve",
+        "speed": (15.0, 25.0),
+        "lat_abs": (0.8, 3.0),
+        "missing_below": 80,
+        "low_below": 600,
+        "priority": 50,
+        "missing": "缺郊区弯道。补 15-25 m/s 的连续弯和上下匝道。",
+        "low": "郊区弯道样本偏少。补几条中速连续弯。",
+    },
+    {
+        "id": "left_sharp",
+        "speed": (8.0, 35.0),
+        "lat": (-3.0, -1.0),
+        "missing_below": 80,
+        "low_below": 600,
+        "priority": 60,
+        "missing": "缺左急弯。补横向加速度 < -1.0 m/s² 的左转，避免左右增益不对称。",
+        "low": "左急弯偏少。再补几条较急的左转。",
+    },
+    {
+        "id": "right_sharp",
+        "speed": (8.0, 35.0),
+        "lat": (1.0, 3.0),
+        "missing_below": 80,
+        "low_below": 600,
+        "priority": 70,
+        "missing": "缺右急弯。补横向加速度 > 1.0 m/s² 的右转。",
+        "low": "右急弯偏少。再补几条较急的右转。",
+    },
+)
+
+
+def coverage_recommendation_path(output_path):
+    """Place the advice file next to the coverage image."""
+    root, _ext = os.path.splitext(output_path)
+    return root + "_gaps.txt"
+
+
+def _bin_centers(edges):
+    return 0.5 * (edges[:-1] + edges[1:])
+
+
+def _region_mask(speed_lo, speed_hi, lat_lo=None, lat_hi=None, lat_abs=None):
+    speed_centers = _bin_centers(SPEED_BINS)[:, None]
+    lat_centers = _bin_centers(LAT_BINS)[None, :]
+    mask = (speed_centers >= speed_lo) & (speed_centers < speed_hi)
+    if lat_abs is not None:
+        abs_lo, abs_hi = lat_abs
+        abs_lat = np.abs(lat_centers)
+        mask = mask & (abs_lat >= abs_lo) & (abs_lat < abs_hi)
+    elif lat_lo is not None and lat_hi is not None:
+        mask = mask & (lat_centers >= lat_lo) & (lat_centers < lat_hi)
+    return np.broadcast_to(mask, (SPEED_BINS.size - 1, LAT_BINS.size - 1)).copy()
+
+
+def _region_stats(counts, scenario, gap_threshold=50):
+    mask = _region_mask(
+        scenario["speed"][0],
+        scenario["speed"][1],
+        lat_lo=scenario.get("lat", (None, None))[0] if "lat" in scenario else None,
+        lat_hi=scenario.get("lat", (None, None))[1] if "lat" in scenario else None,
+        lat_abs=scenario.get("lat_abs"),
+    )
+    values = counts[mask]
+    samples = int(values.sum())
+    bins = int(values.size)
+    sparse_bins = int(((values > 0) & (values < gap_threshold)).sum())
+    empty_bins = int((values == 0).sum())
+    covered_bins = bins - empty_bins
+    coverage = covered_bins / bins if bins else 0.0
+    return {
+        "samples": samples,
+        "bins": bins,
+        "empty_bins": empty_bins,
+        "sparse_bins": sparse_bins,
+        "coverage": coverage,
+    }
+
+
+def _speed_range(counts):
+    occupied = np.where(counts.sum(axis=1) > 0)[0]
+    if occupied.size == 0:
+        return None, None
+    centers = _bin_centers(SPEED_BINS)
+    return float(centers[occupied[0]]), float(centers[occupied[-1]])
+
+
+def _lat_range(counts):
+    occupied = np.where(counts.sum(axis=0) > 0)[0]
+    if occupied.size == 0:
+        return None, None
+    centers = _bin_centers(LAT_BINS)
+    return float(centers[occupied[0]]), float(centers[occupied[-1]])
+
+
+def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
+    """Turn a speed x lat-accel histogram into collection advice.
+
+    ``counts`` must use SPEED_BINS x LAT_BINS. Findings are ordered by
+    importance, not by how empty a single heatmap cell is.
+    """
+    counts = np.asarray(counts, dtype=np.int64)
+    if counts.shape != (SPEED_BINS.size - 1, LAT_BINS.size - 1):
+        raise ValueError(
+            f"coverage histogram shape must be {(SPEED_BINS.size - 1, LAT_BINS.size - 1)}, "
+            f"got {counts.shape}"
+        )
+    total = int(counts.sum())
+    speed_lo, speed_hi = _speed_range(counts)
+    lat_lo, lat_hi = _lat_range(counts)
+    findings = []
+    if total == 0:
+        findings.append({
+            "id": "no_samples",
+            "severity": "missing",
+            "priority": 0,
+            "advice": "有效样本不足，无法判断路况缺口。先确认数据里有活动行驶帧。",
+            "samples": 0,
+            "coverage": 0.0,
+        })
+        return {
+            "total_samples": 0,
+            "speed_range": (speed_lo, speed_hi),
+            "lat_range": (lat_lo, lat_hi),
+            "findings": findings,
+        }
+
+    left_sharp = _region_stats(counts, next(s for s in _SCENARIOS if s["id"] == "left_sharp"), gap_threshold)
+    right_sharp = _region_stats(counts, next(s for s in _SCENARIOS if s["id"] == "right_sharp"), gap_threshold)
+    highway = _region_stats(counts, next(s for s in _SCENARIOS if s["id"] == "highway_overall"), gap_threshold)
+
+    for scenario in _SCENARIOS:
+        stats = _region_stats(counts, scenario, gap_threshold)
+        if scenario["id"] == "highway_sharp" and highway["samples"] < scenario["missing_below"]:
+            continue
+        severity = None
+        advice = None
+        if stats["samples"] < scenario["missing_below"]:
+            severity = "missing"
+            advice = scenario["missing"]
+        elif stats["samples"] < scenario["low_below"] or stats["coverage"] < 0.25:
+            severity = "low"
+            advice = scenario["low"]
+        if advice is None:
+            continue
+        findings.append({
+            "id": scenario["id"],
+            "severity": severity,
+            "priority": scenario["priority"],
+            "advice": advice,
+            "samples": stats["samples"],
+            "coverage": stats["coverage"],
+        })
+
+    stronger = max(left_sharp["samples"], right_sharp["samples"])
+    weaker = min(left_sharp["samples"], right_sharp["samples"])
+    if stronger >= 200 and weaker < 0.4 * stronger:
+        side = "左" if left_sharp["samples"] < right_sharp["samples"] else "右"
+        findings.append({
+            "id": "turn_imbalance",
+            "severity": "imbalance",
+            "priority": 25,
+            "advice": f"左右急弯明显不对称，{side}侧偏少。补采{side}转急弯，避免左右增益不一致。",
+            "samples": weaker,
+            "coverage": weaker / stronger if stronger else 0.0,
+        })
+
+    if roll_stats:
+        mild = int(roll_stats.get("mild", 0))
+        strong = int(roll_stats.get("strong", 0))
+        if total >= 1000 and (mild / total < 0.02 or strong == 0):
+            findings.append({
+                "id": "roll",
+                "severity": "low" if mild else "missing",
+                "priority": 35,
+                "advice": "缺横滚工况。补上下坡、超高弯或带横坡的匝道，让模型学会横滚补偿。",
+                "samples": mild,
+                "coverage": mild / total,
+            })
+
+    severity_rank = {"missing": 0, "low": 1, "imbalance": 1}
+    findings.sort(key=lambda item: (severity_rank[item["severity"]], item["priority"]))
+    return {
+        "total_samples": total,
+        "speed_range": (speed_lo, speed_hi),
+        "lat_range": (lat_lo, lat_hi),
+        "findings": findings[:MAX_RECOMMENDATIONS],
+    }
+
+
+def format_coverage_gap_report(analysis):
+    """Render collection advice as plain UTF-8 text."""
+    lines = ["NNLC 路况覆盖建议", ""]
+    total = analysis["total_samples"]
+    speed_range = analysis["speed_range"]
+    lat_range = analysis["lat_range"]
+    lines.append(f"有效样本: {total:,}")
+    if speed_range[0] is not None:
+        lines.append(f"速度覆盖: {speed_range[0]:.0f}-{speed_range[1]:.0f} m/s")
+    if lat_range[0] is not None:
+        lines.append(f"横向加速度覆盖: {lat_range[0]:+.1f} 到 {lat_range[1]:+.1f} m/s²")
+    lines.append("")
+    findings = analysis["findings"]
+    if not findings:
+        lines.append("覆盖较好，未发现需要优先补采的路况。")
+        lines.append("建议再用模型验证图确认高速增益和左右对称，而不是继续堆总时长。")
+        return "\n".join(lines) + "\n"
+    if total < 10000:
+        lines.append("有效样本偏少。下面这些缺口应优先补采，而不是继续重复同一条路线。")
+        lines.append("")
+    lines.append("建议优先补采:")
+    for index, finding in enumerate(findings, start=1):
+        lines.append(f"{index}. {finding['advice']}")
+    return "\n".join(lines) + "\n"
+
+
+def write_coverage_recommendations(output_path, counts, gap_threshold=50, roll_stats=None):
+    """Write and print collection advice next to the coverage image."""
+    analysis = analyze_coverage_gaps(counts, gap_threshold=gap_threshold, roll_stats=roll_stats)
+    report = format_coverage_gap_report(analysis)
+    advice_path = coverage_recommendation_path(output_path)
+    parent = os.path.dirname(os.path.abspath(advice_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(advice_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(report)
+    print(f"Saved coverage advice to {advice_path}")
+    for line in report.strip().splitlines():
+        print(line)
+    return advice_path, analysis
+
+
+def _roll_stats_from_series(roll):
+    values = pd.to_numeric(roll, errors="coerce").abs().dropna().to_numpy()
+    if values.size == 0:
+        return None
+    return {
+        "mild": int((values >= ROLL_MILD_ABS).sum()),
+        "strong": int((values >= ROLL_STRONG_ABS).sum()),
+    }
 
 
 def load_data_for_viz(input_path):
@@ -96,8 +387,8 @@ def plot_coverage(df, output_path, gap_threshold=50):
 
     # 1. Speed vs Lateral Accel Heatmap
     ax1 = axes[0, 0]
-    speed_bins = np.linspace(0, 40, 41)
-    lat_bins = np.linspace(-3, 3, 61)
+    speed_bins = SPEED_BINS
+    lat_bins = LAT_BINS
 
     valid = active_df[["v_ego", lat_accel_col]].dropna()
     h, xedges, yedges = np.histogram2d(
@@ -253,6 +544,8 @@ def plot_coverage(df, output_path, gap_threshold=50):
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"Saved coverage plot to {output_path}")
     plt.close()
+    roll_stats = _roll_stats_from_series(active_df["roll"]) if "roll" in active_df.columns else None
+    write_coverage_recommendations(output_path, h, gap_threshold=gap_threshold, roll_stats=roll_stats)
 
 
 def plot_coverage_stream(input_path, output_path, gap_threshold=50,
@@ -274,9 +567,9 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
         print(f"WARNING: {message}")
         save_placeholder_plot(output_path, "NNLC Training Data Coverage", message)
         return
-    speed_bins = np.linspace(0, 40, 41)
-    lat_bins = np.linspace(-3, 3, 61)
-    h = np.zeros((40, 60), dtype=np.int64)
+    speed_bins = SPEED_BINS
+    lat_bins = LAT_BINS
+    h = np.zeros((SPEED_BINS.size - 1, LAT_BINS.size - 1), dtype=np.int64)
     h_override = np.zeros_like(h)
     lat_hist = np.zeros(60, dtype=np.int64)
     speed_total = np.zeros(20, dtype=np.int64)
@@ -286,6 +579,8 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
     torque_hist = np.zeros(40, dtype=np.int64)
     torque_edges = np.linspace(0, 10, 41)
     valid_rows = 0
+    roll_mild = 0
+    roll_strong = 0
 
     for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
         mask = pd.Series(True, index=chunk.index)
@@ -304,6 +599,10 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
         if valid.empty:
             continue
         valid_rows += len(valid)
+        if "roll" in active.columns:
+            roll_values = pd.to_numeric(active.loc[valid.index, "roll"], errors="coerce").abs().dropna().to_numpy()
+            roll_mild += int((roll_values >= ROLL_MILD_ABS).sum())
+            roll_strong += int((roll_values >= ROLL_STRONG_ABS).sum())
         speed = valid["speed"].to_numpy()
         lat = valid["lat"].to_numpy()
         h += np.histogram2d(np.clip(speed, 0, 40), np.clip(lat, -3, 3),
@@ -336,11 +635,13 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
         norm=LogNorm(vmin=1, vmax=max(int(h.max()), 2)), cmap="viridis",
     )
     fig.colorbar(im, ax=axes[0, 0], label="Sample count (log)")
-    for i in range(40):
-        for j in range(60):
+    for i in range(SPEED_BINS.size - 1):
+        for j in range(LAT_BINS.size - 1):
             if 0 < h[i, j] < gap_threshold:
                 axes[0, 0].add_patch(plt.Rectangle(
-                    (speed_bins[i], lat_bins[j]), 1, .1,
+                    (speed_bins[i], lat_bins[j]),
+                    speed_bins[i + 1] - speed_bins[i],
+                    lat_bins[j + 1] - lat_bins[j],
                     linewidth=.5, edgecolor="red", facecolor="none"))
     axes[0, 0].set(xlabel="Speed (m/s)", ylabel="Lateral Accel (m/s²)",
                    title="Speed vs Lat Accel\n(red outline = <50 samples)")
@@ -374,6 +675,8 @@ def plot_coverage_stream(input_path, output_path, gap_threshold=50,
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved coverage plot to {output_path}")
+    roll_stats = {"mild": roll_mild, "strong": roll_strong} if (roll_mild or roll_strong) else None
+    write_coverage_recommendations(output_path, h, gap_threshold=gap_threshold, roll_stats=roll_stats)
 
 
 MS_TO_MPH = 2.23694

@@ -455,7 +455,7 @@ python -m nnlc_tools.visualize_coverage [-h] [-o OUTPUT]
   --chunk-rows N     每个分块的行数（默认：100000）
 ```
 
-`--streaming` 仅支持 CSV，且不能与 `--torque-scatter` 同时使用。
+生成覆盖度图时，会同时在同目录写出 `coverage_gaps.txt`，把热力图里的缺口翻译成补采建议，例如缺高速公路、缺高速大弯、缺左急弯、缺横滚。建议也会打印到训练日志里。`--streaming` 仅支持 CSV，且不能与 `--torque-scatter` 同时使用。
 
 ### visualize_model
 
