@@ -30,78 +30,117 @@ ROLL_STRONG_ABS = 0.08
 MAX_RECOMMENDATIONS = 8
 
 # Named driving regimes used to turn heatmap holes into collection tasks.
+# Speeds are stored in m/s to match SPEED_BINS; reports convert them to km/h.
+KMH_PER_MS = 3.6
+SEVERITY_LABELS = {
+    "missing": "缺失",
+    "low": "偏少",
+    "imbalance": "不对称",
+}
+
 _SCENARIOS = (
     {
         "id": "highway_overall",
+        "title": "高速公路工况",
         "speed": (25.0, 35.0),
         "lat_abs": (0.0, 3.0),
         "missing_below": 800,
         "low_below": 8000,
         "priority": 10,
-        "missing": "缺高速公路工况。先补 25-35 m/s 的干净直线和缓弯，再谈高速手感。",
-        "low": "高速公路样本偏少。继续补 25-35 m/s 的路段，避免模型只记住城市速度。",
+        "why_missing": "几乎没有高速样本时，模型只能按城市速度外推，高速直线容易晃，进弯也会偏晚或过猛。",
+        "why_low": "高速样本不够时，模型仍偏向城市速度，高速巡航和高速弯道手感都不稳。",
+        "how": "关闭 NNLC 和转向灯横向，在干燥高速上少碰方向盘，先采干净巡航和缓弯。",
+        "roads": "高速公路主路、城际快速路。先把 90 km/h 以上直线和缓弯补够，再专门跑匝道大弯。",
     },
     {
         "id": "highway_sharp",
+        "title": "高速大弯 / 匝道",
         "speed": (25.0, 35.0),
         "lat_abs": (1.5, 3.0),
         "missing_below": 50,
         "low_below": 400,
         "priority": 20,
-        "missing": "缺高速大弯。补采高速公路匝道或高速弯道，目标 |横向加速度| > 1.5 m/s²。",
-        "low": "高速大弯样本不足。再补几条 25-35 m/s、横向加速度较大的弯道。",
+        "why_missing": "缺高速大弯时，模型在高横向加速度端会变软，匝道和高速弯容易欠打。",
+        "why_low": "高速大弯样本不足时，高横向加速度扭矩曲线不可靠，高速弯容易内外侧来回修正。",
+        "how": "在激活状态下走高速公路匝道、互通立交外环，保持较少接管，左右匝道都要有。",
+        "roads": "高速入口/出口匝道、互通立交大半径弯。目标横向加速度大于 1.5 m/s²。",
     },
     {
         "id": "mid_speed_medium",
+        "title": "快速路中等弯道",
         "speed": (20.0, 30.0),
         "lat_abs": (0.8, 2.0),
         "missing_below": 80,
         "low_below": 600,
         "priority": 30,
-        "missing": "缺 20-30 m/s 的中等横向加速度。补郊区弯道或快速路出入口。",
-        "low": "20-30 m/s 的中等弯道偏少。补几条横向加速度约 0.8-2.0 m/s² 的路段。",
+        "why_missing": "缺 72-108 km/h 的中等弯道时，城市和高速之间的过渡段会发飘或进弯晚。",
+        "why_low": "快速路中等弯道偏少时，模型在郊区和快速路出入口容易左右修正。",
+        "how": "关闭 NNLC，走快速路出入口和郊区连续弯，让控制器自己打方向，少手扶。",
+        "roads": "城市快速路出入口、郊区连续弯、高架匝道。横向加速度大约 0.8-2.0 m/s²。",
     },
     {
         "id": "city_curve",
+        "title": "城市低速弯道",
         "speed": (5.0, 15.0),
         "lat_abs": (0.8, 3.0),
         "missing_below": 80,
         "low_below": 600,
         "priority": 40,
-        "missing": "缺城市弯道。补 5-15 m/s 的路口转弯和小区外围弯道。",
-        "low": "城市弯道样本偏少。继续补低速转弯，避免模型只会走直线。",
+        "why_missing": "缺低速转弯时，模型只会走直线，路口和小区外围容易打不够或低速抽方向盘。",
+        "why_low": "城市弯道偏少时，低速增益不准，跟车转弯和路口容易过猛或发飘。",
+        "how": "在畅通路口和小区外围让控制器转弯，避免拥堵停车打方向，尽量左右都有。",
+        "roads": "畅通路口左转/右转、小区外围弯道、低速环岛。车速大约 18-54 km/h。",
     },
     {
         "id": "suburban_curve",
+        "title": "郊区中速弯道",
         "speed": (15.0, 25.0),
         "lat_abs": (0.8, 3.0),
         "missing_below": 80,
         "low_below": 600,
         "priority": 50,
-        "missing": "缺郊区弯道。补 15-25 m/s 的连续弯和上下匝道。",
-        "low": "郊区弯道样本偏少。补几条中速连续弯。",
+        "why_missing": "缺郊区连续弯时，模型在 54-90 km/h 路段容易左右晃，上下匝道也不稳。",
+        "why_low": "郊区弯道偏少时，中速连续弯和匝道的扭矩曲线不够，容易来回修正。",
+        "how": "跑几条不同的郊区路和上下匝道，不要反复同一条循环，左右弯数量尽量接近。",
+        "roads": "郊区连续弯、国道弯道、快速路上下匝道。车速大约 54-90 km/h。",
     },
     {
         "id": "left_sharp",
+        "title": "左急弯",
         "speed": (8.0, 35.0),
         "lat": (-3.0, -1.0),
         "missing_below": 80,
         "low_below": 600,
         "priority": 60,
-        "missing": "缺左急弯。补横向加速度 < -1.0 m/s² 的左转，避免左右增益不对称。",
-        "low": "左急弯偏少。再补几条较急的左转。",
+        "why_missing": "缺左急弯时，左右增益会不对称，左转贴线偏松或突然补打。",
+        "why_low": "左急弯偏少时，左转高横向加速度端不可靠，容易和右转手感差一截。",
+        "how": "专门补较急的左转，保持激活、少接管，覆盖城市路口到高速匝道。",
+        "roads": "路口左转、立交左转匝道、连续弯左侧。横向加速度小于 -1.0 m/s²。",
     },
     {
         "id": "right_sharp",
+        "title": "右急弯",
         "speed": (8.0, 35.0),
         "lat": (1.0, 3.0),
         "missing_below": 80,
         "low_below": 600,
         "priority": 70,
-        "missing": "缺右急弯。补横向加速度 > 1.0 m/s² 的右转。",
-        "low": "右急弯偏少。再补几条较急的右转。",
+        "why_missing": "缺右急弯时，左右增益会不对称，右转贴线偏松或突然补打。",
+        "why_low": "右急弯偏少时，右转高横向加速度端不可靠，容易和左转手感差一截。",
+        "how": "专门补较急的右转，保持激活、少接管，覆盖城市路口到高速匝道。",
+        "roads": "路口右转、立交右转匝道、连续弯右侧。横向加速度大于 1.0 m/s²。",
     },
 )
+
+
+def ms_to_kmh(speed_ms):
+    """Convert training-data speed in m/s to driver-facing km/h."""
+    return float(speed_ms) * KMH_PER_MS
+
+
+def format_kmh_range(speed_lo, speed_hi):
+    """Format a speed interval for collection advice."""
+    return f"{ms_to_kmh(speed_lo):.0f}-{ms_to_kmh(speed_hi):.0f} km/h"
 
 
 def coverage_recommendation_path(output_path):
@@ -167,6 +206,41 @@ def _lat_range(counts):
     return float(centers[occupied[0]]), float(centers[occupied[-1]])
 
 
+def _lat_target_text(scenario):
+    if "lat_abs" in scenario:
+        lo, hi = scenario["lat_abs"]
+        if lo <= 0.0:
+            return f"直线到弯道，|横向加速度| < {hi:.1f} m/s²"
+        return f"|横向加速度| {lo:.1f}-{hi:.1f} m/s²"
+    lo, hi = scenario["lat"]
+    if hi <= 0:
+        return f"左转急弯，横向加速度 {lo:.1f} 到 {hi:.1f} m/s²"
+    return f"右转急弯，横向加速度 {lo:.1f} 到 {hi:.1f} m/s²"
+
+
+def _finding_from_scenario(scenario, stats, severity):
+    target = scenario["missing_below"] if severity == "missing" else scenario["low_below"]
+    why = scenario["why_missing"] if severity == "missing" else scenario["why_low"]
+    return {
+        "id": scenario["id"],
+        "severity": severity,
+        "priority": scenario["priority"],
+        "title": scenario["title"],
+        "advice": why,
+        "samples": stats["samples"],
+        "coverage": stats["coverage"],
+        "speed": scenario["speed"],
+        "lat_text": _lat_target_text(scenario),
+        "target_samples": target,
+        "empty_bins": stats["empty_bins"],
+        "sparse_bins": stats["sparse_bins"],
+        "bins": stats["bins"],
+        "why": why,
+        "how": scenario["how"],
+        "roads": scenario["roads"],
+    }
+
+
 def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
     """Turn a speed x lat-accel histogram into collection advice.
 
@@ -188,9 +262,16 @@ def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
             "id": "no_samples",
             "severity": "missing",
             "priority": 0,
+            "title": "有效行驶样本不足",
             "advice": "有效样本不足，无法判断路况缺口。先确认数据里有活动行驶帧。",
             "samples": 0,
             "coverage": 0.0,
+            "speed": None,
+            "lat_text": None,
+            "target_samples": 10000,
+            "why": "没有激活行驶帧时，覆盖度图和训练都没有意义。",
+            "how": "确认 rlog 来自开启横向控制的行驶，而不是停车、未激活或全部被剪枝的数据。",
+            "roads": "先完整跑通提取和剪枝，再看覆盖建议。",
         })
         return {
             "total_samples": 0,
@@ -208,23 +289,13 @@ def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
         if scenario["id"] == "highway_sharp" and highway["samples"] < scenario["missing_below"]:
             continue
         severity = None
-        advice = None
         if stats["samples"] < scenario["missing_below"]:
             severity = "missing"
-            advice = scenario["missing"]
         elif stats["samples"] < scenario["low_below"] or stats["coverage"] < 0.25:
             severity = "low"
-            advice = scenario["low"]
-        if advice is None:
+        if severity is None:
             continue
-        findings.append({
-            "id": scenario["id"],
-            "severity": severity,
-            "priority": scenario["priority"],
-            "advice": advice,
-            "samples": stats["samples"],
-            "coverage": stats["coverage"],
-        })
+        findings.append(_finding_from_scenario(scenario, stats, severity))
 
     stronger = max(left_sharp["samples"], right_sharp["samples"])
     weaker = min(left_sharp["samples"], right_sharp["samples"])
@@ -234,9 +305,19 @@ def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
             "id": "turn_imbalance",
             "severity": "imbalance",
             "priority": 25,
+            "title": "左右急弯不对称",
             "advice": f"左右急弯明显不对称，{side}侧偏少。补采{side}转急弯，避免左右增益不一致。",
             "samples": weaker,
             "coverage": weaker / stronger if stronger else 0.0,
+            "speed": (8.0, 35.0),
+            "lat_text": "左急弯横向加速度 < -1.0 m/s²，右急弯 > 1.0 m/s²",
+            "target_samples": max(200, int(0.8 * stronger)),
+            "empty_bins": None,
+            "left_samples": left_sharp["samples"],
+            "right_samples": right_sharp["samples"],
+            "why": f"左侧 {left_sharp['samples']:,} 个样本，右侧 {right_sharp['samples']:,} 个。差太多时模型左右增益会不一致，一边贴线紧、一边松。",
+            "how": f"专门补{side}转急弯，保持激活、少接管，把弱势一侧补到接近另一侧。",
+            "roads": "路口转弯、立交匝道、连续弯。左右急弯样本尽量接近 1:1。",
         })
 
     if roll_stats:
@@ -247,9 +328,18 @@ def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
                 "id": "roll",
                 "severity": "low" if mild else "missing",
                 "priority": 35,
+                "title": "横滚 / 坡道工况",
                 "advice": "缺横滚工况。补上下坡、超高弯或带横坡的匝道，让模型学会横滚补偿。",
                 "samples": mild,
                 "coverage": mild / total,
+                "speed": None,
+                "lat_text": f"|横滚| ≥ {ROLL_MILD_ABS:.2f} rad 的缓坡，以及 ≥ {ROLL_STRONG_ABS:.2f} rad 的明显横坡",
+                "target_samples": max(int(0.02 * total), 1),
+                "mild_samples": mild,
+                "strong_samples": strong,
+                "why": "缺横滚时模型不会补偿超高弯和上下坡，高速弯容易内外侧偏移。",
+                "how": "走上下坡、带横坡匝道和山区路段，保持激活行驶，不要在坡上停车打方向。",
+                "roads": "立交出入口超高段、山区高速、地库出入口坡道。",
             })
 
     severity_rank = {"missing": 0, "low": 1, "imbalance": 1}
@@ -262,6 +352,52 @@ def analyze_coverage_gaps(counts, gap_threshold=50, roll_stats=None):
     }
 
 
+def _format_finding(index, finding):
+    label = SEVERITY_LABELS.get(finding["severity"], finding["severity"])
+    lines = [f"{index}. [{label}] {finding['title']}"]
+    speed = finding.get("speed")
+    if speed:
+        lines.append(f"   目标速度: {format_kmh_range(speed[0], speed[1])}")
+    if finding.get("lat_text"):
+        lines.append(f"   目标横向加速度: {finding['lat_text']}")
+    target = finding.get("target_samples")
+    if target:
+        lines.append(f"   当前样本: {finding['samples']:,}；建议至少 {target:,}")
+    else:
+        lines.append(f"   当前样本: {finding['samples']:,}")
+    if finding.get("left_samples") is not None and finding.get("right_samples") is not None:
+        lines.append(
+            f"   左右对比: 左急弯 {finding['left_samples']:,} / 右急弯 {finding['right_samples']:,}"
+        )
+    if finding.get("mild_samples") is not None:
+        lines.append(
+            f"   横滚样本: 缓坡 {finding['mild_samples']:,}，明显横坡 {finding.get('strong_samples', 0):,}"
+        )
+    coverage = finding.get("coverage")
+    bins = finding.get("bins")
+    empty_bins = finding.get("empty_bins")
+    sparse_bins = finding.get("sparse_bins")
+    if bins:
+        extra = f"   格子覆盖: {coverage:.0%}"
+        parts = []
+        if empty_bins:
+            parts.append(f"空格子 {empty_bins}/{bins}")
+        if sparse_bins:
+            parts.append(f"稀疏格子 {sparse_bins}/{bins}")
+        if parts:
+            extra += f"（{'，'.join(parts)}）"
+        lines.append(extra)
+    elif coverage:
+        lines.append(f"   占比: {coverage:.1%}")
+    if finding.get("why"):
+        lines.append(f"   为什么要补: {finding['why']}")
+    if finding.get("how"):
+        lines.append(f"   怎么补: {finding['how']}")
+    if finding.get("roads"):
+        lines.append(f"   路线例子: {finding['roads']}")
+    return lines
+
+
 def format_coverage_gap_report(analysis):
     """Render collection advice as plain UTF-8 text."""
     lines = ["NNLC 路况覆盖建议", ""]
@@ -270,22 +406,36 @@ def format_coverage_gap_report(analysis):
     lat_range = analysis["lat_range"]
     lines.append(f"有效样本: {total:,}")
     if speed_range[0] is not None:
-        lines.append(f"速度覆盖: {speed_range[0]:.0f}-{speed_range[1]:.0f} m/s")
+        lines.append(f"速度覆盖: {format_kmh_range(speed_range[0], speed_range[1])}")
     if lat_range[0] is not None:
         lines.append(f"横向加速度覆盖: {lat_range[0]:+.1f} 到 {lat_range[1]:+.1f} m/s²")
+    lines.append("速度单位: km/h（由训练数据的 m/s 换算，1 m/s = 3.6 km/h）")
     lines.append("")
     findings = analysis["findings"]
     if not findings:
         lines.append("覆盖较好，未发现需要优先补采的路况。")
-        lines.append("建议再用模型验证图确认高速增益和左右对称，而不是继续堆总时长。")
+        if speed_range[0] is not None and lat_range[0] is not None:
+            lines.append(
+                f"当前大约覆盖 {format_kmh_range(speed_range[0], speed_range[1])}，"
+                f"横向加速度 {lat_range[0]:+.1f} 到 {lat_range[1]:+.1f} m/s²。"
+            )
+        lines.append("建议下一步看模型验证图：高速扭矩增益是否够、左右是否对称、低速是否过猛。")
+        lines.append("不必再重复同一条路线堆时长。")
         return "\n".join(lines) + "\n"
     if total < 10000:
         lines.append("有效样本偏少。下面这些缺口应优先补采，而不是继续重复同一条路线。")
         lines.append("")
     lines.append("建议优先补采:")
+    lines.append("")
     for index, finding in enumerate(findings, start=1):
-        lines.append(f"{index}. {finding['advice']}")
-    return "\n".join(lines) + "\n"
+        lines.extend(_format_finding(index, finding))
+        lines.append("")
+    lines.append("采集时注意:")
+    lines.append("- 关闭 NNLC，用原厂扭矩控制器，扭矩信号才反映车辆本身")
+    lines.append("- 关闭转向灯横向，避免变道噪声进训练")
+    lines.append("- 少碰方向盘，左右弯数量尽量接近")
+    lines.append("- 选干燥路面，避开拥堵、施工和停车场低速原地打方向")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def write_coverage_recommendations(output_path, counts, gap_threshold=50, roll_stats=None):

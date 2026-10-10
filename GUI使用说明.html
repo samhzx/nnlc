@@ -696,13 +696,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.0.6</span>
+            <span>NNLC 横向控制模型训练 v1.0.7</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.0.6</span>
+              <span class="gui-version">v1.0.7</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -838,7 +838,7 @@
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
           <li><strong>修剪低质量路线</strong>删除低于阈值的路线，生成 <code>routes_pruned.csv</code>。</li>
           <li><strong>移除干预帧</strong>识别驾驶员修正与机械干扰，生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
-          <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code>，用于判断训练数据覆盖是否均衡。</li>
+          <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code> 和 <code>coverage_gaps.txt</code>。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
           <li><strong>Julia CPU 训练</strong>为当前车型准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出模型 JSON 和训练图。</li>
           <li><strong>验证模型质量</strong>校验 JSON 字段、18 维输入、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
           <li><strong>部署到输出目录</strong>将验证通过的模型原子复制为输出目录根部的 <code>车型.json</code>。已有同名模型会先备份为 <code>车型.json.bak</code>。</li>
@@ -853,6 +853,7 @@
 ├─ routes_pruned.csv                   # 路线阈值筛选后数据
 ├─ interventions_pruned.csv            # 移除干预后的最终训练数据
 ├─ coverage.png                        # 数据覆盖度图（始终生成）
+├─ coverage_gaps.txt                   # 覆盖缺口补采建议，速度使用 km/h
 ├─ 车型.json                            # 最终可部署模型，最重要的文件
 ├─ 车型.json.bak                        # 重训覆盖前的旧模型备份（如有）
 ├─ validation\
@@ -899,6 +900,7 @@
           <li>左转与右转、正负横向加速度是否明显偏向一侧。</li>
           <li>低速急弯、高速缓弯等边界区域是否为空。</li>
           <li>接管比例是否过高，是否存在大量饱和或无效路线。</li>
+          <li>同目录的 <code>coverage_gaps.txt</code> 会把缺口翻译成补采建议：目标速度用 km/h，并写明当前样本、为什么要补、怎么补和路线例子。</li>
         </ul>
       </section>
 
