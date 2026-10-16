@@ -1,0 +1,64 @@
+name: Build C3 Rlog Downloader
+
+run-name: ${{ inputs.run_name || format('Build C3 Rlog Downloader ({0})', github.ref_name) }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_name:
+        description: "运行标题"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Run downloader unit tests
+        shell: pwsh
+        run: |
+          py -3.11 -m pip install --upgrade pip
+          py -3.11 -m pip install pytest
+          py -3.11 -m pytest -q c3_rlog_downloader\tests
+
+      - name: Build standalone executable
+        shell: pwsh
+        run: .\c3_rlog_downloader\build_windows.ps1
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "c3_rlog_downloader\dist\C3_Rlog_Downloader.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Expected executable was not found: $exe"
+          }
+          $version = (& $exe --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -ne "1.0.0") {
+            throw "Executable smoke test failed: $version"
+          }
+          $sizeMb = [math]::Round((Get-Item -LiteralPath $exe).Length / 1MB, 1)
+          Write-Host "C3_Rlog_Downloader.exe: $sizeMb MB"
+
+      - name: Upload standalone executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: C3_Rlog_Downloader-windows-x64
+          path: c3_rlog_downloader/dist/C3_Rlog_Downloader.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
