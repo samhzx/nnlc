@@ -67,7 +67,7 @@ Pkg.add(["Flux", "MLUtils", "CSV", "DataFrames", "JSON", "Statistics",
 
 ### CPU 训练
 
-使用 CustomAdaGrad 优化器时，CPU 训练运行稳定；小数据集训练 1000 个 epoch 约需 8 秒。训练脚本固定使用 CPU：
+使用 AdamW 优化器时，CPU 训练运行稳定；验证 MSE 不再下降时会提前结束。训练脚本固定使用 CPU：
 
 ```bash
 bash training/run.sh /path/to/latmodels/ --cpu

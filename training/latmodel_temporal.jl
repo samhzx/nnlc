@@ -862,56 +862,55 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     lj_func, v_ego_range, [0f0], [0f0], [0f0], [0f0], [0f0]
   )
 
-  # Cache for physical constraint losses (recomputed every N epochs)
-  cached_constraint_loss = Ref(0f0)
-  cached_constraint_epoch = Ref(0)
-  constraint_eval_interval = 10
-
-  function physical_constraint_losses(x, y_pred, λ_monotonic::Float32, λ_odd::Float32, λ_origin::Float32) :: Float32
-      if λ_monotonic ≈ 0f0 && λ_odd ≈ 0f0 && λ_origin ≈ 0f0
+  # Physical constraints must be evaluated on the model being differentiated.
+  # Caching a scalar here would zero the constraint gradient.
+  function physical_constraint_losses(current_model, λ_monotonic::Float32, λ_odd::Float32, λ_origin::Float32)
+      if λ_monotonic == 0f0 && λ_odd == 0f0 && λ_origin == 0f0
           return 0f0
       end
 
-      # Only recompute every N epochs and cache the result
-      if epoch % constraint_eval_interval != 0 || cached_constraint_epoch[] == epoch
-        return cached_constraint_loss[]
-      end
-      
       monotonicity_loss = 0f0
       odd_loss = 0f0
       origin_loss = 0f0
 
-      model_grid = model(grid)
-      
-      if λ_monotonic ≉ 0f0
-          model_da = model(grid_da)
-          model_dj = model(grid_dj)
-          model_de = model(grid_de)
-          model_dg = model(grid_dg)
-          model_dgr = model(grid_dg_rate)
+      model_grid = current_model(grid)
+
+      if λ_monotonic != 0f0
+          model_da = current_model(grid_da)
+          model_dj = current_model(grid_dj)
+          model_de = current_model(grid_de)
+          model_dg = current_model(grid_dg)
+          model_dgr = current_model(grid_dg_rate)
 
           # d(output)/d(lat accel/jerk) and d(output)/d(error) should be positive,
           # d(output)/d(roll) and d(output)/d(roll_rate) should be negative
-          @fastmath monotonicity_loss = sum(abs2, max.(0f0, (model_da .- model_grid) .* -1f0)) +
+          monotonicity_loss = sum(abs2, max.(0f0, (model_da .- model_grid) .* -1f0)) +
                               sum(abs2, max.(0f0, (model_dj .- model_grid) .* -1f0)) +
                               sum(abs2, max.(0f0, (model_de .- model_grid) .* -1f0)) +
                               sum(abs2, max.(0f0, model_dg .- model_grid)) +
-                              sum(abs2, max.(0f0, model_dgr .- model_grid))  
-      end
-      
-      if λ_odd ≉ 0f0
-          model_odd_neg = model(grid_odd_neg)
-          @fastmath odd_loss = sum(abs2, model_grid .+ model_odd_neg)
+                              sum(abs2, max.(0f0, model_dgr .- model_grid))
       end
 
-      if λ_origin ≉ 0f0
-          @fastmath origin_loss = sum(abs2, model(grid_origin))
+      if λ_odd != 0f0
+          model_odd_neg = current_model(grid_odd_neg)
+          odd_loss = sum(abs2, model_grid .+ model_odd_neg)
       end
 
-      result = @fastmath λ_monotonic * monotonicity_loss + λ_odd * odd_loss + λ_origin * origin_loss
-      cached_constraint_loss[] = result
-      cached_constraint_epoch[] = epoch
-      return result
+      if λ_origin != 0f0
+          origin_loss = sum(abs2, current_model(grid_origin))
+      end
+
+      return λ_monotonic * monotonicity_loss + λ_odd * odd_loss + λ_origin * origin_loss
+  end
+
+  function l2_penalty(current_model, λ::Float32)
+      λ == 0f0 && return 0f0
+      θ, _ = Flux.destructure(current_model)
+      return λ * sum(abs2, θ)
+  end
+
+  function prediction_mse(x, y, current_model)
+      return Flux.Losses.mse(y', current_model(x))
   end
 
   function model_with_params(model, params)
@@ -941,28 +940,35 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       return sum(weighted_squared_errors) / oftype(weighted_squared_errors[1], length(y_true))
   end
 
-  function combined_loss(x, y_true, y_pred, model, λ::Float32, λ_monotonic::Float32, λ_odd::Float32, λ_origin::Float32, low::Float32, high::Float32)
-      mse = 0f0
-      if low ≉ high
-        scaling_vector = get_scaling_vector(x, low, high)
-        mse = custom_mse(y_true, y_pred, scaling_vector)
+  function combined_loss(x, y_true, y_pred, current_model, λ::Float32, λ_monotonic::Float32, λ_odd::Float32, λ_origin::Float32, low::Float32, high::Float32)
+      mse = if low != high
+        custom_mse(y_true, y_pred, get_scaling_vector(x, low, high))
       else
-        mse = Flux.Losses.mse(y_true, y_pred)
+        Flux.Losses.mse(y_true, y_pred)
       end
-      
-      l2 = λ ≈ 0f0 ? 0f0 : λ * sum(p -> sum(abs2, p), params(model))
-      physical_constraints = physical_constraint_losses(x, y_pred, λ_monotonic, λ_odd, λ_origin)
-      
-      @fastmath return mse + l2 + physical_constraints
+
+      l2 = l2_penalty(current_model, λ)
+      physical_constraints = physical_constraint_losses(current_model, λ_monotonic, λ_odd, λ_origin)
+      return mse + l2 + physical_constraints
   end
 
-  loss(x, y, model, λ::Float32=0f0, λ_monotonic::Float32=0f0, λ_odd::Float32=0f0, λ_origin::Float32=0f0, low::Float32=1f0, high::Float32=1f0) = combined_loss(x, y', model(x), model, λ, λ_monotonic, λ_odd, λ_origin, low, high)
+  loss(x, y, current_model, λ::Float32=0f0, λ_monotonic::Float32=0f0, λ_odd::Float32=0f0, λ_origin::Float32=0f0, low::Float32=1f0, high::Float32=1f0) = combined_loss(x, y', current_model(x), current_model, λ, λ_monotonic, λ_odd, λ_origin, low, high)
 
-  # pick an optimizer
-  # opt = Flux.ADAM(0.001)
-  # opt = Flux.Nesterov()
-  opt = CustomAdaGrad(0.01f0, 1.0f-10)
+  # AdamW keeps a usable step size on this small MLP; AdaGrad's accumulator
+  # shrinks the learning rate toward 0 over long CPU runs.
+  opt = try
+    Optimisers.AdamW(eta=0.001f0, lambda=1.0f-4)
+  catch e
+    isa(e, MethodError) || rethrow()
+    try
+      Optimisers.AdamW(0.001f0, (0.9f0, 0.999f0), 1.0f-4)
+    catch e2
+      isa(e2, MethodError) || rethrow()
+      Optimisers.AdamW(0.001f0)
+    end
+  end
   state_tree = Optimisers.setup(opt, model)
+  println(out_streams, "Optimizer: AdamW")
 
   # Train with a fixed-size batch to bound reverse-mode autodiff memory.
   tol = log10(size(X_train, 1)) > 7 ? 1f-4 : 1f-6
@@ -1027,25 +1033,44 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     λ_oddmax = 0.000001f0
     λ_originmax = 0.0001f0
 
-    λ_start_epoch_fraction = 0.25f0
-    λ_monotonic_start_epoch_fraction = 0.6f0
-    λ_odd_start_epoch_fraction = 0.5f0
-    λ_origin_start_epoch_fraction = 0.7f0
+    # Keep the original ramp lengths, but start after epoch_min so early
+    # stopping cannot skip the constraint phase entirely.
+    λ_start_epoch = Float32(epoch_min)
+    λ_odd_start_epoch = Float32(epoch_min)
+    λ_monotonic_start_epoch = Float32(epoch_min) + 0.1f0 * Float32(epoch_max)
+    λ_origin_start_epoch = Float32(epoch_min) + 0.2f0 * Float32(epoch_max)
+    λ_ramp_epochs = 0.4f0 * Float32(epoch_max)
+    λ_monotonic_ramp_epochs = 0.3f0 * Float32(epoch_max)
+    λ_odd_ramp_epochs = 0.4f0 * Float32(epoch_max)
+    λ_origin_ramp_epochs = 0.2f0 * Float32(epoch_max)
 
     start_time = now()
     last_log_time = start_time - Dates.Millisecond(40000)
     ptime(t) = Dates.format(t, "HH:MM:SS")
     losses = Float32[]
+    val_mses = Float32[]
     lambdas = NTuple{4, Float32}[]
     ilog = 0
     epoch_last = 1
+    best_val_mse = Inf32
+    best_epoch = 0
+    best_model = deepcopy(model)
+    epochs_without_val_improvement = 0
+    early_stop_start_epoch = epoch_min
+    constraint_phase_started = false
 
-    while epoch < epoch_min || (epoch < epoch_max) # && (abs(Δloss) > tol || abs(ΔΔloss) > Δtol)
-        # determine λ_monotonic and λ_odd. They stay at 0 until 25% of the way through the training, then increase linearly to their max values by 75% of the way through the training
-        λ = λmax * min(1f0, max(0f0, epoch - epoch_max * λ_start_epoch_fraction) / (epoch_max * 0.7f0))
-        λ_monotonic = λ_monotonicmax * min(1f0, max(0f0, epoch - epoch_max * λ_monotonic_start_epoch_fraction) / (epoch_max * 0.3f0))
-        λ_odd = λ_oddmax * min(1f0, max(0f0, epoch - epoch_max * λ_odd_start_epoch_fraction) / (epoch_max * 0.4f0))
-        λ_origin = λ_originmax * min(1f0, max(0f0, epoch - epoch_max * λ_origin_start_epoch_fraction) / (epoch_max * 0.2f0))
+    while epoch < epoch_min || (epoch < epoch_max)
+        # Constraint weights stay at 0 until after epoch_min, then ramp in.
+        λ = λmax * min(1f0, max(0f0, Float32(epoch) - λ_start_epoch) / λ_ramp_epochs)
+        λ_monotonic = λ_monotonicmax * min(1f0, max(0f0, Float32(epoch) - λ_monotonic_start_epoch) / λ_monotonic_ramp_epochs)
+        λ_odd = λ_oddmax * min(1f0, max(0f0, Float32(epoch) - λ_odd_start_epoch) / λ_odd_ramp_epochs)
+        λ_origin = λ_originmax * min(1f0, max(0f0, Float32(epoch) - λ_origin_start_epoch) / λ_origin_ramp_epochs)
+        constraints_on = λ_monotonic > 0f0 || λ_odd > 0f0 || λ_origin > 0f0
+        if constraints_on && !constraint_phase_started
+          constraint_phase_started = true
+          epochs_without_val_improvement = 0
+          println(out_streams, "Constraint phase started at epoch $epoch")
+        end
         epoch_loss_sum = 0f0
         epoch_sample_count = 0
         for (x, y) in train_data_loader
@@ -1074,9 +1099,27 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         if !isfinite(l)
           error("训练过程中检测到非有限 loss（epoch=$epoch）")
         end
+        val_mse = Float32(prediction_mse(X_test', y_test, model))
+        if !isfinite(val_mse)
+          error("训练过程中检测到非有限验证 MSE（epoch=$epoch）")
+        end
+        constraint_cur = Float32(physical_constraint_losses(model, λ_monotonic, λ_odd, λ_origin))
+        if !isfinite(constraint_cur)
+          error("训练过程中检测到非有限约束 loss（epoch=$epoch）")
+        end
 
         push!(losses, l)
+        push!(val_mses, val_mse)
         push!(lambdas, (λ, λ_monotonic, λ_odd, λ_origin))
+
+        if val_mse < best_val_mse - tol
+          best_val_mse = val_mse
+          best_epoch = epoch
+          best_model = deepcopy(model)
+          epochs_without_val_improvement = 0
+        else
+          epochs_without_val_improvement += 1
+        end
       
         t = now()
         if (t - last_log_time) > Dates.Millisecond(10000) || epoch % logstep == 0 || epoch >= epoch_max
@@ -1084,54 +1127,51 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
             if isfinite(loss_last)
                 Δloss = loss_cur - loss_last
                 ΔΔloss = Δloss - Δloss_last
-                if Δloss < -tol
-                    stall_count = 0
-                else
-                    stall_count += 1
-                end
             else
                 Δloss = 0f0
                 ΔΔloss = 0f0
-                stall_count = 0
             end
             loss_last = loss_cur
             Δloss_last = Δloss
-            if abs(Δloss) > tol || abs(ΔΔloss) > Δtol
-                cur_time = Dates.format(now(), "HH:MM:SS")
-                # predict time remaining
-                time_str = "estimating remaining time..."
-                if epoch / epoch_max > 0.05
-                    elapsed = (t - last_log_time).value / 1000 # Milliseconds to seconds
-                    epochs = epoch - epoch_last
-                    epoch_remaining = epoch_max - epoch
-                    recent_rate = epochs / elapsed
-                    epoch_remaining_time = Dates.Millisecond(1000 * round(epoch_remaining / recent_rate))
-                    total_time = epoch_remaining_time + Dates.Millisecond(1000 * round((t - start_time).value / 1000))
-                    epoch_remaining_time_str = Dates.canonicalize(Dates.CompoundPeriod(epoch_remaining_time))
-                    epoch_total_time_str = Dates.canonicalize(Dates.CompoundPeriod(total_time))
-                    time_str = "$epoch_remaining_time_str remaining of $epoch_total_time_str total"
-                end
-                println(out_streams, f"{cur_time} Epoch {epoch:3d} of {epoch_max} ({time_str}); Loss: {loss_cur:.6f}, ΔLoss: {Δloss:.7f}, ΔΔLoss: {ΔΔloss:.9f}, λ: {λ:.6G}, λ_monotonic: {λ_monotonic:.6G}, λ_odd: {λ_odd:.6G}, λ_origin: {λ_origin:.6G}")
+            cur_time = Dates.format(now(), "HH:MM:SS")
+            # predict time remaining
+            time_str = "estimating remaining time..."
+            if epoch / epoch_max > 0.05
+                elapsed = (t - last_log_time).value / 1000 # Milliseconds to seconds
+                epochs = epoch - epoch_last
+                epoch_remaining = epoch_max - epoch
+                recent_rate = epochs / elapsed
+                epoch_remaining_time = Dates.Millisecond(1000 * round(epoch_remaining / recent_rate))
+                total_time = epoch_remaining_time + Dates.Millisecond(1000 * round((t - start_time).value / 1000))
+                epoch_remaining_time_str = Dates.canonicalize(Dates.CompoundPeriod(epoch_remaining_time))
+                epoch_total_time_str = Dates.canonicalize(Dates.CompoundPeriod(total_time))
+                time_str = "$epoch_remaining_time_str remaining of $epoch_total_time_str total"
             end
-            if epoch >= epoch_min && stall_count >= stall_check_count
-                println(out_streams, "Stopped after $stall_count consecutive checks without loss improvement at epoch $epoch, loss $loss_cur")
-                break
-            end
+            println(out_streams, f"{cur_time} Epoch {epoch:3d} of {epoch_max} ({time_str}); Train: {loss_cur:.6f}, Val MSE: {val_mse:.6f}, Constraint: {constraint_cur:.6f}, Best Val MSE: {best_val_mse:.6f} @ {best_epoch}, λ: {λ:.6G}, λ_monotonic: {λ_monotonic:.6G}, λ_odd: {λ_odd:.6G}, λ_origin: {λ_origin:.6G}")
             logstepfloat *= logstepgrowth
             logstep = round(Int, logstepfloat)
             last_log_time = t
             epoch_last = epoch
         end
+        if epoch >= early_stop_start_epoch && constraint_phase_started && epochs_without_val_improvement >= stall_check_count
+            println(out_streams, "Early stop after $epochs_without_val_improvement epochs without Val MSE improvement at epoch $epoch (best epoch $best_epoch, best Val MSE $best_val_mse)")
+            break
+        end
         epoch += 1
         ilog += 1
     end
-    loss_cur = loss(X_train', y_train, model)
+    if best_epoch == 0
+      error("训练结束时没有有效的验证 MSE checkpoint")
+    end
+    model = best_model
+    println(out_streams, "Restored best model from epoch $best_epoch with Val MSE $best_val_mse")
+    loss_cur = Float32(prediction_mse(X_train', y_train, model))
     if !isfinite(loss_cur)
-      error("训练结束时检测到非有限训练 loss")
+      error("训练结束时检测到非有限训练 MSE")
     end
     Δloss = loss_cur - loss_last
     cur_time = Dates.format(now(), "HH:MM:SS")
-    println(out_streams, f"round 1 {cur_time} Epoch: {epoch:3d} (of {epoch_max}; Loss: {loss_cur:.6f}, ΔLoss: {Δloss:.7f}, ΔΔLoss: {ΔΔloss:.9f}")
+    println(out_streams, f"round 1 {cur_time} Epoch: {epoch:3d} (of {epoch_max}; Train MSE: {loss_cur:.6f}, Best Val MSE: {best_val_mse:.6f} @ {best_epoch}")
 
     # save the model for easy loading back into Flux.jl
       # bring data back to cpu
@@ -1158,7 +1198,10 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     # must not invalidate an otherwise successful model training run.
     try
       x = 1:length(losses)
-      p = plot(x, losses, label="Loss", color=:black, ylabel="Loss", xlabel="Epoch", yscale=:log10, legend=:topleft)
+      p = plot(x, losses, label="Train loss", color=:black, ylabel="Loss", xlabel="Epoch", yscale=:log10, legend=:topleft)
+      if !isempty(val_mses)
+        plot!(p, 1:length(val_mses), val_mses, label="Val MSE", color=:purple)
+      end
       colors = [:red, :blue, :green, :orange]
       loss_names = ["λ_l2_regularization", "λ_monotonic", "λ_odd", "λ_origin"]
       for i in 1:4
@@ -1175,7 +1218,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
       println(out_streams, "WARNING: 训练曲线生成失败，继续导出模型：$(sprint(showerror, e))")
     end
     
-    println(out_streams, "Finished after $epoch epochs, Loss: $loss_cur, ΔLoss: $Δloss, Test loss: $(loss(X_test', y_test, model))")
+    println(out_streams, "Finished after $epoch epochs, Train MSE: $loss_cur, ΔLoss: $Δloss, Test MSE: $(prediction_mse(X_test', y_test, model))")
 
   end
 
@@ -1283,7 +1326,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
   current_date_and_time = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
 
-  model_test_loss = loss(X_test', y_test, model)
+  model_test_loss = Float32(prediction_mse(X_test', y_test, model))
   if !isfinite(model_test_loss)
       error("模型测试 loss 为 NaN 或 Inf，拒绝导出模型")
   end
@@ -1315,7 +1358,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
 
   # Evaluate the model on the test set 
-  test_loss = loss(X_test', y_test, model)
+  test_loss = Float32(prediction_mse(X_test', y_test, model))
   if !isfinite(test_loss)
     error("模型测试 loss 为 NaN 或 Inf，拒绝完成训练")
   end

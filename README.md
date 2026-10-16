@@ -568,7 +568,7 @@ bash training/run.sh /path/to/latmodels/ --cpu
 - [x] **规范仓库** — 将 3 个分散仓库中的工具整合到本仓库
 - [x] **简化 rlog 处理** — 重构为接收单个输入目录，移除多服务器逻辑
 - [x] **依赖管理** — `pyproject.toml` 固定版本并内置 cereal schema（无需检出 openpilot）
-- [x] **CPU 训练** — 使用 `CustomAdaGrad` 优化器并固定 CPU 设备
+- [x] **CPU 训练** — 使用 `AdamW` 优化器并固定 CPU 设备
 - [x] **覆盖度可视化** — `nnlc-visualize` 生成三面板覆盖度图（热力图、直方图、接管率）
 - [x] **路线质量评分** — `nnlc-score` 使用六项标准评分（百分制）
 - [x] **路线剪枝** — 删除饱和帧和变道帧，并可在训练前排除低评分路线
