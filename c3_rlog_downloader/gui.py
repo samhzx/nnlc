@@ -206,6 +206,7 @@ class C3DownloaderApp:
         self._form_row(destination_inner, 0, "保存目录", destination_picker)
         self.path_pickers.append(destination_picker)
         source_box = self._fixed_box(destination_inner)
+        source_box.configure(bg=C_DISABLED)
         tk.Label(
             source_box,
             text="/data/media/0/realdata",
