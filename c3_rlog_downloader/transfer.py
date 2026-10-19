@@ -349,6 +349,7 @@ def _start_prefetch(remote_file, file_size: int) -> None:
 def _download_one(
     sftp,
     item: RemoteFile,
+    remote_attr,
     part: Path,
     metadata_path: Path,
     cancel_event: threading.Event,
@@ -357,12 +358,7 @@ def _download_one(
 ) -> int:
     if item.size <= 0:
         raise TransferError("远端文件为空，未将其视为有效日志。")
-
-    try:
-        before = sftp.stat(item.remote_path)
-    except OSError as exc:
-        raise TransferError("读取远端文件信息失败。") from exc
-    if int(before.st_size) != item.size or int(before.st_mtime) != item.mtime:
+    if int(remote_attr.st_size) != item.size or int(remote_attr.st_mtime) != item.mtime:
         raise TransferError("远端文件在扫描后发生变化；请重新扫描后再下载。")
 
     for candidate in (part, metadata_path):
@@ -464,6 +460,28 @@ def download_files(
         relative_key = item.relative_path.as_posix()
         key = f"{device_id}|{relative_key}"
         local_path = destination_path(destination, item, export_date)
+        entry = manifest_files.get(key)
+        if _manifest_entry_matches(entry, item, local_path, destination, device_id):
+            completed_files += 1
+            skipped_existing += 1
+            completed_bytes += item.size
+            speed, eta = rate.update(measured_bytes, completed_bytes, total_bytes)
+            _emit_progress(
+                progress_callback,
+                TransferProgress(
+                    completed_bytes,
+                    total_bytes,
+                    key,
+                    item.size,
+                    item.size,
+                    completed_files,
+                    total_files,
+                    speed_bytes_per_second=speed,
+                    eta_seconds=eta,
+                ),
+            )
+            continue
+
         try:
             current = sftp.stat(item.remote_path)
         except OSError as exc:
@@ -492,27 +510,6 @@ def download_files(
         if int(current.st_size) != item.size or int(current.st_mtime) != item.mtime:
             failures.append(
                 DownloadFailure(key, "远端文件在扫描后发生变化；请重新扫描后再下载。")
-            )
-            continue
-        entry = manifest_files.get(key)
-        if _manifest_entry_matches(entry, item, local_path, destination, device_id):
-            completed_files += 1
-            skipped_existing += 1
-            completed_bytes += item.size
-            speed, eta = rate.update(measured_bytes, completed_bytes, total_bytes)
-            _emit_progress(
-                progress_callback,
-                TransferProgress(
-                    completed_bytes,
-                    total_bytes,
-                    key,
-                    item.size,
-                    item.size,
-                    completed_files,
-                    total_files,
-                    speed_bytes_per_second=speed,
-                    eta_seconds=eta,
-                ),
             )
             continue
 
@@ -572,6 +569,7 @@ def download_files(
             _download_one(
                 sftp,
                 item,
+                current,
                 part,
                 metadata_path,
                 cancel_event,

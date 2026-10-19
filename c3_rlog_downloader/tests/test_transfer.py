@@ -78,6 +78,7 @@ class MemorySFTP:
         self.now = now
         self.nodes = {REMOTE_ROOT: (stat.S_IFDIR | 0o755, b"", now - 1000)}
         self.read_count = {}
+        self.stat_count = {}
         self.fail_first_read = set()
         self.removed = []
         self.opened_files = []
@@ -113,6 +114,7 @@ class MemorySFTP:
         return self._attr(path)
 
     def stat(self, path):
+        self.stat_count[path] = self.stat_count.get(path, 0) + 1
         return self.lstat(path)
 
     def listdir_attr(self, path):
@@ -209,6 +211,7 @@ def test_download_is_incremental_and_writes_manifest(tmp_path):
     assert second.skipped_existing == 1
     assert second.downloaded_files == 0
     assert sftp.read_count[path] == 1
+    assert sftp.stat_count[path] == 2
     assert sftp.opened_files[0].prefetch_calls == [
         (len(b"compressed-log"), PREFETCH_CONCURRENT_REQUESTS)
     ]
@@ -418,6 +421,27 @@ def test_start_prefetch_uses_bounded_requests_and_ignores_missing_prefetch():
     _start_prefetch(object(), 512)
 
     assert compatible.calls == [(1024, PREFETCH_CONCURRENT_REQUESTS)]
+
+
+def test_existing_manifest_skips_without_remote_stat(tmp_path):
+    now = 2_000_000_000
+    sftp = MemorySFTP(now)
+    path = REMOTE_ROOT + "/2025-04-03--route/rlog.zst"
+    payload = b"already-downloaded"
+    sftp.add_file(path, payload, mtime=now - 400)
+    inventory = scan_remote_tree(sftp, now=now)
+    first = download_files(sftp, inventory, tmp_path, now=now, export_date=EXPORT_DATE)
+    sftp.stat_count.clear()
+    sftp.read_count.clear()
+    sftp.opened_files.clear()
+
+    second = download_files(sftp, inventory, tmp_path, now=now, export_date=EXPORT_DATE)
+
+    assert first.all_succeeded
+    assert second.skipped_existing == 1
+    assert path not in sftp.stat_count
+    assert path not in sftp.read_count
+    assert sftp.opened_files == []
 
 
 def test_download_prefetches_after_resume_seek(tmp_path):
