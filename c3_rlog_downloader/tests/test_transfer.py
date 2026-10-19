@@ -14,6 +14,7 @@ import pytest
 
 from c3_rlog_downloader.settings import load_settings, save_settings
 from c3_rlog_downloader.transfer import (
+    PREFETCH_CONCURRENT_REQUESTS,
     REMOTE_ROOT,
     CleanupPreview,
     DownloadFailure,
@@ -23,6 +24,7 @@ from c3_rlog_downloader.transfer import (
     TransferCancelled,
     TransferError,
     _ProgressRate,
+    _start_prefetch,
     cleanup_snapshot,
     connect_sftp,
     date_folder,
@@ -50,6 +52,15 @@ class FailingBytesIO(io.BytesIO):
         super().__init__(value)
         self.fail_after_first_chunk = fail_after_first_chunk
         self.read_calls = 0
+        self.prefetch_calls = []
+        self.seek_calls = []
+
+    def prefetch(self, file_size=None, max_concurrent_requests=None):
+        self.prefetch_calls.append((file_size, max_concurrent_requests))
+
+    def seek(self, offset, whence=0):
+        self.seek_calls.append((offset, whence))
+        return super().seek(offset, whence)
 
     def read(self, size=-1):
         if self.fail_after_first_chunk and self.read_calls == 0:
@@ -69,6 +80,7 @@ class MemorySFTP:
         self.read_count = {}
         self.fail_first_read = set()
         self.removed = []
+        self.opened_files = []
 
     def add_dir(self, path, mtime=None):
         mtime = self.now - 1000 if mtime is None else mtime
@@ -118,11 +130,13 @@ class MemorySFTP:
 
     def open(self, path, mode):
         self.read_count[path] = self.read_count.get(path, 0) + 1
-        return FailingBytesIO(
+        handle = FailingBytesIO(
             self.nodes[path][1],
             fail_after_first_chunk=path in self.fail_first_read
             and self.read_count[path] == 1,
         )
+        self.opened_files.append(handle)
+        return handle
 
     def remove(self, path):
         if path not in self.nodes:
@@ -195,6 +209,9 @@ def test_download_is_incremental_and_writes_manifest(tmp_path):
     assert second.skipped_existing == 1
     assert second.downloaded_files == 0
     assert sftp.read_count[path] == 1
+    assert sftp.opened_files[0].prefetch_calls == [
+        (len(b"compressed-log"), PREFETCH_CONCURRENT_REQUESTS)
+    ]
 
 
 def test_same_destination_does_not_silently_overwrite_another_device(tmp_path):
@@ -386,6 +403,52 @@ def test_supplied_connection_stays_open_for_gui_lifecycle(monkeypatch, tmp_path)
 
     assert summary.all_succeeded
     assert close_calls == []
+
+
+def test_start_prefetch_uses_bounded_requests_and_ignores_missing_prefetch():
+    class Compatible:
+        def __init__(self):
+            self.calls = []
+
+        def prefetch(self, file_size=None, max_concurrent_requests=None):
+            self.calls.append((file_size, max_concurrent_requests))
+
+    compatible = Compatible()
+    _start_prefetch(compatible, 1024)
+    _start_prefetch(object(), 512)
+
+    assert compatible.calls == [(1024, PREFETCH_CONCURRENT_REQUESTS)]
+
+
+def test_download_prefetches_after_resume_seek(tmp_path):
+    now = 2_000_000_000
+    sftp = MemorySFTP(now)
+    path = REMOTE_ROOT + "/2025-04-03--route/rlog.zst"
+    payload = b"abcdefghijklmnopqrstuvwxyz"
+    sftp.add_file(path, payload, mtime=now - 400)
+    inventory = scan_remote_tree(sftp, now=now)
+    local_dir = tmp_path / EXPORT_FOLDER / "2025-04-03--route"
+    local_dir.mkdir(parents=True)
+    (local_dir / "rlog.zst.part").write_bytes(payload[:8])
+    (local_dir / "rlog.zst.part.json").write_text(
+        json.dumps(
+            {
+                "remote_path": "2025-04-03--route/rlog.zst",
+                "device_id": "",
+                "size": len(payload),
+                "mtime": now - 400,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = download_files(sftp, inventory, tmp_path, now=now, export_date=EXPORT_DATE)
+
+    assert result.all_succeeded
+    assert sftp.opened_files[0].seek_calls == [(8, 0)]
+    assert sftp.opened_files[0].prefetch_calls == [
+        (len(payload), PREFETCH_CONCURRENT_REQUESTS)
+    ]
 
 
 def test_progress_rate_reports_smoothed_speed_and_eta(monkeypatch):

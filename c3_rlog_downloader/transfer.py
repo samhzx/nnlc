@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 REMOTE_ROOT = "/data/media/0/realdata"
 RECENT_WINDOW_SECONDS = 5 * 60
 CHUNK_SIZE = 256 * 1024
+PREFETCH_CONCURRENT_REQUESTS = 64
 MANIFEST_NAME = ".c3_rlog_manifest.json"
 _PART_META_SUFFIX = ".part.json"
 
@@ -335,6 +336,16 @@ def _check_cancel(cancel_event: threading.Event) -> None:
         )
 
 
+def _start_prefetch(remote_file, file_size: int) -> None:
+    """Pipeline remaining SFTP reads when the backend supports Paramiko prefetch."""
+    prefetch = getattr(remote_file, "prefetch", None)
+    if callable(prefetch):
+        prefetch(
+            file_size,
+            max_concurrent_requests=PREFETCH_CONCURRENT_REQUESTS,
+        )
+
+
 def _download_one(
     sftp,
     item: RemoteFile,
@@ -385,6 +396,7 @@ def _download_one(
         with sftp.open(item.remote_path, "rb") as remote_file:
             if offset:
                 remote_file.seek(offset)
+            _start_prefetch(remote_file, item.size)
             mode = "ab" if offset else "wb"
             with part.open(mode) as local_file:
                 position = offset
