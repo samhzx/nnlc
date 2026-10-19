@@ -21,6 +21,8 @@ from c3_rlog_downloader.transfer import (
     KeyPassphraseRequired,
     TransferCancelled,
     TransferProgress,
+    close_sftp,
+    connect_sftp,
     run_cleanup,
     run_download,
 )
@@ -65,6 +67,23 @@ def _format_size(value: int) -> str:
             return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+def _format_rate(value: float) -> str:
+    if value <= 0:
+        return "--"
+    return f"{_format_size(int(value))}/s"
+
+
+def _format_eta(value: float | None) -> str:
+    if value is None:
+        return "--:--"
+    seconds = max(0, int(round(value)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 class PathPicker(tk.Frame):
@@ -141,8 +160,12 @@ class C3DownloaderApp:
         self.destination_var = tk.StringVar(
             value=str(Path.home() / "Documents" / "C3_Rlogs")
         )
+        self.connection_status_var = tk.StringVar(value="● 未连接")
         self.status_var = tk.StringVar(value="就绪")
-        self.progress_var = tk.StringVar(value="尚未开始")
+        self.progress_var = tk.StringVar(value="0.0%")
+        self.progress_detail_var = tk.StringVar(value="尚未开始下载")
+        self.speed_var = tk.StringVar(value="--")
+        self.eta_var = tk.StringVar(value="--:--")
         self.current_var = tk.StringVar(value="")
         self.messages: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
@@ -152,6 +175,11 @@ class C3DownloaderApp:
         self.passphrase: str | None = None
         self.passphrase_attempts = 0
         self.operation: str | None = None
+        self._pending_cleanup: CleanupPreview | None = None
+        self.connection_client = None
+        self.connection_sftp = None
+        self.connected_host: str | None = None
+        self.connected_key_path: str | None = None
         self.form_controls = []
         self.path_pickers = []
 
@@ -184,16 +212,51 @@ class C3DownloaderApp:
         body.columnconfigure(0, weight=1, uniform="col")
         body.columnconfigure(1, weight=1, uniform="col")
 
-        connection_card, connection_inner = self._make_card(body, "设备连接")
+        connection_card, connection_inner = self._make_card(
+            body, "设备连接", self.connection_status_var
+        )
         connection_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         connection_inner.columnconfigure(0, minsize=LABEL_W)
         connection_inner.columnconfigure(1, weight=1)
-        host_box = self._fixed_box(connection_inner)
-        host_entry = self._make_form_entry(host_box, self.host_var)
-        self._form_row(connection_inner, 0, "C3 IP 地址", host_box)
-        self.form_controls.append(host_entry)
+        host_actions = tk.Frame(connection_inner, bg=C_CARD_BG)
+        host_actions.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
+        host_box = self._fixed_box(host_actions)
+        self.host_box = host_box
+        self.host_entry = self._make_form_entry(host_box, self.host_var)
+        host_box.pack(side="left", fill="x", expand=True)
+        connection_button_box = tk.Frame(
+            host_actions, bg=C_CARD_BG, height=INPUT_H
+        )
+        connection_button_box.pack_propagate(False)
+        connection_button_box.pack(side="right", padx=(8, 0))
+        self.connection_button = tk.Button(
+            connection_button_box,
+            text="连接设备",
+            font=F_BASE,
+            command=self.connect,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+            bd=0,
+            padx=13,
+            cursor="hand2",
+        )
+        self.connection_button.pack(fill="both", expand=True)
+        connection_button_box.configure(width=self.connection_button.winfo_reqwidth())
+        self.connection_button.bind("<Enter>", self._connection_button_enter)
+        self.connection_button.bind("<Leave>", self._connection_button_leave)
+        tk.Label(
+            connection_inner,
+            text="C3 IP 地址",
+            font=F_BASE,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+        ).grid(row=0, column=0, sticky="e", pady=PAD_ROW)
+        self.form_controls.append(self.host_entry)
         key_picker = PathPicker(connection_inner, self.key_var, self._browse_key)
         self._form_row(connection_inner, 1, "SSH 私钥", key_picker)
+        self.key_picker = key_picker
         self.path_pickers.append(key_picker)
 
         destination_card, destination_inner = self._make_card(body, "下载设置")
@@ -204,6 +267,7 @@ class C3DownloaderApp:
             destination_inner, self.destination_var, self._browse_destination
         )
         self._form_row(destination_inner, 0, "保存目录", destination_picker)
+        self.destination_picker = destination_picker
         self.path_pickers.append(destination_picker)
         source_box = self._fixed_box(destination_inner)
         source_box.configure(bg=C_DISABLED)
@@ -219,23 +283,35 @@ class C3DownloaderApp:
 
         progress_card, progress_inner = self._make_card(body, "下载进度")
         progress_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        progress_summary = tk.Frame(progress_inner, bg=C_CARD_BG)
+        progress_summary.pack(fill="x")
+        progress_summary.columnconfigure(0, weight=2)
+        progress_summary.columnconfigure(1, weight=1)
+        progress_summary.columnconfigure(2, weight=1)
+        progress_summary.columnconfigure(3, weight=1)
+        percent_box = tk.Frame(progress_summary, bg=C_CARD_BG)
+        percent_box.grid(row=0, column=0, sticky="w")
         tk.Label(
-            progress_inner,
+            percent_box,
             textvariable=self.progress_var,
-            font=F_BASE,
+            font=("Microsoft YaHei UI", 16, "bold"),
             bg=C_CARD_BG,
-            fg=C_TEXT,
+            fg=C_ACCENT,
             anchor="w",
-        ).pack(fill="x")
-        self.current_label = tk.Label(
-            progress_inner,
-            textvariable=self.current_var,
+        ).pack(anchor="w")
+        tk.Label(
+            percent_box,
+            textvariable=self.progress_detail_var,
             font=F_SUB,
             bg=C_CARD_BG,
             fg=C_MUTED,
             anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+        self._make_progress_metric(progress_summary, 1, "实时速率", self.speed_var)
+        self._make_progress_metric(progress_summary, 2, "剩余时间", self.eta_var)
+        self._make_progress_metric(
+            progress_summary, 3, "当前状态", self.status_var, compact=True
         )
-        self.current_label.pack(fill="x", pady=(5, 0))
         self.progress_track = tk.Frame(
             progress_inner,
             bg=C_STATUS_BG,
@@ -247,6 +323,15 @@ class C3DownloaderApp:
         self.progress_track.pack_propagate(False)
         self.progress_fill = tk.Frame(self.progress_track, bg=C_ACCENT)
         self.progress_fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+        self.current_label = tk.Label(
+            progress_inner,
+            textvariable=self.current_var,
+            font=F_SUB,
+            bg=C_CARD_BG,
+            fg=C_MUTED,
+            anchor="w",
+        )
+        self.current_label.pack(fill="x", pady=(5, 0))
 
         log_card, log_inner = self._make_card(self.root, "运行日志")
         log_card.pack(fill="both", expand=True, padx=PAD_PAGE, pady=(14, 0))
@@ -310,6 +395,7 @@ class C3DownloaderApp:
         self.log.tag_configure("warning", foreground="#a15c00")
         self.log.tag_configure("error", foreground="#c62828")
         self.log.tag_configure("muted", foreground=C_MUTED)
+        self._refresh_controls()
 
     def _build_header(self) -> None:
         header = tk.Frame(self.root, bg=C_HEADER_BG, height=84)
@@ -348,7 +434,7 @@ class C3DownloaderApp:
             bar, text=f"v{APP_VERSION}", font=F_SUB, bg=C_STATUS_BG, fg=C_MUTED
         ).pack(side="right", padx=14, pady=4)
 
-    def _make_card(self, parent, title):
+    def _make_card(self, parent, title, status_variable=None):
         wrapper = tk.Frame(parent, bg=C_PAGE_BG)
         header = tk.Frame(wrapper, bg=C_PAGE_BG)
         header.pack(anchor="w", pady=(0, 8))
@@ -356,6 +442,15 @@ class C3DownloaderApp:
         tk.Label(header, text=title, font=F_SECTION, bg=C_PAGE_BG, fg=C_TEXT).pack(
             side="left", padx=(8, 0)
         )
+        if status_variable is not None:
+            self.connection_status_label = tk.Label(
+                header,
+                textvariable=status_variable,
+                font=F_SUB,
+                bg=C_PAGE_BG,
+                fg=C_MUTED,
+            )
+            self.connection_status_label.pack(side="left", padx=(10, 0))
         card = tk.Frame(
             wrapper,
             bg=C_CARD_BG,
@@ -367,6 +462,31 @@ class C3DownloaderApp:
         inner = tk.Frame(card, bg=C_CARD_BG)
         inner.pack(fill="both", expand=True, padx=PAD_CARD, pady=PAD_CARD - 4)
         return wrapper, inner
+
+    def _make_progress_metric(
+        self, parent, column: int, label: str, variable, compact: bool = False
+    ) -> None:
+        box = tk.Frame(parent, bg=C_CARD_BG)
+        box.grid(row=0, column=column, sticky="ew", padx=(12, 0))
+        tk.Frame(box, bg=C_BORDER, width=1).pack(side="left", fill="y", pady=2)
+        inner = tk.Frame(box, bg=C_CARD_BG)
+        inner.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        tk.Label(
+            inner,
+            text=label,
+            font=("Microsoft YaHei UI", 9),
+            bg=C_CARD_BG,
+            fg=C_MUTED,
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            inner,
+            textvariable=variable,
+            font=("Microsoft YaHei UI", 10, "bold" if not compact else "normal"),
+            bg=C_CARD_BG,
+            fg=C_TEXT if not compact else C_MUTED,
+            anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
 
     def _form_label(self, parent, row: int, label: str) -> None:
         tk.Label(parent, text=label, font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
@@ -516,24 +636,81 @@ class C3DownloaderApp:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _set_connection_status(self, text: str, connected: bool = False, busy: bool = False) -> None:
+        self.connection_status_var.set(text)
+        if connected:
+            color = "#16803a"
+        elif busy:
+            color = C_ACCENT
+        else:
+            color = C_MUTED
+        self.connection_status_label.configure(fg=color)
+
+    def _set_connection_button_style(self, connected: bool) -> None:
+        if connected:
+            self.connection_button.configure(
+                text="断开连接",
+                command=self.disconnect,
+                bg=C_CARD_BG,
+                fg="#9a4545",
+                activebackground="#fff5f5",
+                activeforeground="#9a4545",
+            )
+        else:
+            self.connection_button.configure(
+                text="连接设备",
+                command=self.connect,
+                bg=C_ACCENT,
+                fg="#ffffff",
+                activebackground=C_ACCENT_HOVER,
+                activeforeground="#ffffff",
+            )
+
+    def _connection_button_enter(self, _event=None) -> None:
+        if str(self.connection_button["state"]) == "disabled":
+            return
+        self.connection_button.configure(
+            bg="#fff5f5" if self.connection_sftp is not None else C_ACCENT_HOVER
+        )
+
+    def _connection_button_leave(self, _event=None) -> None:
+        if self.connection_sftp is not None:
+            self.connection_button.configure(bg=C_CARD_BG)
+        elif str(self.connection_button["state"]) != "disabled":
+            self.connection_button.configure(bg=C_ACCENT)
+
+    def _refresh_controls(self) -> None:
+        connected = self.connection_sftp is not None
+        input_enabled = not self.busy and not connected
+        self.host_entry.configure(state="normal" if input_enabled else "disabled")
+        self.host_box.configure(bg=C_CARD_BG if input_enabled else C_DISABLED)
+        self.key_picker.set_enabled(input_enabled)
+        self.destination_picker.set_enabled(not self.busy)
+        self._set_connection_button_style(connected)
+        self.connection_button.configure(
+            state="disabled" if self.busy else "normal",
+            cursor="arrow" if self.busy else "hand2",
+        )
+        can_start = connected and not self.busy
+        self.start_button.configure(
+            state="normal" if can_start else "disabled",
+            bg=C_ACCENT if can_start else C_ACCENT_DISABLED,
+            cursor="hand2" if can_start else "arrow",
+        )
+        self.cancel_button.configure(
+            state="normal" if self.busy else "disabled",
+            cursor="hand2" if self.busy else "arrow",
+        )
+        self.open_destination_button.configure(
+            state="disabled" if self.busy else "normal"
+        )
+        self.clear_log_button.configure(state="disabled" if self.busy else "normal")
+
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
-        self.start_button.configure(
-            state="disabled" if busy else "normal",
-            bg=C_ACCENT_DISABLED if busy else C_ACCENT,
-            cursor="arrow" if busy else "hand2",
-        )
-        self.cancel_button.configure(state="normal" if busy else "disabled")
-        for control in getattr(self, "form_controls", []):
-            control.configure(state="disabled" if busy else "normal")
-        for picker in self.path_pickers:
-            picker.set_enabled(not busy)
-        self.open_destination_button.configure(state="disabled" if busy else "normal")
-        self.clear_log_button.configure(state="disabled" if busy else "normal")
+        self._refresh_controls()
 
-    def start(self) -> None:
-        if self.busy:
-            return
+    def _validate_connection_inputs(self):
         host = self.host_var.get().strip()
         try:
             ipaddress.ip_address(host)
@@ -541,42 +718,145 @@ class C3DownloaderApp:
             messagebox.showerror(
                 "IP 地址无效", "请输入有效的 C3 IPv4 或 IPv6 地址。", parent=self.root
             )
-            return
+            return None
         key_path = Path(self.key_var.get().strip()).expanduser()
         if not key_path.is_file():
             messagebox.showerror(
                 "私钥无效", "请选择存在的 SSH 私钥文件。", parent=self.root
             )
+            return None
+        return host, key_path
+
+    def connect(self) -> None:
+        if self.busy or self.connection_sftp is not None:
             return
-        destination = Path(self.destination_var.get().strip()).expanduser()
-        if not str(self.destination_var.get()).strip():
-            messagebox.showerror("目录无效", "请选择下载目录。", parent=self.root)
+        values = self._validate_connection_inputs()
+        if values is None:
             return
+        host, key_path = values
         try:
-            destination.mkdir(parents=True, exist_ok=True)
             save_settings(host, str(key_path), self.settings_dir)
         except OSError as exc:
-            messagebox.showerror("目录不可用", str(exc), parent=self.root)
+            messagebox.showerror("设置保存失败", str(exc), parent=self.root)
             return
 
         self.passphrase = None
         self.passphrase_attempts = 0
         self.cancel_event = threading.Event()
-        self._set_progress(0, 1)
-        self.progress_var.set("正在连接设备...")
-        self.current_var.set("")
-        self.status_var.set("扫描 C3 日志")
+        self.operation = "connect"
+        self.status_var.set("正在连接设备")
+        self._set_connection_status("● 连接中...", busy=True)
         self._append_log(f"开始连接 {host}:22")
         self._set_busy(True)
-        self._start_download_worker(host, str(key_path), destination)
+        self._start_connect_worker(host, str(key_path))
 
-    def _start_download_worker(
-        self, host: str, key_path: str, destination: Path
+    def _start_connect_worker(self, host: str, key_path: str) -> None:
+        self.worker = threading.Thread(
+            target=self._connect_worker,
+            args=(host, key_path, self.passphrase),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _connect_worker(
+        self, host: str, key_path: str, passphrase: str | None
     ) -> None:
+        try:
+            client, sftp = connect_sftp(
+                host, key_path, self.settings_dir, passphrase
+            )
+            self.messages.put(("connected", (client, sftp, host, key_path)))
+        except KeyPassphraseRequired:
+            self.messages.put(("passphrase_required", "connect"))
+        except InvalidKeyPassphrase:
+            self.messages.put(("passphrase_invalid", "connect"))
+        except TransferCancelled as exc:
+            self.messages.put(("cancelled", str(exc)))
+        except HostKeyMismatch as exc:
+            self.messages.put(("failed", str(exc)))
+        except Exception as exc:  # noqa: BLE001 - surface unexpected transport failures in the UI.
+            self.messages.put(("failed", str(exc)))
+
+    def _on_connected(self, payload) -> None:
+        client, sftp, host, key_path = payload
+        self.connection_client = client
+        self.connection_sftp = sftp
+        self.connected_host = host
+        self.connected_key_path = key_path
+        self._set_connection_status("● 已连接", connected=True)
+        self._set_busy(False)
+        self.operation = None
+        self.passphrase = None
+        self.status_var.set("设备已连接")
+        self._append_log("SSH 身份验证成功，已打开 SFTP", "success")
+        self._append_log("设备已连接，可以开始下载", "success")
+
+    def disconnect(self) -> None:
+        if self.busy or self.connection_sftp is None:
+            return
+        client, sftp = self.connection_client, self.connection_sftp
+        self.connection_client = None
+        self.connection_sftp = None
+        self.connected_host = None
+        self.connected_key_path = None
+        try:
+            close_sftp(client, sftp)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not leave stale UI state.
+            self._append_log(f"断开连接时出现提示：{exc}", "warning")
+        self._set_connection_status("● 未连接")
+        self.status_var.set("设备未连接")
+        self._append_log("已断开设备连接", "muted")
+        self._refresh_controls()
+
+    def start(self) -> None:
+        if self.busy:
+            return
+        if self.connection_sftp is None or self.connected_host is None:
+            messagebox.showinfo("尚未连接", "请先点击“连接设备”并等待连接成功。", parent=self.root)
+            return
+        destination_value = self.destination_var.get().strip()
+        if not destination_value:
+            messagebox.showerror("目录无效", "请选择下载目录。", parent=self.root)
+            return
+        destination = Path(destination_value).expanduser()
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            save_settings(
+                self.connected_host,
+                self.connected_key_path or self.key_var.get().strip(),
+                self.settings_dir,
+            )
+        except OSError as exc:
+            messagebox.showerror("目录不可用", str(exc), parent=self.root)
+            return
+
+        self.cancel_event = threading.Event()
+        self._set_progress(0, 1)
+        self.progress_var.set("0.0%")
+        self.progress_detail_var.set("正在扫描远端 rlog.zst")
+        self.speed_var.set("--")
+        self.eta_var.set("--:--")
+        self.current_var.set("")
+        self.status_var.set("扫描 C3 日志")
+        self._append_log("开始扫描设备目录 /data/media/0/realdata")
+        self._set_busy(True)
+        self._start_download_worker(destination)
+
+    def _start_download_worker(self, destination: Path) -> None:
+        if self.connection_sftp is None or self.connected_host is None:
+            self._finish("设备未连接")
+            return
         self.operation = "download"
+        connection = (self.connection_client, self.connection_sftp)
         self.worker = threading.Thread(
             target=self._download_worker,
-            args=(host, key_path, destination, self.passphrase, self.cancel_event),
+            args=(
+                self.connected_host,
+                self.connected_key_path or self.key_var.get().strip(),
+                destination,
+                self.cancel_event,
+                connection,
+            ),
             daemon=True,
         )
         self.worker.start()
@@ -586,8 +866,8 @@ class C3DownloaderApp:
         host: str,
         key_path: str,
         destination: Path,
-        passphrase: str | None,
         cancel_event: threading.Event,
+        connection,
     ) -> None:
         try:
             result, cleanup_preview, inventory = run_download(
@@ -595,17 +875,14 @@ class C3DownloaderApp:
                 key_path,
                 destination,
                 self.settings_dir,
-                passphrase,
+                None,
                 cancel_event,
                 progress_callback=lambda value: self.messages.put(("progress", value)),
+                connection=connection,
             )
             self.messages.put(
                 ("download_complete", (result, cleanup_preview, inventory))
             )
-        except KeyPassphraseRequired:
-            self.messages.put(("passphrase_required", "download"))
-        except InvalidKeyPassphrase:
-            self.messages.put(("passphrase_invalid", "download"))
         except TransferCancelled as exc:
             self.messages.put(("cancelled", str(exc)))
         except HostKeyMismatch as exc:
@@ -614,20 +891,27 @@ class C3DownloaderApp:
             self.messages.put(("failed", str(exc)))
 
     def _start_cleanup_worker(self, preview: CleanupPreview) -> None:
+        if self.connection_sftp is None or self.connected_host is None:
+            self._finish("设备未连接")
+            return
         self.cancel_event = threading.Event()
         self.operation = "cleanup"
-        self.status_var.set("正在清理设备日志...")
-        self.progress_var.set("清理设备文件")
+        self.status_var.set("正在清理设备日志")
+        self.progress_var.set("0.0%")
+        self.progress_detail_var.set("清理设备文件")
+        self.speed_var.set("--")
+        self.eta_var.set("--:--")
         self.current_var.set("")
         self._set_progress(0, preview.total_bytes)
+        connection = (self.connection_client, self.connection_sftp)
         self.worker = threading.Thread(
             target=self._cleanup_worker,
             args=(
-                self.host_var.get().strip(),
-                self.key_var.get().strip(),
-                self.passphrase,
+                self.connected_host,
+                self.connected_key_path or self.key_var.get().strip(),
                 preview,
                 self.cancel_event,
+                connection,
             ),
             daemon=True,
         )
@@ -637,25 +921,22 @@ class C3DownloaderApp:
         self,
         host: str,
         key_path: str,
-        passphrase: str | None,
         preview: CleanupPreview,
         cancel_event: threading.Event,
+        connection,
     ) -> None:
         try:
             result = run_cleanup(
                 host,
                 key_path,
                 self.settings_dir,
-                passphrase,
+                None,
                 preview,
                 cancel_event,
                 progress_callback=lambda value: self.messages.put(("progress", value)),
+                connection=connection,
             )
             self.messages.put(("cleanup_complete", result))
-        except KeyPassphraseRequired:
-            self.messages.put(("passphrase_required", "cleanup"))
-        except InvalidKeyPassphrase:
-            self.messages.put(("passphrase_invalid", "cleanup"))
         except TransferCancelled as exc:
             self.messages.put(("cancelled", str(exc)))
         except HostKeyMismatch as exc:
@@ -694,11 +975,9 @@ class C3DownloaderApp:
             return
         self.passphrase = value
         self.cancel_event = threading.Event()
-        if stage == "download":
-            self._start_download_worker(
-                self.host_var.get().strip(),
-                self.key_var.get().strip(),
-                Path(self.destination_var.get()).expanduser(),
+        if stage == "connect":
+            self._start_connect_worker(
+                self.host_var.get().strip(), self.key_var.get().strip()
             )
         else:
             self._pending_cleanup = getattr(self, "_pending_cleanup", None)
@@ -706,31 +985,40 @@ class C3DownloaderApp:
                 self._start_cleanup_worker(self._pending_cleanup)
 
     def _finish(self, status: str) -> None:
+        was_connecting = self.operation == "connect"
         self._set_busy(False)
         self.operation = None
         self.status_var.set(status)
         self.passphrase = None
         self._pending_cleanup = None
+        if was_connecting and self.connection_sftp is None:
+            self._set_connection_status("● 未连接")
 
     def _on_download_complete(self, payload) -> None:
         result, cleanup_preview, inventory = payload
         self._set_busy(False)
         self._set_progress(result.completed_bytes, result.total_bytes)
-        self.progress_var.set(
-            f"完成 {result.completed_files}/{result.planned_files} 个目标文件，"
-            f"新增下载 {result.downloaded_files} 个，跳过已完成 {result.skipped_existing} 个"
+        ratio = (
+            0.0
+            if result.total_bytes <= 0
+            else min(max(result.completed_bytes / result.total_bytes, 0.0), 1.0)
         )
+        self.progress_var.set(f"{ratio * 100:.1f}%")
+        self.progress_detail_var.set(
+            f"总体 {_format_size(result.completed_bytes)} / {_format_size(result.total_bytes)}"
+            f"    文件 {result.completed_files}/{result.planned_files}"
+        )
+        self.eta_var.set("00:00")
         self._append_log(
             f"扫描到 {len(inventory.rlog_files)} 个稳定 rlog，"
             f"跳过最近变化的 rlog {len(inventory.recent_rlogs)} 个。"
         )
         if result.failures:
-            self.status_var.set("下载有失败项，设备日志未清理")
             for failure in result.failures:
                 self._append_log(
                     f"下载失败：{failure.remote_path}：{failure.message}", "error"
                 )
-            self.passphrase = None
+            self._finish("下载有失败项，设备日志未清理")
             messagebox.showwarning(
                 "下载未全部完成",
                 f"{len(result.failures)} 个 rlog 下载失败。设备日志不会被清理。\n\n"
@@ -779,17 +1067,27 @@ class C3DownloaderApp:
             self._finish("下载完成，设备日志已保留")
 
     def _handle_message(self, kind: str, payload) -> None:
-        if kind == "progress":
+        if kind == "connected":
+            self._on_connected(payload)
+        elif kind == "progress":
             progress: TransferProgress = payload
             self._set_progress(progress.completed_bytes, progress.total_bytes)
             if progress.phase == "cleanup":
                 self.status_var.set("正在清理 C3 日志")
             else:
                 self.status_var.set("正在下载 rlog.zst")
-            self.progress_var.set(
+            ratio = (
+                0.0
+                if progress.total_bytes <= 0
+                else min(max(progress.completed_bytes / progress.total_bytes, 0.0), 1.0)
+            )
+            self.progress_var.set(f"{ratio * 100:.1f}%")
+            self.progress_detail_var.set(
                 f"总体 {_format_size(progress.completed_bytes)} / {_format_size(progress.total_bytes)}"
                 f"    文件 {progress.completed_files}/{progress.total_files}"
             )
+            self.speed_var.set(_format_rate(progress.speed_bytes_per_second))
+            self.eta_var.set(_format_eta(progress.eta_seconds))
             self.current_var.set(
                 f"{progress.current_path}    {_format_size(progress.current_bytes)} / {_format_size(progress.current_size)}"
             )
@@ -821,7 +1119,10 @@ class C3DownloaderApp:
             self._finish("任务已取消")
             self._append_log(payload, "muted")
         elif kind == "failed":
+            was_connecting = self.operation == "connect"
             self._finish("任务失败")
+            if was_connecting:
+                self._set_connection_status("● 未连接")
             self._append_log(payload, "error")
             messagebox.showerror("任务失败", payload, parent=self.root)
 
@@ -844,6 +1145,10 @@ class C3DownloaderApp:
             )
             return
         self.closing = True
+        if self.connection_sftp is not None:
+            close_sftp(self.connection_client, self.connection_sftp)
+            self.connection_client = None
+            self.connection_sftp = None
         self.root.destroy()
 
 

@@ -22,6 +22,7 @@ from c3_rlog_downloader.transfer import (
     KeyPassphraseRequired,
     TransferCancelled,
     TransferError,
+    _ProgressRate,
     cleanup_snapshot,
     connect_sftp,
     date_folder,
@@ -355,6 +356,47 @@ def test_any_download_failure_prevents_cleanup_preview(monkeypatch, tmp_path):
     assert summary.failures
     assert preview is None
     assert preview_calls == []
+
+
+def test_supplied_connection_stays_open_for_gui_lifecycle(monkeypatch, tmp_path):
+    now = int(time.time())
+    sftp = MemorySFTP(now)
+    path = REMOTE_ROOT + "/2025-04-03--route/rlog.zst"
+    sftp.add_file(path, b"downloaded", mtime=now - 400)
+    close_calls = []
+
+    class Client:
+        def close(self):
+            close_calls.append(True)
+
+    monkeypatch.setattr(
+        "c3_rlog_downloader.transfer.connect_sftp",
+        lambda *args, **kwargs: pytest.fail("supplied connection should be reused"),
+    )
+
+    summary, _preview, _inventory = run_download(
+        "192.0.2.5",
+        "key",
+        tmp_path,
+        tmp_path / "settings",
+        None,
+        threading.Event(),
+        connection=(Client(), sftp),
+    )
+
+    assert summary.all_succeeded
+    assert close_calls == []
+
+
+def test_progress_rate_reports_smoothed_speed_and_eta(monkeypatch):
+    ticks = iter((100.5,))
+    monkeypatch.setattr("c3_rlog_downloader.transfer.time.monotonic", lambda: next(ticks))
+    rate = _ProgressRate(last_sample_at=100.0)
+
+    speed, eta = rate.update(measured_bytes=100, completed_bytes=100, total_bytes=300)
+
+    assert speed == pytest.approx(200.0)
+    assert eta == pytest.approx(1.0)
 
 
 def test_settings_store_only_ip_and_key_path(tmp_path):

@@ -73,6 +73,8 @@ class TransferProgress:
     completed_files: int
     total_files: int
     phase: str = "download"
+    speed_bytes_per_second: float = 0.0
+    eta_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,40 @@ class CleanupSummary:
 
 
 ProgressCallback = Callable[[TransferProgress], None] | None
+
+
+@dataclass
+class _ProgressRate:
+    """Estimate transfer speed from actual bytes read, with light smoothing."""
+
+    last_bytes: int = 0
+    last_sample_at: float = field(default_factory=time.monotonic)
+    speed_bytes_per_second: float = 0.0
+
+    def update(
+        self, measured_bytes: int, completed_bytes: int, total_bytes: int
+    ) -> tuple[float, float | None]:
+        now = time.monotonic()
+        elapsed = now - self.last_sample_at
+        if measured_bytes > self.last_bytes and elapsed > 0.01:
+            if elapsed >= 0.25 or completed_bytes >= total_bytes:
+                sample = (measured_bytes - self.last_bytes) / elapsed
+                if self.speed_bytes_per_second <= 0:
+                    self.speed_bytes_per_second = sample
+                else:
+                    self.speed_bytes_per_second = (
+                        self.speed_bytes_per_second * 0.7 + sample * 0.3
+                    )
+                self.last_bytes = measured_bytes
+                self.last_sample_at = now
+
+        if total_bytes <= 0 or self.speed_bytes_per_second <= 0:
+            eta = None
+        elif completed_bytes >= total_bytes:
+            eta = 0.0
+        else:
+            eta = max(0.0, (total_bytes - completed_bytes) / self.speed_bytes_per_second)
+        return self.speed_bytes_per_second, eta
 
 
 def is_recent(mtime: int, now: int | None = None) -> bool:
@@ -406,6 +442,8 @@ def download_files(
     skipped_existing = 0
     skipped_recent = len(inventory.recent_rlogs)
     downloaded_bytes = 0
+    measured_bytes = 0
+    rate = _ProgressRate()
     failures: list[DownloadFailure] = []
     total_files = len(inventory.rlog_files)
 
@@ -423,6 +461,7 @@ def download_files(
             skipped_recent += 1
             completed_files += 1
             completed_bytes += item.size
+            speed, eta = rate.update(measured_bytes, completed_bytes, total_bytes)
             _emit_progress(
                 progress_callback,
                 TransferProgress(
@@ -433,6 +472,8 @@ def download_files(
                     item.size,
                     completed_files,
                     total_files,
+                    speed_bytes_per_second=speed,
+                    eta_seconds=eta,
                 ),
             )
             continue
@@ -446,6 +487,7 @@ def download_files(
             completed_files += 1
             skipped_existing += 1
             completed_bytes += item.size
+            speed, eta = rate.update(measured_bytes, completed_bytes, total_bytes)
             _emit_progress(
                 progress_callback,
                 TransferProgress(
@@ -456,6 +498,8 @@ def download_files(
                     item.size,
                     completed_files,
                     total_files,
+                    speed_bytes_per_second=speed,
+                    eta_seconds=eta,
                 ),
             )
             continue
@@ -479,6 +523,7 @@ def download_files(
         part = local_path.with_name(local_path.name + ".part")
         metadata_path = local_path.with_name(local_path.name + _PART_META_SUFFIX)
         local_path.parent.mkdir(parents=True, exist_ok=True)
+        file_start_position: list[int | None] = [None]
 
         def report_file_progress(
             position: int,
@@ -487,6 +532,15 @@ def download_files(
             current_size: int = item.size,
             files_done: int = completed_files,
         ) -> None:
+            nonlocal measured_bytes
+            if file_start_position[0] is None:
+                file_start_position[0] = position
+            current_measured_bytes = measured_bytes + max(
+                0, position - file_start_position[0]
+            )
+            speed, eta = rate.update(
+                current_measured_bytes, base_bytes + position, total_bytes
+            )
             _emit_progress(
                 progress_callback,
                 TransferProgress(
@@ -497,6 +551,8 @@ def download_files(
                     current_size,
                     files_done,
                     total_files,
+                    speed_bytes_per_second=speed,
+                    eta_seconds=eta,
                 ),
             )
 
@@ -520,6 +576,7 @@ def download_files(
                 "mtime": item.mtime,
             }
             _write_json_atomic(manifest_path, manifest)
+            measured_bytes += item.size - (file_start_position[0] or 0)
             completed_files += 1
             downloaded_files += 1
             downloaded_bytes += item.size
@@ -576,6 +633,7 @@ def cleanup_snapshot(
     failures: list[DownloadFailure] = []
     total_bytes = preview.total_bytes
     total_files = len(preview.entries)
+    rate = _ProgressRate()
 
     for index, item in enumerate(preview.entries, start=1):
         _check_cancel(cancel_event)
@@ -595,6 +653,7 @@ def cleanup_snapshot(
             sftp.remove(remote_path)
             deleted_files += 1
             deleted_bytes += item.size
+            speed, eta = rate.update(deleted_bytes, deleted_bytes, total_bytes)
             _emit_progress(
                 progress_callback,
                 TransferProgress(
@@ -605,6 +664,8 @@ def cleanup_snapshot(
                     item.size,
                     index,
                     total_files,
+                    speed_bytes_per_second=speed,
+                    eta_seconds=eta,
                     phase="cleanup",
                 ),
             )
@@ -726,12 +787,17 @@ def run_download(
     passphrase: str | None,
     cancel_event: threading.Event,
     progress_callback: ProgressCallback = None,
+    connection: tuple[object, object] | None = None,
 ):
-    """Connect, scan, download, and preview possible cleanup entries."""
+    """Scan, download, and preview cleanup entries on a supplied or new connection."""
     export_date = date.today()
     client = sftp = None
+    owns_connection = connection is None
     try:
-        client, sftp = connect_sftp(host, key_filename, settings_dir, passphrase)
+        if connection is None:
+            client, sftp = connect_sftp(host, key_filename, settings_dir, passphrase)
+        else:
+            client, sftp = connection
         inventory = scan_remote_tree(sftp)
         result = download_files(
             sftp,
@@ -745,7 +811,8 @@ def run_download(
         cleanup = preview_cleanup(sftp) if result.all_succeeded else None
         return result, cleanup, inventory
     finally:
-        close_sftp(client, sftp)
+        if owns_connection:
+            close_sftp(client, sftp)
 
 
 def run_cleanup(
@@ -756,11 +823,17 @@ def run_cleanup(
     preview: CleanupPreview,
     cancel_event: threading.Event,
     progress_callback: ProgressCallback = None,
+    connection: tuple[object, object] | None = None,
 ) -> CleanupSummary:
-    """Reconnect and remove only the previously previewed unchanged files."""
+    """Remove only the previously previewed unchanged files on a supplied or new connection."""
     client = sftp = None
+    owns_connection = connection is None
     try:
-        client, sftp = connect_sftp(host, key_filename, settings_dir, passphrase)
+        if connection is None:
+            client, sftp = connect_sftp(host, key_filename, settings_dir, passphrase)
+        else:
+            client, sftp = connection
         return cleanup_snapshot(sftp, preview, cancel_event, progress_callback)
     finally:
-        close_sftp(client, sftp)
+        if owns_connection:
+            close_sftp(client, sftp)
