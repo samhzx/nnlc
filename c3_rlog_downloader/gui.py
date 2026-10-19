@@ -28,7 +28,7 @@ from c3_rlog_downloader.transfer import (
 )
 
 APP_TITLE = "C3 rlog 下载器"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 C_HEADER_BG = "#16324f"
 C_HEADER_SUB = "#8fb0d1"
 C_BADGE_BG = "#274d72"

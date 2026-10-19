@@ -48,7 +48,7 @@ jobs:
             throw "Expected executable was not found: $exe"
           }
           $version = (& $exe --version 2>&1 | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0 -or $version -ne "1.0.0") {
+          if ($LASTEXITCODE -ne 0 -or $version -ne "1.1.0") {
             throw "Executable smoke test failed: $version"
           }
           $sizeMb = [math]::Round((Get-Item -LiteralPath $exe).Length / 1MB, 1)
