@@ -25,10 +25,11 @@ from c3_rlog_downloader.transfer import (
     connect_sftp,
     run_cleanup,
     run_download,
+    upload_config_file,
 )
 
 APP_TITLE = "C3 rlog 下载器"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 C_HEADER_BG = "#16324f"
 C_HEADER_SUB = "#8fb0d1"
 C_BADGE_BG = "#274d72"
@@ -120,14 +121,6 @@ class PathPicker(tk.Frame):
             disabledbackground=C_DISABLED,
             disabledforeground=C_MUTED,
         )
-        self.entry.pack(side="left", fill="both", expand=True, padx=(10, 0))
-        self.entry.bind(
-            "<FocusIn>", lambda _event: self.configure(highlightbackground=C_ACCENT)
-        )
-        self.entry.bind(
-            "<FocusOut>", lambda _event: self.configure(highlightbackground=C_BORDER)
-        )
-        tk.Frame(self, bg=C_BORDER, width=1).pack(side="left", fill="y", pady=8)
         self.button = tk.Label(
             self,
             text="···",
@@ -136,9 +129,18 @@ class PathPicker(tk.Frame):
             fg=C_MUTED,
             cursor="hand2",
             padx=10,
+            width=3,
             anchor="center",
         )
-        self.button.pack(side="left", fill="both")
+        self.button.pack(side="right", fill="y")
+        tk.Frame(self, bg=C_BORDER, width=1).pack(side="right", fill="y", pady=8)
+        self.entry.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        self.entry.bind(
+            "<FocusIn>", lambda _event: self.configure(highlightbackground=C_ACCENT)
+        )
+        self.entry.bind(
+            "<FocusOut>", lambda _event: self.configure(highlightbackground=C_BORDER)
+        )
         self.button.bind("<Button-1>", lambda _event: self._browse(browse_command))
         self.button.bind("<Enter>", self._on_enter)
         self.button.bind("<Leave>", lambda _event: self.button.configure(fg=C_MUTED))
@@ -168,6 +170,7 @@ class C3DownloaderApp:
         self.destination_var = tk.StringVar(
             value=settings.get("destination") or default_destination()
         )
+        self.config_var = tk.StringVar(value=settings.get("config_path", ""))
         self.connection_status_var = tk.StringVar(value="● 未连接")
         self.status_var = tk.StringVar(value="就绪")
         self.progress_var = tk.StringVar(value="0.0%")
@@ -270,27 +273,56 @@ class C3DownloaderApp:
         self.key_picker = key_picker
         self.path_pickers.append(key_picker)
 
-        destination_card, destination_inner = self._make_card(body, "下载设置")
+        destination_card, destination_inner = self._make_card(body, "上传下载")
         destination_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         destination_inner.columnconfigure(0, minsize=LABEL_W)
         destination_inner.columnconfigure(1, weight=1)
         destination_picker = PathPicker(
             destination_inner, self.destination_var, self._browse_destination
         )
-        self._form_row(destination_inner, 0, "保存目录", destination_picker)
+        self._form_row(destination_inner, 0, "下载目录", destination_picker)
         self.destination_picker = destination_picker
         self.path_pickers.append(destination_picker)
-        source_box = self._fixed_box(destination_inner)
-        source_box.configure(bg=C_DISABLED)
-        tk.Label(
-            source_box,
-            text="/data/media/0/realdata",
+        config_actions = tk.Frame(destination_inner, bg=C_CARD_BG)
+        config_actions.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
+        self.upload_button_box = tk.Frame(
+            config_actions, bg=C_ACCENT, height=INPUT_H
+        )
+        self.upload_button_box.pack_propagate(False)
+        self.upload_button_box.pack(side="right", padx=(8, 0))
+        config_picker = PathPicker(
+            config_actions, self.config_var, self._browse_config
+        )
+        self.config_picker = config_picker
+        self.path_pickers.append(config_picker)
+        config_picker.pack(side="left", fill="x", expand=True)
+        self.upload_button = tk.Button(
+            self.upload_button_box,
+            text="上传",
             font=F_BASE,
-            bg=C_DISABLED,
-            fg=C_MUTED,
-            anchor="w",
-        ).pack(fill="both", expand=True, padx=10)
-        self._form_row(destination_inner, 1, "设备目录", source_box)
+            command=self.upload_config,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+            disabledforeground="#ffffff",
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+            padx=13,
+            cursor="hand2",
+        )
+        self.upload_button.pack(fill="both", expand=True, padx=1, pady=1)
+        self._fit_upload_button_width()
+        self.upload_button.bind("<Enter>", self._upload_button_enter)
+        self.upload_button.bind("<Leave>", self._upload_button_leave)
+        tk.Label(
+            destination_inner,
+            text="模型参数",
+            font=F_BASE,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+        ).grid(row=1, column=0, sticky="e", pady=PAD_ROW)
 
         progress_card, progress_inner = self._make_card(body, "下载进度")
         progress_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -640,6 +672,14 @@ class C3DownloaderApp:
         self.connection_button.configure(text=current)
         self.connection_button_box.configure(width=max_width + 2)
 
+    def _fit_upload_button_width(self) -> None:
+        current = self.upload_button.cget("text")
+        self.upload_button.configure(text="上传")
+        self.upload_button.update_idletasks()
+        width = self.upload_button.winfo_reqwidth()
+        self.upload_button.configure(text=current)
+        self.upload_button_box.configure(width=width + 2)
+
     def _form_row(self, parent, row: int, label: str, widget) -> None:
         tk.Label(parent, text=label, font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
             row=row, column=0, sticky="e", pady=PAD_ROW
@@ -667,6 +707,21 @@ class C3DownloaderApp:
         )
         if path:
             self.destination_var.set(path)
+            try:
+                self._persist_settings()
+            except OSError as exc:
+                messagebox.showerror("设置保存失败", str(exc), parent=self.root)
+
+    def _browse_config(self) -> None:
+        current = self.config_var.get().strip()
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择训练结果 JSON 文件",
+            initialdir=str(Path(current).parent) if current else str(Path.home()),
+            filetypes=(("JSON 文件", "*.json"), ("所有文件", "*")),
+        )
+        if path:
+            self.config_var.set(path)
             try:
                 self._persist_settings()
             except OSError as exc:
@@ -773,6 +828,7 @@ class C3DownloaderApp:
         self.host_box.configure(bg=C_CARD_BG if input_enabled else C_DISABLED)
         self.key_picker.set_enabled(input_enabled)
         self.destination_picker.set_enabled(not self.busy)
+        self.config_picker.set_enabled(not self.busy)
         self._set_connection_button_style(
             connected, connecting=self.busy and not connected
         )
@@ -780,6 +836,8 @@ class C3DownloaderApp:
             state="disabled" if self.busy else "normal",
             cursor="arrow" if self.busy else "hand2",
         )
+        can_upload = connected and not self.busy
+        self._set_upload_button_style(enabled=can_upload)
         can_start = connected and not self.busy
         self.start_button.configure(
             state="normal" if can_start else "disabled",
@@ -827,13 +885,49 @@ class C3DownloaderApp:
         host: str | None = None,
         key_path: str | None = None,
         destination: str | None = None,
+        config_path: str | None = None,
     ) -> None:
         save_settings(
             self.host_var.get() if host is None else host,
             self.key_var.get() if key_path is None else key_path,
             self.destination_var.get() if destination is None else destination,
+            self.config_var.get() if config_path is None else config_path,
             self.settings_dir,
         )
+
+    def _set_upload_button_style(self, enabled: bool) -> None:
+        if enabled:
+            self.upload_button_box.configure(bg=C_ACCENT)
+            self.upload_button.configure(
+                state="normal",
+                bg=C_ACCENT,
+                fg="#ffffff",
+                disabledforeground="#ffffff",
+                activebackground=C_ACCENT_HOVER,
+                activeforeground="#ffffff",
+                cursor="hand2",
+            )
+            return
+        self.upload_button_box.configure(bg=C_ACCENT_DISABLED)
+        self.upload_button.configure(
+            state="disabled",
+            bg=C_ACCENT_DISABLED,
+            fg="#ffffff",
+            disabledforeground="#ffffff",
+            activebackground=C_ACCENT_DISABLED,
+            activeforeground="#ffffff",
+            cursor=self._disabled_cursor(),
+        )
+
+    def _upload_button_enter(self, _event=None) -> None:
+        if str(self.upload_button["state"]) == "disabled":
+            return
+        self.upload_button_box.configure(bg=C_ACCENT_HOVER)
+        self.upload_button.configure(bg=C_ACCENT_HOVER)
+
+    def _upload_button_leave(self, _event=None) -> None:
+        connected = self.connection_sftp is not None
+        self._set_upload_button_style(enabled=connected and not self.busy)
 
     def connect(self) -> None:
         if self.busy or self.connection_sftp is not None:
@@ -949,6 +1043,55 @@ class C3DownloaderApp:
         self._append_log("开始扫描设备目录 /data/media/0/realdata")
         self._set_busy(True)
         self._start_download_worker(destination)
+
+    def upload_config(self) -> None:
+        if self.busy:
+            return
+        if self.connection_sftp is None:
+            messagebox.showinfo("尚未连接", "请先点击“连接设备”并等待连接成功。", parent=self.root)
+            return
+        config_value = self.config_var.get().strip()
+        if not config_value:
+            messagebox.showerror("文件无效", "请选择训练结果 JSON 文件。", parent=self.root)
+            return
+        config_path = Path(config_value).expanduser()
+        if not config_path.is_file():
+            messagebox.showerror("文件无效", "请选择存在的训练结果 JSON 文件。", parent=self.root)
+            return
+        if config_path.suffix.casefold() != ".json":
+            messagebox.showerror("文件无效", "模型参数文件必须是 JSON。", parent=self.root)
+            return
+        try:
+            self._persist_settings(config_path=str(config_path))
+        except OSError as exc:
+            messagebox.showerror("设置保存失败", str(exc), parent=self.root)
+            return
+        self.cancel_event = threading.Event()
+        self.operation = "upload"
+        self.status_var.set("正在上传模型参数")
+        self._append_log(f"开始上传模型参数 {config_path.name}")
+        self._set_busy(True)
+        self._start_upload_worker(config_path)
+
+    def _start_upload_worker(self, config_path: Path) -> None:
+        if self.connection_sftp is None:
+            self._finish("设备未连接")
+            return
+        self.worker = threading.Thread(
+            target=self._upload_worker,
+            args=(config_path,),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _upload_worker(self, config_path: Path) -> None:
+        try:
+            remote_path = upload_config_file(self.connection_sftp, config_path)
+            self.messages.put(("upload_complete", remote_path))
+        except TransferCancelled as exc:
+            self.messages.put(("cancelled", str(exc)))
+        except Exception as exc:  # noqa: BLE001 - surface unexpected transport failures in the UI.
+            self.messages.put(("failed", str(exc)))
 
     def _start_download_worker(self, destination: Path) -> None:
         if self.connection_sftp is None or self.connected_host is None:
@@ -1204,6 +1347,10 @@ class C3DownloaderApp:
             )
         elif kind == "download_complete":
             self._on_download_complete(payload)
+        elif kind == "upload_complete":
+            self._finish("配置上传成功")
+            self._append_log(f"配置已覆盖上传到 {payload}", "success")
+            messagebox.showinfo("上传成功", f"配置已覆盖上传到：\n{payload}", parent=self.root)
         elif kind == "cleanup_complete":
             result = payload
             self._finish("设备日志清理完成" if not result.failures else "清理部分完成")
@@ -1234,11 +1381,13 @@ class C3DownloaderApp:
             self._append_log(payload, "muted")
         elif kind == "failed":
             was_connecting = self.operation == "connect"
+            was_upload = self.operation == "upload"
             self._finish("任务失败")
             if was_connecting:
                 self._set_connection_status("● 未连接")
             self._append_log(payload, "error")
-            messagebox.showerror("任务失败", payload, parent=self.root)
+            title = "上传失败" if was_upload else "任务失败"
+            messagebox.showerror(title, payload, parent=self.root)
 
     def _poll_messages(self) -> None:
         try:

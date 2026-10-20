@@ -14,6 +14,9 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 
 REMOTE_ROOT = "/data/media/0/realdata"
+REMOTE_CONFIG_DIR = (
+    "/data/openpilot/sunnypilot/neural_network_data/neural_network_lateral_control"
+)
 RECENT_WINDOW_SECONDS = 5 * 60
 CHUNK_SIZE = 256 * 1024
 PREFETCH_CONCURRENT_REQUESTS = 64
@@ -832,6 +835,31 @@ def connect_sftp(
         if isinstance(exc, paramiko.SSHException):
             raise TransferError("SSH 连接失败：" + str(exc)) from exc
         raise TransferError("无法连接 C3：" + str(exc)) from exc
+
+
+def upload_config_file(sftp, local_path: Path, remote_dir: str = REMOTE_CONFIG_DIR) -> str:
+    """Overwrite a local JSON file onto the device NNLC config directory."""
+    source = Path(local_path).expanduser()
+    if not source.is_file():
+        raise TransferError("请选择存在的模型参数文件。")
+    if source.suffix.casefold() != ".json":
+        raise TransferError("模型参数文件必须是 JSON。")
+    remote_dir = posixpath.normpath(remote_dir)
+    if remote_dir != REMOTE_CONFIG_DIR:
+        raise TransferError("上传目录不是固定的 NNLC 配置目录，已拒绝操作。")
+    try:
+        attr = sftp.lstat(remote_dir)
+    except OSError as exc:
+        raise TransferError("无法访问设备配置目录，请确认设备已连接且目录存在。") from exc
+    mode = int(getattr(attr, "st_mode", 0) or 0)
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise TransferError("设备配置路径不是目录。")
+    remote_path = posixpath.join(remote_dir, source.name)
+    try:
+        sftp.put(str(source), remote_path)
+    except Exception as exc:  # noqa: BLE001 - surface SFTP backend failures to the UI.
+        raise TransferError("上传模型参数失败：" + str(exc)) from exc
+    return remote_path
 
 
 def close_sftp(client, sftp) -> None:

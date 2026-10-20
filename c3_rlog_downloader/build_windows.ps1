@@ -42,7 +42,7 @@ if (-not (Test-Path -LiteralPath $BundleExe -PathType Leaf)) {
 }
 
 $VersionOutput = (& $BundleExe --version 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne "1.1.0") {
+if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne "1.2.0") {
     throw "Standalone executable smoke test failed: $VersionOutput"
 }
 

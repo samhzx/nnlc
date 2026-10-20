@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import date
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +15,7 @@ import pytest
 from c3_rlog_downloader.settings import default_destination, load_settings, save_settings
 from c3_rlog_downloader.transfer import (
     PREFETCH_CONCURRENT_REQUESTS,
+    REMOTE_CONFIG_DIR,
     REMOTE_ROOT,
     CleanupPreview,
     DownloadFailure,
@@ -33,6 +34,7 @@ from c3_rlog_downloader.transfer import (
     preview_cleanup,
     run_download,
     scan_remote_tree,
+    upload_config_file,
 )
 
 EXPORT_DATE = date(2026, 10, 16)
@@ -145,6 +147,13 @@ class MemorySFTP:
             raise FileNotFoundError(path)
         del self.nodes[path]
         self.removed.append(path)
+
+    def put(self, localpath, remotepath):
+        parent = remotepath.rsplit("/", 1)[0]
+        if parent not in self.nodes or not stat.S_ISDIR(self.nodes[parent][0]):
+            raise FileNotFoundError(parent)
+        data = Path(localpath).read_bytes()
+        self.nodes[remotepath] = (stat.S_IFREG | 0o644, data, self.now)
 
     def rmdir(self, path):
         if path not in self.nodes:
@@ -524,8 +533,14 @@ def test_progress_rate_reports_smoothed_speed_and_eta(monkeypatch):
     assert eta == pytest.approx(1.0)
 
 
-def test_settings_store_ip_key_path_and_destination(tmp_path):
-    save_settings("192.0.2.5", "/keys/c3", str(tmp_path / "C3_Rlogs"), tmp_path)
+def test_settings_store_ip_key_path_destination_and_config(tmp_path):
+    save_settings(
+        "192.0.2.5",
+        "/keys/c3",
+        str(tmp_path / "C3_Rlogs"),
+        str(tmp_path / "model.json"),
+        tmp_path,
+    )
     settings = load_settings(tmp_path)
     raw = (tmp_path / "settings.json").read_text(encoding="utf-8")
 
@@ -533,6 +548,7 @@ def test_settings_store_ip_key_path_and_destination(tmp_path):
         "host": "192.0.2.5",
         "key_path": "/keys/c3",
         "destination": str(tmp_path / "C3_Rlogs"),
+        "config_path": str(tmp_path / "model.json"),
     }
     assert "passphrase" not in raw
     assert "private_key" not in raw
@@ -540,13 +556,15 @@ def test_settings_store_ip_key_path_and_destination(tmp_path):
 
 def test_settings_keep_existing_destination_when_only_connection_is_saved(tmp_path):
     keep = str(tmp_path / "keep")
-    save_settings("192.0.2.5", "/keys/c3", keep, tmp_path)
-    save_settings("192.0.2.8", "/keys/other", "", tmp_path)
+    config = str(tmp_path / "model.json")
+    save_settings("192.0.2.5", "/keys/c3", keep, config, tmp_path)
+    save_settings("192.0.2.8", "/keys/other", "", "", tmp_path)
     settings = load_settings(tmp_path)
 
     assert settings["host"] == "192.0.2.8"
     assert settings["key_path"] == "/keys/other"
     assert settings["destination"] == keep
+    assert settings["config_path"] == config
 
 
 def test_missing_destination_falls_back_to_default(tmp_path):
@@ -558,6 +576,34 @@ def test_missing_destination_falls_back_to_default(tmp_path):
 
     assert settings["destination"] == ""
     assert default_destination().endswith("C3_Rlogs")
+
+
+def test_upload_config_overwrites_existing_json(tmp_path):
+    now = 2_000_000_000
+    sftp = MemorySFTP(now)
+    sftp.add_dir(REMOTE_CONFIG_DIR)
+    remote_path = REMOTE_CONFIG_DIR + "/policy.json"
+    sftp.add_file(remote_path, b'{"old": true}', mtime=now - 400)
+    local = tmp_path / "policy.json"
+    local.write_text('{"new": true}', encoding="utf-8")
+
+    uploaded = upload_config_file(sftp, local)
+
+    assert uploaded == remote_path
+    assert sftp.nodes[remote_path][1] == b'{"new": true}'
+
+
+def test_upload_config_rejects_non_json_and_unknown_directory(tmp_path):
+    sftp = MemorySFTP()
+    sftp.add_dir(REMOTE_CONFIG_DIR)
+    local = tmp_path / "policy.txt"
+    local.write_text("not json", encoding="utf-8")
+    with pytest.raises(TransferError, match="必须是 JSON"):
+        upload_config_file(sftp, local)
+    json_file = tmp_path / "policy.json"
+    json_file.write_text("{}", encoding="utf-8")
+    with pytest.raises(TransferError, match="固定的 NNLC 配置目录"):
+        upload_config_file(sftp, json_file, remote_dir="/tmp")
 
 
 def test_encrypted_key_errors_request_or_reject_a_passphrase(monkeypatch, tmp_path):

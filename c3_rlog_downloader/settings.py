@@ -36,6 +36,9 @@ def load_settings(directory: Path | None = None) -> dict:
         "destination": value.get("destination", "")
         if isinstance(value.get("destination", ""), str)
         else "",
+        "config_path": value.get("config_path", "")
+        if isinstance(value.get("config_path", ""), str)
+        else "",
     }
 
 
@@ -47,11 +50,13 @@ def save_settings(
     host: str,
     key_path: str,
     destination: str = "",
+    config_path: str = "",
     directory: Path | None = None,
 ) -> None:
     target_dir = directory or settings_directory()
     existing = load_settings(target_dir)
     destination_value = destination.strip() or existing.get("destination", "")
+    config_value = config_path.strip() or existing.get("config_path", "")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "settings.json"
     temporary = target.with_name(target.name + ".tmp")
@@ -61,6 +66,7 @@ def save_settings(
                 "host": host.strip(),
                 "key_path": key_path.strip(),
                 "destination": destination_value,
+                "config_path": config_value,
             },
             handle,
             ensure_ascii=False,
