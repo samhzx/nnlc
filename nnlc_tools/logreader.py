@@ -107,26 +107,29 @@ class LogReader:
             self.close()
             raise
 
-    def __iter__(self):
+    def iter_events(self, *, skip_copy=False):
+        """Iterate source-order events, optionally borrowing Cap'n Proto data.
+
+        When ``skip_copy`` is true, callers must copy every value they need
+        before requesting the next event. This is intended for streaming
+        consumers that immediately convert selected fields to Python values.
+        """
+        if not isinstance(skip_copy, bool):
+            raise ValueError("skip_copy must be a boolean")
         if self._file is None:
             return
 
         # read_multiple requires a real file object and advances its cursor as
-        # each framed Cap'n Proto message is yielded.  Readers are copied by
-        # pycapnp's default ``skip_copy=False`` behavior, which is important
-        # because extract_segment retains references to the latest state
-        # messages while reading the next event.
+        # each framed Cap'n Proto message is yielded.
         self._file.seek(0)
         yielded_events = False
-        events = capnp_log.Event.read_multiple(self._file, skip_copy=False)
-        if self._sort_by_time:
-            # The caller explicitly accepts per-rlog memory usage. Sorting is
-            # stable, so events with equal timestamps retain their file order.
-            buffered_events = list(events)
-            buffered_events.sort(key=lambda event: event.logMonoTime)
-            events = iter(buffered_events)
+        events = iter(capnp_log.Event.read_multiple(self._file, skip_copy=skip_copy))
         previous_time = None
-        for event in events:
+        while True:
+            try:
+                event = next(events)
+            except StopIteration:
+                break
             yielded_events = True
             if self._check_time_order:
                 current_time = event.logMonoTime
@@ -137,8 +140,21 @@ class LogReader:
                     )
                 previous_time = current_time
             yield event
+            # Borrowed readers must be released before pycapnp advances the
+            # underlying file buffer for the next message.
+            del event
         if not yielded_events:
             raise ValueError(f"rlog contains no events: {self._filename}")
+
+    def __iter__(self):
+        events = self.iter_events(skip_copy=False)
+        if self._sort_by_time:
+            # Stable sorting preserves source order for equal timestamps.
+            buffered_events = list(events)
+            buffered_events.sort(key=lambda event: event.logMonoTime)
+            yield from buffered_events
+            return
+        yield from events
 
     def close(self):
         """Release the source and any temporary decompression file."""

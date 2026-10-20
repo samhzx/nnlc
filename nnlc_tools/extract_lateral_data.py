@@ -15,8 +15,10 @@ import csv
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import glob
+import heapq
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -37,6 +39,8 @@ from nnlc_tools.route_utils import extract_route_id
 RLOG_WORKER_MODULE = "nnlc_tools.extract_rlog_worker"
 MAX_RLOGS_PER_WORKER = 100
 MAX_RLOG_WORKERS = 16
+REORDER_WINDOW_SECONDS = 2.0
+NANOSECONDS_PER_SECOND = 1_000_000_000
 
 # Temporal offsets matching nnlc.py's past_times and future_times
 PAST_TIMES = [-0.3, -0.2, -0.1]
@@ -54,6 +58,12 @@ LOW_SPEED_Y = [12, 3, 1, 0]
 # ModelConstants.T_IDXS: 10.0 * (i/32)^2 for i in range(33)
 T_IDXS = [10.0 * (i / 32.0) ** 2 for i in range(33)]
 T_DIFFS = [T_IDXS[i+1] - T_IDXS[i] for i in range(len(T_IDXS) - 1)]
+T_IDXS_ARRAY = np.asarray(T_IDXS, dtype=np.float64)
+T_DIFFS_ARRAY = np.asarray(T_DIFFS, dtype=np.float64)
+LOW_SPEED_X_ARRAY = np.asarray(LOW_SPEED_X, dtype=np.float64)
+LOW_SPEED_Y_ARRAY = np.asarray(LOW_SPEED_Y, dtype=np.float64)
+FRICTION_LOOK_AHEAD_BP_ARRAY = np.asarray(FRICTION_LOOK_AHEAD_BP, dtype=np.float64)
+FRICTION_LOOK_AHEAD_V_ARRAY = np.asarray(FRICTION_LOOK_AHEAD_V, dtype=np.float64)
 
 
 def _sign(x):
@@ -73,7 +83,8 @@ def _get_lookahead_value(future_vals, current_val):
 
 def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
                               desired_curvature, actual_curvature,
-                              model_accels_y, steer_actuator_delay):
+                              model_accels_y, steer_actuator_delay,
+                              *, model_accels_valid=None):
   """精确计算 friction_input，与 nnlc.py 运行时 update_friction_input 逻辑一致
 
   Args:
@@ -92,24 +103,37 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
     return 0.0
 
   try:
-    scalar_inputs = np.asarray([
+    scalar_inputs = tuple(float(value) for value in (
         v_ego,
         desired_lat_accel,
         actual_lat_accel,
         desired_curvature,
         actual_curvature,
         steer_actuator_delay,
-    ], dtype=np.float64)
-    lat_accels = np.asarray(model_accels_y[:len(T_IDXS)], dtype=np.float64)
+    ))
+    if (
+        isinstance(model_accels_y, np.ndarray)
+        and model_accels_y.dtype == np.float64
+        and model_accels_y.shape == (len(T_IDXS),)
+    ):
+      lat_accels = model_accels_y
+    else:
+      lat_accels = np.asarray(model_accels_y[:len(T_IDXS)], dtype=np.float64)
   except (TypeError, ValueError, OverflowError):
     return None
-  if scalar_inputs.shape != (6,) or not np.all(np.isfinite(scalar_inputs)):
+  if not all(math.isfinite(value) for value in scalar_inputs):
     return None
-  if lat_accels.shape != (len(T_IDXS),) or not np.all(np.isfinite(lat_accels)):
+  if lat_accels.shape != (len(T_IDXS),):
+    return None
+  if model_accels_valid is False or (
+      model_accels_valid is None and not np.all(np.isfinite(lat_accels))
+  ):
     return None
 
+  v_ego, desired_lat_accel, actual_lat_accel, desired_curvature, actual_curvature, steer_actuator_delay = scalar_inputs
+
   # low_speed_factor
-  low_speed_factor = float(np.interp(v_ego, LOW_SPEED_X, LOW_SPEED_Y)) ** 2
+  low_speed_factor = float(np.interp(v_ego, LOW_SPEED_X_ARRAY, LOW_SPEED_Y_ARRAY)) ** 2
 
   # setpoint 和 measurement
   setpoint = desired_lat_accel + low_speed_factor * desired_curvature
@@ -119,18 +143,28 @@ def calculate_friction_input(v_ego, desired_lat_accel, actual_lat_accel,
   desired_lat_jerk_time = max(0.01, steer_actuator_delay) + LATERAL_LAG_MOD
 
   # lookahead
-  lookahead = float(np.interp(v_ego, FRICTION_LOOK_AHEAD_BP, FRICTION_LOOK_AHEAD_V))
+  lookahead = float(np.interp(
+      v_ego, FRICTION_LOOK_AHEAD_BP_ARRAY, FRICTION_LOOK_AHEAD_V_ARRAY,
+  ))
   friction_upper_idx = next((i for i, t in enumerate(T_IDXS) if t > lookahead), 16)
 
-  # predicted_lateral_jerk
-  predicted_lateral_jerk = np.diff(lat_accels) / np.array(T_DIFFS)
-
   # desired_lateral_jerk
-  desired_lateral_jerk = (float(np.interp(desired_lat_jerk_time, T_IDXS, lat_accels)) - desired_lat_accel) / desired_lat_jerk_time
+  desired_lateral_jerk = (
+      float(np.interp(desired_lat_jerk_time, T_IDXS_ARRAY, lat_accels))
+      - desired_lat_accel
+  ) / desired_lat_jerk_time
 
-  # lookahead_lateral_jerk
-  end_idx = min(friction_upper_idx, len(predicted_lateral_jerk))
-  lookahead_lateral_jerk = _get_lookahead_value(predicted_lateral_jerk[LAT_PLAN_MIN_IDX:end_idx].tolist(), desired_lateral_jerk)
+  # Scan only the active lookahead range without allocating a jerk array/list.
+  lookahead_lateral_jerk = desired_lateral_jerk
+  desired_jerk_sign = _sign(desired_lateral_jerk)
+  end_idx = min(friction_upper_idx, len(T_DIFFS))
+  for index in range(LAT_PLAN_MIN_IDX, end_idx):
+    predicted_jerk = (lat_accels[index + 1] - lat_accels[index]) / T_DIFFS_ARRAY[index]
+    if _sign(predicted_jerk) != desired_jerk_sign:
+      lookahead_lateral_jerk = 0.0
+      break
+    if abs(predicted_jerk) < abs(lookahead_lateral_jerk):
+      lookahead_lateral_jerk = predicted_jerk
 
   # lat_accel_friction_factor
   lat_accel_friction_factor = LAT_ACCEL_FRICTION_FACTOR_DEFAULT
@@ -178,140 +212,241 @@ def find_rlogs(input_dir):
     return sorted(set(files), key=natural_path_key)
 
 
-def extract_segment(rlog_path, row_callback=None):
-    """Extract lateral data rows from a single rlog file.
+class _LateEventBeyondWindow(RuntimeError):
+    """Signals that a source event arrived behind the committed time window."""
 
-    Follows the message iteration pattern from openpilot's
-    measure_steering_accuracy.py — accumulate messages by type in a state dict,
-    then emit a row when controlsState arrives. One rlog is fully sorted before
-    it is processed; the complete dataset is still emitted incrementally.
+
+def _snapshot_event(event, sequence):
+    """Copy only fields used by extraction before a borrowed Cap'n Proto reader expires."""
+    timestamp_ns = int(event.logMonoTime)
+    msg_type = event.which()
+
+    if msg_type == "carState":
+        state = event.carState
+        payload = (
+            state.vEgo,
+            state.aEgo,
+            state.steeringAngleDeg,
+            state.steeringRateDeg,
+            state.steeringTorque,
+            state.steeringPressed,
+            state.standstill,
+        )
+    elif msg_type == "controlsState":
+        ctrl = event.controlsState
+        lat_state = ctrl.lateralControlState
+        lat_type = lat_state.which()
+        actual_lat_accel = float("nan")
+        desired_lat_accel = float("nan")
+        torque_output = float("nan")
+        saturated = False
+        if lat_type == "torqueState":
+            torque_state = lat_state.torqueState
+            actual_lat_accel = torque_state.actualLateralAccel
+            desired_lat_accel = torque_state.desiredLateralAccel
+            torque_output = -torque_state.output
+            saturated = torque_state.saturated
+        elif lat_type == "pidState":
+            pid_state = lat_state.pidState
+            torque_output = pid_state.output
+            saturated = pid_state.saturated
+        payload = (
+            lat_type,
+            actual_lat_accel,
+            desired_lat_accel,
+            torque_output,
+            saturated,
+            ctrl.desiredCurvature,
+            ctrl.curvature,
+            getattr(ctrl, "active", getattr(ctrl, "activeDEPRECATED", False)),
+        )
+    elif msg_type == "selfdriveState":
+        payload = event.selfdriveState.active
+    elif msg_type == "liveParameters":
+        payload = event.liveParameters.roll
+    elif msg_type == "modelV2":
+        model = event.modelV2
+        lane_change_state = 0
+        try:
+            lane_change_state = int(model.meta.laneChangeState)
+        except (AttributeError, ValueError, TypeError):
+            pass
+        model_accels_y = None
+        model_accels_valid = None
+        try:
+            model_accels_y = np.asarray(
+                [float(value) for value in model.acceleration.y], dtype=np.float64,
+            )
+            model_accels_valid = bool(np.all(np.isfinite(model_accels_y[:len(T_IDXS)])))
+        except (AttributeError, TypeError):
+            pass
+        payload = (lane_change_state, model_accels_y, model_accels_valid)
+    elif msg_type == "carParams":
+        payload = float(getattr(event.carParams, "steerActuatorDelay", 0.1))
+    else:
+        return None
+
+    return timestamp_ns, sequence, msg_type, payload
+
+
+def _iter_reordered_snapshots(log_reader, window_ns, stats):
+    pending = []
+    max_seen_ns = None
+    sequence = 0
+    events = iter(log_reader.iter_events(skip_copy=True))
+    while True:
+        try:
+            event = next(events)
+        except StopIteration:
+            break
+        snapshot = _snapshot_event(event, sequence)
+        sequence += 1
+        del event
+        if snapshot is None:
+            continue
+
+        timestamp_ns = snapshot[0]
+        if max_seen_ns is not None:
+            lateness_ns = max_seen_ns - timestamp_ns
+            stats["max_lateness_seconds"] = max(
+                stats["max_lateness_seconds"],
+                max(0, lateness_ns) / NANOSECONDS_PER_SECOND,
+            )
+            if lateness_ns > window_ns:
+                raise _LateEventBeyondWindow(
+                    f"event at {timestamp_ns} arrived {lateness_ns / NANOSECONDS_PER_SECOND:.6f}s behind the reorder watermark"
+                )
+
+        max_seen_ns = timestamp_ns if max_seen_ns is None else max(max_seen_ns, timestamp_ns)
+        heapq.heappush(pending, (timestamp_ns, snapshot[1], snapshot))
+        watermark_ns = max_seen_ns - window_ns
+        while pending and pending[0][0] <= watermark_ns:
+            yield heapq.heappop(pending)[2]
+
+    while pending:
+        yield heapq.heappop(pending)[2]
+
+
+def _iter_exact_snapshots(log_reader):
+    """Use the legacy full, stable sort as the correctness fallback/oracle."""
+    events = list(enumerate(log_reader.iter_events(skip_copy=False)))
+    events.sort(key=lambda item: item[1].logMonoTime)
+    for sequence, event in events:
+        snapshot = _snapshot_event(event, sequence)
+        if snapshot is not None:
+            yield snapshot
+
+
+def _rows_from_snapshots(snapshots):
+    state = {}
+    steer_actuator_delay = 0.1
+    rows = []
+
+    for timestamp_ns, _sequence, msg_type, payload in snapshots:
+        if msg_type == "carState":
+            state["carState"] = payload
+        elif msg_type == "controlsState":
+            state["controlsState"] = payload
+        elif msg_type == "selfdriveState":
+            state["selfdriveState"] = payload
+        elif msg_type == "liveParameters":
+            state["liveParameters"] = payload
+        elif msg_type == "modelV2":
+            state["modelV2"] = payload
+        elif msg_type == "carParams":
+            steer_actuator_delay = payload
+
+        if msg_type != "controlsState" or "carState" not in state:
+            continue
+
+        car_state = state["carState"]
+        (
+            lat_type,
+            actual_lat_accel,
+            desired_lat_accel,
+            torque_output,
+            saturated,
+            desired_curvature,
+            curvature,
+            active_fallback,
+        ) = payload
+        active = state.get("selfdriveState", active_fallback)
+        roll = state.get("liveParameters", float("nan"))
+        model_state = state.get("modelV2")
+        lane_change_state = model_state[0] if model_state is not None else 0
+        model_accels_y = model_state[1] if model_state is not None else None
+        model_accels_valid = model_state[2] if model_state is not None else None
+
+        friction_input = calculate_friction_input(
+            v_ego=car_state[0],
+            desired_lat_accel=desired_lat_accel,
+            actual_lat_accel=actual_lat_accel,
+            desired_curvature=desired_curvature,
+            actual_curvature=curvature,
+            model_accels_y=model_accels_y,
+            steer_actuator_delay=steer_actuator_delay,
+            model_accels_valid=model_accels_valid,
+        )
+        rows.append([
+            timestamp_ns / NANOSECONDS_PER_SECOND,
+            *car_state,
+            desired_curvature,
+            curvature,
+            active,
+            lat_type,
+            actual_lat_accel,
+            desired_lat_accel,
+            torque_output,
+            saturated,
+            roll,
+            lane_change_state,
+            friction_input,
+        ])
+    return rows
+
+
+def extract_segment(rlog_path, row_callback=None, *, reorder_window_seconds=REORDER_WINDOW_SECONDS,
+                    stats_out=None):
+    """Extract one rlog with bounded reordering and exact-sort fallback.
+
+    Rows remain local to this segment until its ordering is accepted, so a
+    late-event fallback can never leak partial or duplicated rows to a writer.
     """
     from nnlc_tools.logreader import LogReader
 
-    rows = [] if row_callback is None else None
-    emit_row = rows.append if row_callback is None else row_callback
-    sm = {}
-    steer_actuator_delay = 0.1  # 默认值
-
-    lr = None
     try:
-        # Sort the complete current rlog before extracting state transitions.
-        # The caller still writes rows incrementally, so only one rlog is
-        # materialized at a time.
-        lr = LogReader(rlog_path, sort_by_time=True)
-    except Exception as e:
-        raise RuntimeError(f"Could not open {rlog_path}: {e}") from e
+        reorder_window_seconds = float(reorder_window_seconds)
+        if not math.isfinite(reorder_window_seconds) or reorder_window_seconds < 0:
+            raise ValueError("reorder_window_seconds must be finite and non-negative")
+        window_ns = int(round(reorder_window_seconds * NANOSECONDS_PER_SECOND))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("reorder_window_seconds must be finite and non-negative") from exc
+
+    stats = stats_out if stats_out is not None else {}
+    stats.setdefault("used_exact_fallback", False)
+    stats.setdefault("max_lateness_seconds", 0.0)
+    try:
+        lr = LogReader(rlog_path)
+    except Exception as exc:
+        raise RuntimeError(f"Could not open {rlog_path}: {exc}") from exc
 
     try:
-        for msg in lr:
-            msg_type = msg.which()
-
-            if msg_type == "carState":
-                sm["carState"] = msg.carState
-            elif msg_type == "controlsState":
-                sm["controlsState"] = msg.controlsState
-            elif msg_type == "selfdriveState":
-                sm["selfdriveState"] = msg.selfdriveState
-            elif msg_type == "liveParameters":
-                sm["liveParameters"] = msg.liveParameters
-            elif msg_type == "modelV2":
-                sm["modelV2"] = msg.modelV2
-            elif msg_type == "carParams":
-                sm["carParams"] = msg.carParams
-                # 提取 steerActuatorDelay
-                cp = msg.carParams
-                steer_actuator_delay = float(getattr(cp, 'steerActuatorDelay', 0.1))
-
-            # Emit a row on each controlsState when we have carState too
-            if msg_type == "controlsState" and "carState" in sm:
-                cs = sm["carState"]
-                ctrl = sm["controlsState"]
-
-                timestamp = msg.logMonoTime / 1e9
-
-                # Determine lateral control type and extract type-specific fields
-                lat_state = ctrl.lateralControlState
-                lat_type = lat_state.which()
-
-                actual_lat_accel = float("nan")
-                desired_lat_accel = float("nan")
-                torque_output = float("nan")
-                saturated = False
-
-                if lat_type == "torqueState":
-                    ts = lat_state.torqueState
-                    actual_lat_accel = ts.actualLateralAccel
-                    desired_lat_accel = ts.desiredLateralAccel
-                    # torqueState.output 记录的是 -output_torque（见 latcontrol_torque.py:157 pid_log.output = -output_torque）
-                    # nnlc 运行时 _ff 用的是未取反的内部 output_torque（与 desired_lateral_accel 同号）
-                    # 因此训练数据需取反，使模型学到与运行时 _ff 一致的符号
-                    torque_output = -ts.output
-                    saturated = ts.saturated
-                elif lat_type == "pidState":
-                    ps = lat_state.pidState
-                    torque_output = ps.output
-                    saturated = ps.saturated
-
-                # active moved from controlsState to selfdriveState in newer openpilot
-                if "selfdriveState" in sm:
-                    active = sm["selfdriveState"].active
-                else:
-                    active = getattr(ctrl, "active", getattr(ctrl, "activeDEPRECATED", False))
-
-                roll = sm["liveParameters"].roll if "liveParameters" in sm else float("nan")
-
-                lane_change_state = 0
-                model_accels_y = None
-                if "modelV2" in sm:
-                    try:
-                        lane_change_state = int(sm["modelV2"].meta.laneChangeState)
-                    except (AttributeError, ValueError, TypeError):
-                        pass
-                    try:
-                        model_accels_y = [float(v) for v in sm["modelV2"].acceleration.y]
-                    except (AttributeError, TypeError):
-                        pass
-
-                # 精确计算 friction_input（与 nnlc.py 运行时逻辑一致）
-                friction_input = calculate_friction_input(
-                    v_ego=cs.vEgo,
-                    desired_lat_accel=desired_lat_accel,
-                    actual_lat_accel=actual_lat_accel,
-                    desired_curvature=ctrl.desiredCurvature,
-                    actual_curvature=ctrl.curvature,
-                    model_accels_y=model_accels_y,
-                    steer_actuator_delay=steer_actuator_delay,
-                )
-
-                row = [
-                    timestamp,
-                    cs.vEgo,
-                    cs.aEgo,
-                    cs.steeringAngleDeg,
-                    cs.steeringRateDeg,
-                    cs.steeringTorque,
-                    cs.steeringPressed,
-                    cs.standstill,
-                    ctrl.desiredCurvature,
-                    ctrl.curvature,
-                    active,
-                    lat_type,
-                    actual_lat_accel,
-                    desired_lat_accel,
-                    torque_output,
-                    saturated,
-                    roll,
-                    lane_change_state,
-                    friction_input,
-                ]
-                emit_row(row)
-    except Exception as e:
-        raise RuntimeError(f"Error processing {rlog_path}: {e}") from e
+        try:
+            rows = _rows_from_snapshots(
+                _iter_reordered_snapshots(lr, window_ns, stats),
+            )
+        except _LateEventBeyondWindow:
+            stats["used_exact_fallback"] = True
+            rows = _rows_from_snapshots(_iter_exact_snapshots(lr))
+        if row_callback is not None:
+            for row in rows:
+                row_callback(row)
+            return []
+        return rows
+    except Exception as exc:
+        raise RuntimeError(f"Error processing {rlog_path}: {exc}") from exc
     finally:
-        if lr is not None:
-            lr.close()
-
-    return rows if rows is not None else []
+        lr.close()
 
 
 def _temporal_column_specs():
@@ -702,6 +837,8 @@ def _extract_one_rlog(slot, index, rlog_path, output_dir, segment_prefix, tempor
             "rows_written": int(response["rows_written"]),
             "rows_seen": int(response["rows_seen"]),
             "rows_filtered": int(response["rows_filtered"]),
+            "used_exact_fallback": bool(response.get("used_exact_fallback", False)),
+            "max_lateness_seconds": float(response.get("max_lateness_seconds", 0.0)),
         }
 
 
@@ -723,6 +860,8 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
     expected_header = _csv_header_bytes(output_columns)
     skipped_rlogs = []
     rows_written = rows_seen = rows_filtered = 0
+    exact_fallbacks = 0
+    max_lateness_seconds = 0.0
     output_dir = os.path.dirname(os.path.abspath(output_path))
     segment_prefix = f".nnlc_rlog_{os.getpid()}_{time.time_ns()}_"
     slots = [_RlogWorkerSlot(worker_factory) for _ in range(worker_count)]
@@ -807,6 +946,11 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
                         rows_written += result["rows_written"]
                         rows_seen += result["rows_seen"]
                         rows_filtered += result["rows_filtered"]
+                        exact_fallbacks += int(result.get("used_exact_fallback", False))
+                        max_lateness_seconds = max(
+                            max_lateness_seconds,
+                            result.get("max_lateness_seconds", 0.0),
+                        )
                         pending_segments.discard(result["segment_path"])
                         _discard_worker_output(result["segment_path"])
                     progress.update(1)
@@ -846,6 +990,8 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
         "rows_seen": rows_seen,
         "rows_filtered": rows_filtered,
         "skipped_rlogs": skipped_rlogs,
+        "exact_sort_fallbacks": exact_fallbacks,
+        "max_lateness_seconds": max_lateness_seconds,
     }
 
 
@@ -1022,6 +1168,11 @@ def main():
         print(f"Skipped {len(stats['skipped_rlogs'])} corrupt/unreadable rlog files")
         for path, reason in stats["skipped_rlogs"]:
             print(f"  - {path}: {reason}")
+    print(
+        "Reorder summary: "
+        f"{stats['exact_sort_fallbacks']} exact-sort fallbacks; "
+        f"max observed lateness {stats['max_lateness_seconds']:.6f}s"
+    )
     print(f"Saved to {args.output} ({fmt})")
 
 

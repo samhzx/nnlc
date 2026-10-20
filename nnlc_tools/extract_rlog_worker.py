@@ -86,6 +86,7 @@ def _process_request(request):
     rlog_path = os.fspath(request["rlog_path"])
     output_path = os.fspath(request["output_path"])
     writer = None
+    extraction_stats = {}
     try:
         writer = _StreamingCsvWriter(
             output_path,
@@ -93,13 +94,19 @@ def _process_request(request):
             filter_overrides=bool(request.get("filter_overrides", False)),
             route_id=request.get("route_id", "unknown"),
         )
-        extract_segment(rlog_path, row_callback=writer.accept)
+        extract_segment(
+            rlog_path,
+            row_callback=writer.accept,
+            stats_out=extraction_stats,
+        )
         writer.finish()
         result = {
             "status": "ok",
             "rows_written": writer.rows_written,
             "rows_seen": writer.rows_seen,
             "rows_filtered": writer.rows_filtered,
+            "used_exact_fallback": extraction_stats.get("used_exact_fallback", False),
+            "max_lateness_seconds": extraction_stats.get("max_lateness_seconds", 0.0),
         }
     except Exception as exc:
         result = {
