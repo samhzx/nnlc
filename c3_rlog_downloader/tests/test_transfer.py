@@ -225,7 +225,7 @@ def test_download_is_incremental_and_writes_manifest(tmp_path):
     assert first.downloaded_files == 1
     assert first.downloaded_bytes == len(b"compressed-log")
     assert local.read_bytes() == b"compressed-log"
-    assert json.loads((tmp_path / ".c3_rlog_manifest.json").read_text())
+    assert json.loads((tmp_path / EXPORT_FOLDER / ".c3_rlog_manifest.json").read_text())
 
     second = download_files(sftp, inventory, tmp_path, now=now, export_date=EXPORT_DATE)
     assert second.all_succeeded

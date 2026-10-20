@@ -444,7 +444,9 @@ def download_files(
     export_date = export_date or date.today()
     destination = Path(destination).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    manifest_path = destination / MANIFEST_NAME
+    day_dir = destination / date_folder(export_date)
+    day_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = day_dir / MANIFEST_NAME
     manifest = _load_manifest(manifest_path)
     manifest_files = manifest["files"]
     total_bytes = sum(item.size for item in inventory.rlog_files)
