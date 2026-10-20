@@ -1148,6 +1148,7 @@ class C3DownloaderApp:
             f"将清理 realdata 下约 {len(cleanup_preview.entries)} 个文件，"
             f"共 {_format_size(cleanup_preview.total_bytes)}。\n"
             "清理范围也包括本程序未下载的其他日志和摄像头文件。\n"
+            "文件删除后会一并删除已空的路线目录。\n"
             f"最近 5 分钟有变化的 {cleanup_preview.recent_count} 个文件会保留。\n\n"
             "此操作不可撤销，是否继续？",
             parent=self.root,
@@ -1189,9 +1190,12 @@ class C3DownloaderApp:
         elif kind == "cleanup_complete":
             result = payload
             self._finish("设备日志清理完成" if not result.failures else "清理部分完成")
+            dir_note = (
+                f"，目录 {result.deleted_dirs} 个" if result.deleted_dirs else ""
+            )
             self._append_log(
-                f"已删除 {result.deleted_files} 个文件（{_format_size(result.deleted_bytes)}），"
-                f"因变化跳过 {result.skipped_changed} 个。",
+                f"已删除 {result.deleted_files} 个文件（{_format_size(result.deleted_bytes)}）"
+                f"{dir_note}，因变化跳过 {result.skipped_changed} 个。",
                 "success",
             )
             for failure in result.failures:

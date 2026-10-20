@@ -122,6 +122,7 @@ class CleanupSummary:
     deleted_bytes: int
     skipped_changed: int
     failures: tuple[DownloadFailure, ...] = field(default_factory=tuple)
+    deleted_dirs: int = 0
 
 
 ProgressCallback = Callable[[TransferProgress], None] | None
@@ -626,6 +627,51 @@ def preview_cleanup(
     )
 
 
+def _directory_is_empty(sftp, path: str) -> bool:
+    try:
+        entries = sftp.listdir_attr(path)
+    except OSError:
+        return False
+    return not any(
+        getattr(entry, "filename", "") not in ("", ".", "..") for entry in entries
+    )
+
+
+def _remove_empty_ancestor_dirs(
+    sftp,
+    root: str,
+    relative_files: list[PurePosixPath],
+    cancel_event: threading.Event,
+) -> int:
+    """Remove empty route directories left behind after deleting files."""
+    root = posixpath.normpath(root)
+    candidates: set[str] = set()
+    for relative in relative_files:
+        parts = relative.parts[:-1]
+        for depth in range(len(parts), 0, -1):
+            candidates.add(posixpath.join(root, *parts[:depth]))
+    removed = 0
+    for path in sorted(candidates, key=lambda value: value.count("/"), reverse=True):
+        _check_cancel(cancel_event)
+        normalized = posixpath.normpath(path)
+        if normalized == root or not normalized.startswith(root.rstrip("/") + "/"):
+            continue
+        try:
+            current = sftp.lstat(path)
+            mode = int(getattr(current, "st_mode", 0) or 0)
+            if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                continue
+            if not _directory_is_empty(sftp, path):
+                continue
+            sftp.rmdir(path)
+            removed += 1
+        except TransferCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - leftover empty dirs must not fail the cleanup.
+            continue
+    return removed
+
+
 def cleanup_snapshot(
     sftp,
     preview: CleanupPreview,
@@ -641,6 +687,7 @@ def cleanup_snapshot(
     deleted_bytes = 0
     skipped_changed = 0
     failures: list[DownloadFailure] = []
+    deleted_relatives: list[PurePosixPath] = []
     total_bytes = preview.total_bytes
     total_files = len(preview.entries)
     rate = _ProgressRate()
@@ -663,6 +710,7 @@ def cleanup_snapshot(
             sftp.remove(remote_path)
             deleted_files += 1
             deleted_bytes += item.size
+            deleted_relatives.append(relative)
             speed, eta = rate.update(deleted_bytes, deleted_bytes, total_bytes)
             _emit_progress(
                 progress_callback,
@@ -683,8 +731,15 @@ def cleanup_snapshot(
             raise
         except Exception as exc:  # noqa: BLE001 - continue cleanup after individual SFTP failures.
             failures.append(DownloadFailure(relative.as_posix(), str(exc)))
+    deleted_dirs = _remove_empty_ancestor_dirs(
+        sftp, preview.root, deleted_relatives, cancel_event
+    )
     return CleanupSummary(
-        deleted_files, deleted_bytes, skipped_changed, tuple(failures)
+        deleted_files,
+        deleted_bytes,
+        skipped_changed,
+        tuple(failures),
+        deleted_dirs,
     )
 
 

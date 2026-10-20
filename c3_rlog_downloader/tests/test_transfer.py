@@ -146,6 +146,18 @@ class MemorySFTP:
         del self.nodes[path]
         self.removed.append(path)
 
+    def rmdir(self, path):
+        if path not in self.nodes:
+            raise FileNotFoundError(path)
+        mode, _data, _mtime = self.nodes[path]
+        if not stat.S_ISDIR(mode):
+            raise OSError("not a directory")
+        prefix = path.rstrip("/") + "/"
+        if any(child.startswith(prefix) for child in self.nodes):
+            raise OSError("directory not empty")
+        del self.nodes[path]
+        self.removed.append(path)
+
     def close(self):
         return None
 
@@ -323,9 +335,35 @@ def test_cleanup_preview_and_snapshot_skip_recent_changed_and_symlink_entries():
 
     assert result.deleted_files == 1
     assert result.skipped_changed == 1
+    assert result.deleted_dirs == 0
     assert sftp.nodes[route + "/recent.mp4"]
     assert sftp.nodes[route + "/link"]
     assert changed_path in sftp.nodes
+    assert route in sftp.nodes
+
+
+def test_cleanup_removes_empty_route_directories_after_deleting_files():
+    now = 2_000_000_000
+    sftp = MemorySFTP(now)
+    route = REMOTE_ROOT + "/0000007e--857bed606b--14"
+    nested = REMOTE_ROOT + "/2025-04-03--route/0"
+    keep = REMOTE_ROOT + "/0000007e--857bed606b--15"
+    sftp.add_file(route + "/rlog.zst", b"rlog", mtime=now - 400)
+    sftp.add_file(route + "/qlog.zst", b"qlog", mtime=now - 400)
+    sftp.add_file(route + "/qcamera.ts", b"cam", mtime=now - 400)
+    sftp.add_file(nested + "/rlog.zst", b"nested", mtime=now - 400)
+    sftp.add_file(keep + "/rlog.zst", b"keep", mtime=now - 10)
+    preview = preview_cleanup(sftp, now=now)
+    result = cleanup_snapshot(sftp, preview, now_fn=lambda: now)
+
+    assert result.deleted_files == 4
+    assert result.deleted_dirs == 3
+    assert route not in sftp.nodes
+    assert nested not in sftp.nodes
+    assert REMOTE_ROOT + "/2025-04-03--route" not in sftp.nodes
+    assert keep in sftp.nodes
+    assert keep + "/rlog.zst" in sftp.nodes
+    assert REMOTE_ROOT in sftp.nodes
 
 
 def test_cleanup_rejects_a_root_outside_fixed_realdata():
