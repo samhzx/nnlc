@@ -36,13 +36,21 @@ C_BADGE_FG = "#d5e4f4"
 C_PAGE_BG = "#f2f4f8"
 C_CARD_BG = "#ffffff"
 C_BORDER = "#e2e7ef"
-C_ACCENT = "#2f7de1"
-C_ACCENT_HOVER = "#2060b8"
-C_ACCENT_DISABLED = "#9db8d2"
+C_ACCENT = "#1890ff"
+C_ACCENT_HOVER = "#40a9ff"
+C_ACCENT_DISABLED = "#b3d8ff"
+C_DANGER = "#ff4d4f"
 C_TEXT = "#2b333d"
 C_MUTED = "#7d8590"
-C_BTN_BORDER = "#d6dce5"
-C_BTN_HOVER = "#f0f3f7"
+C_BTN_TEXT = "#606266"
+C_BTN_TEXT_HOVER = "#303133"
+C_BTN_BORDER = "#dcdfe6"
+C_BTN_BORDER_HOVER = "#c0c4cc"
+C_BTN_DISABLED_BG = "#f5f7fa"
+C_BTN_DISABLED_FG = "#c0c4cc"
+C_BTN_DISABLED_BORDER = "#e4e7ed"
+C_CONNECTING_BG = "#e4e7ed"
+C_CONNECTING_FG = "#909399"
 C_STATUS_BG = "#e8ecf3"
 C_DISABLED = "#f5f6f8"
 F_TITLE = ("Microsoft YaHei UI", 16, "bold")
@@ -224,13 +232,13 @@ class C3DownloaderApp:
         self.host_box = host_box
         self.host_entry = self._make_form_entry(host_box, self.host_var)
         host_box.pack(side="left", fill="x", expand=True)
-        connection_button_box = tk.Frame(
-            host_actions, bg=C_CARD_BG, height=INPUT_H
+        self.connection_button_box = tk.Frame(
+            host_actions, bg=C_ACCENT, height=INPUT_H
         )
-        connection_button_box.pack_propagate(False)
-        connection_button_box.pack(side="right", padx=(8, 0))
+        self.connection_button_box.pack_propagate(False)
+        self.connection_button_box.pack(side="right", padx=(8, 0))
         self.connection_button = tk.Button(
-            connection_button_box,
+            self.connection_button_box,
             text="连接设备",
             font=F_BASE,
             command=self.connect,
@@ -238,12 +246,15 @@ class C3DownloaderApp:
             fg="#ffffff",
             activebackground=C_ACCENT_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#ffffff",
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             padx=13,
             cursor="hand2",
         )
-        self.connection_button.pack(fill="both", expand=True)
-        connection_button_box.configure(width=self.connection_button.winfo_reqwidth())
+        self.connection_button.pack(fill="both", expand=True, padx=1, pady=1)
+        self._fit_connection_button_width()
         self.connection_button.bind("<Enter>", self._connection_button_enter)
         self.connection_button.bind("<Leave>", self._connection_button_leave)
         tk.Label(
@@ -340,16 +351,18 @@ class C3DownloaderApp:
         tk.Frame(log_inner, bg=C_BORDER, height=1).pack(
             side="bottom", fill="x", pady=(12, 0)
         )
-        open_box, self.open_destination_button = self._make_button(
+        self.open_destination_button_box, self.open_destination_button = self._make_button(
             actions, "打开下载目录", self._open_destination
         )
-        open_box.pack(side="left")
-        clear_box, self.clear_log_button = self._make_button(
+        self.open_destination_button_box.pack(side="left")
+        self.clear_log_button_box, self.clear_log_button = self._make_button(
             actions, "清空日志", self.clear_log
         )
-        clear_box.pack(side="left", padx=(8, 0))
-        cancel_box, self.cancel_button = self._make_button(actions, "取消", self.cancel)
-        cancel_box.pack(side="right", padx=(8, 0))
+        self.clear_log_button_box.pack(side="left", padx=(8, 0))
+        self.cancel_button_box, self.cancel_button = self._make_button(
+            actions, "取消", self.cancel
+        )
+        self.cancel_button_box.pack(side="right", padx=(8, 0))
         self.start_button = tk.Button(
             actions,
             text="开始下载",
@@ -359,7 +372,10 @@ class C3DownloaderApp:
             fg="#ffffff",
             activebackground=C_ACCENT_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#ffffff",
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             padx=28,
             pady=6,
             cursor="hand2",
@@ -541,22 +557,57 @@ class C3DownloaderApp:
             font=F_BASE,
             command=command,
             bg=C_CARD_BG,
-            fg=C_TEXT,
+            fg=C_BTN_TEXT,
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             padx=13,
             pady=4,
             cursor="hand2",
-            activebackground=C_BTN_HOVER,
+            activebackground=C_CARD_BG,
+            activeforeground=C_BTN_TEXT_HOVER,
+            disabledforeground=C_BTN_DISABLED_FG,
         )
         button.pack(padx=1, pady=1)
-        button.bind(
-            "<Enter>",
-            lambda _event: button.configure(
-                bg=C_BTN_HOVER if str(button["state"]) != "disabled" else C_CARD_BG
-            ),
-        )
-        button.bind("<Leave>", lambda _event: button.configure(bg=C_CARD_BG))
+        button.bind("<Enter>", lambda _event: self._on_secondary_button_enter(box, button))
+        button.bind("<Leave>", lambda _event: self._on_secondary_button_leave(box, button))
         return box, button
+
+    def _on_secondary_button_enter(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER_HOVER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT_HOVER)
+
+    def _on_secondary_button_leave(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT)
+
+    def _style_secondary_button(self, box, button, enabled: bool) -> None:
+        if enabled:
+            box.configure(bg=C_BTN_BORDER)
+            button.configure(
+                state="normal",
+                bg=C_CARD_BG,
+                fg=C_BTN_TEXT,
+                disabledforeground=C_BTN_TEXT,
+                activebackground=C_CARD_BG,
+                activeforeground=C_BTN_TEXT_HOVER,
+                cursor="hand2",
+            )
+        else:
+            box.configure(bg=C_BTN_DISABLED_BORDER)
+            button.configure(
+                state="disabled",
+                bg=C_BTN_DISABLED_BG,
+                fg=C_BTN_DISABLED_FG,
+                disabledforeground=C_BTN_DISABLED_FG,
+                activebackground=C_BTN_DISABLED_BG,
+                activeforeground=C_BTN_DISABLED_FG,
+                cursor="arrow",
+            )
 
     def _bind_primary_hover(self, button) -> None:
         button.bind(
@@ -575,6 +626,19 @@ class C3DownloaderApp:
                 else None
             ),
         )
+
+    def _disabled_cursor(self) -> str:
+        return "no" if sys.platform == "win32" else "arrow"
+
+    def _fit_connection_button_width(self) -> None:
+        current = self.connection_button.cget("text")
+        max_width = 0
+        for label in ("连接设备", "断开连接", "连接中..."):
+            self.connection_button.configure(text=label)
+            self.connection_button.update_idletasks()
+            max_width = max(max_width, self.connection_button.winfo_reqwidth())
+        self.connection_button.configure(text=current)
+        self.connection_button_box.configure(width=max_width + 2)
 
     def _form_row(self, parent, row: int, label: str, widget) -> None:
         tk.Label(parent, text=label, font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
@@ -646,38 +710,57 @@ class C3DownloaderApp:
             color = C_MUTED
         self.connection_status_label.configure(fg=color)
 
-    def _set_connection_button_style(self, connected: bool) -> None:
+    def _set_connection_button_style(self, connected: bool, connecting: bool = False) -> None:
+        if connecting:
+            self.connection_button_box.configure(bg=C_CONNECTING_BG)
+            self.connection_button.configure(
+                text="连接中...",
+                command=self.connect,
+                bg=C_CONNECTING_BG,
+                fg=C_CONNECTING_FG,
+                disabledforeground=C_CONNECTING_FG,
+                activebackground=C_CONNECTING_BG,
+                activeforeground=C_CONNECTING_FG,
+            )
+            return
         if connected:
+            self.connection_button_box.configure(bg=C_DANGER)
             self.connection_button.configure(
                 text="断开连接",
                 command=self.disconnect,
                 bg=C_CARD_BG,
-                fg="#9a4545",
-                activebackground="#fff5f5",
-                activeforeground="#9a4545",
-            )
-        else:
-            self.connection_button.configure(
-                text="连接设备",
-                command=self.connect,
-                bg=C_ACCENT,
-                fg="#ffffff",
-                activebackground=C_ACCENT_HOVER,
+                fg=C_DANGER,
+                disabledforeground=C_DANGER,
+                activebackground=C_DANGER,
                 activeforeground="#ffffff",
             )
+            return
+        self.connection_button_box.configure(bg=C_ACCENT)
+        self.connection_button.configure(
+            text="连接设备",
+            command=self.connect,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            disabledforeground="#ffffff",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+        )
 
     def _connection_button_enter(self, _event=None) -> None:
         if str(self.connection_button["state"]) == "disabled":
             return
-        self.connection_button.configure(
-            bg="#fff5f5" if self.connection_sftp is not None else C_ACCENT_HOVER
-        )
+        if self.connection_sftp is not None:
+            self.connection_button_box.configure(bg=C_DANGER)
+            self.connection_button.configure(bg=C_DANGER, fg="#ffffff")
+            return
+        self.connection_button_box.configure(bg=C_ACCENT_HOVER)
+        self.connection_button.configure(bg=C_ACCENT_HOVER)
 
     def _connection_button_leave(self, _event=None) -> None:
-        if self.connection_sftp is not None:
-            self.connection_button.configure(bg=C_CARD_BG)
-        elif str(self.connection_button["state"]) != "disabled":
-            self.connection_button.configure(bg=C_ACCENT)
+        self._set_connection_button_style(
+            connected=self.connection_sftp is not None,
+            connecting=self.busy and self.connection_sftp is None,
+        )
 
     def _refresh_controls(self) -> None:
         connected = self.connection_sftp is not None
@@ -686,7 +769,9 @@ class C3DownloaderApp:
         self.host_box.configure(bg=C_CARD_BG if input_enabled else C_DISABLED)
         self.key_picker.set_enabled(input_enabled)
         self.destination_picker.set_enabled(not self.busy)
-        self._set_connection_button_style(connected)
+        self._set_connection_button_style(
+            connected, connecting=self.busy and not connected
+        )
         self.connection_button.configure(
             state="disabled" if self.busy else "normal",
             cursor="arrow" if self.busy else "hand2",
@@ -695,16 +780,22 @@ class C3DownloaderApp:
         self.start_button.configure(
             state="normal" if can_start else "disabled",
             bg=C_ACCENT if can_start else C_ACCENT_DISABLED,
-            cursor="hand2" if can_start else "arrow",
+            fg="#ffffff",
+            disabledforeground="#ffffff",
+            activebackground=C_ACCENT_HOVER if can_start else C_ACCENT_DISABLED,
+            cursor="hand2" if can_start else self._disabled_cursor(),
         )
-        self.cancel_button.configure(
-            state="normal" if self.busy else "disabled",
-            cursor="hand2" if self.busy else "arrow",
+        self._style_secondary_button(
+            self.cancel_button_box, self.cancel_button, enabled=self.busy
         )
-        self.open_destination_button.configure(
-            state="disabled" if self.busy else "normal"
+        self._style_secondary_button(
+            self.open_destination_button_box,
+            self.open_destination_button,
+            enabled=not self.busy,
         )
-        self.clear_log_button.configure(state="disabled" if self.busy else "normal")
+        self._style_secondary_button(
+            self.clear_log_button_box, self.clear_log_button, enabled=not self.busy
+        )
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -948,7 +1039,9 @@ class C3DownloaderApp:
         if self.busy:
             self.cancel_event.set()
             self.status_var.set("正在取消，请稍候...")
-            self.cancel_button.configure(state="disabled", cursor="arrow")
+            self._style_secondary_button(
+                self.cancel_button_box, self.cancel_button, enabled=False
+            )
 
     def _ask_for_passphrase(self, stage: str, invalid: bool = False) -> None:
         if invalid:
