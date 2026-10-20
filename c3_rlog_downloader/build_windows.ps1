@@ -41,9 +41,14 @@ if (-not (Test-Path -LiteralPath $BundleExe -PathType Leaf)) {
     throw "Build output is missing: $BundleExe"
 }
 
+$InitFile = Join-Path $SourceDir "__init__.py"
+$ExpectedVersion = ((Get-Content -LiteralPath $InitFile -Raw) -replace '(?s).*?__version__\s*=\s*"([^"]+)".*', '$1').Trim()
+if ($ExpectedVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Could not read expected version from $InitFile"
+}
 $VersionOutput = (& $BundleExe --version 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne "1.2.0") {
-    throw "Standalone executable smoke test failed: $VersionOutput"
+if ($LASTEXITCODE -ne 0 -or $VersionOutput -ne $ExpectedVersion) {
+    throw "Standalone executable smoke test failed: $VersionOutput (expected $ExpectedVersion)"
 }
 
 $SizeMb = [math]::Round((Get-Item -LiteralPath $BundleExe).Length / 1MB, 1)
