@@ -362,7 +362,6 @@ class C3DownloaderApp:
         self.cancel_button_box, self.cancel_button = self._make_button(
             actions, "取消", self.cancel
         )
-        self.cancel_button_box.pack(side="right", padx=(8, 0))
         self.start_button = tk.Button(
             actions,
             text="开始下载",
@@ -381,6 +380,7 @@ class C3DownloaderApp:
             cursor="hand2",
         )
         self.start_button.pack(side="right")
+        self.cancel_button_box.pack(side="right", padx=(0, 8))
         self._bind_primary_hover(self.start_button)
 
         log_area = tk.Frame(log_inner, bg=C_CARD_BG)
