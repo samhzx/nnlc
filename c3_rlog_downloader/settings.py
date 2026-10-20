@@ -33,17 +33,35 @@ def load_settings(directory: Path | None = None) -> dict:
         "key_path": value.get("key_path", "")
         if isinstance(value.get("key_path", ""), str)
         else "",
+        "destination": value.get("destination", "")
+        if isinstance(value.get("destination", ""), str)
+        else "",
     }
 
 
-def save_settings(host: str, key_path: str, directory: Path | None = None) -> None:
+def default_destination() -> str:
+    return str(Path.home() / "Documents" / "C3_Rlogs")
+
+
+def save_settings(
+    host: str,
+    key_path: str,
+    destination: str = "",
+    directory: Path | None = None,
+) -> None:
     target_dir = directory or settings_directory()
+    existing = load_settings(target_dir)
+    destination_value = destination.strip() or existing.get("destination", "")
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "settings.json"
     temporary = target.with_name(target.name + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         json.dump(
-            {"host": host.strip(), "key_path": key_path.strip()},
+            {
+                "host": host.strip(),
+                "key_path": key_path.strip(),
+                "destination": destination_value,
+            },
             handle,
             ensure_ascii=False,
             indent=2,

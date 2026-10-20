@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from c3_rlog_downloader.settings import load_settings, save_settings
+from c3_rlog_downloader.settings import default_destination, load_settings, save_settings
 from c3_rlog_downloader.transfer import (
     PREFETCH_CONCURRENT_REQUESTS,
     REMOTE_ROOT,
@@ -524,14 +524,40 @@ def test_progress_rate_reports_smoothed_speed_and_eta(monkeypatch):
     assert eta == pytest.approx(1.0)
 
 
-def test_settings_store_only_ip_and_key_path(tmp_path):
-    save_settings("192.0.2.5", "/keys/c3", tmp_path)
+def test_settings_store_ip_key_path_and_destination(tmp_path):
+    save_settings("192.0.2.5", "/keys/c3", str(tmp_path / "C3_Rlogs"), tmp_path)
     settings = load_settings(tmp_path)
     raw = (tmp_path / "settings.json").read_text(encoding="utf-8")
 
-    assert settings == {"host": "192.0.2.5", "key_path": "/keys/c3"}
+    assert settings == {
+        "host": "192.0.2.5",
+        "key_path": "/keys/c3",
+        "destination": str(tmp_path / "C3_Rlogs"),
+    }
     assert "passphrase" not in raw
     assert "private_key" not in raw
+
+
+def test_settings_keep_existing_destination_when_only_connection_is_saved(tmp_path):
+    keep = str(tmp_path / "keep")
+    save_settings("192.0.2.5", "/keys/c3", keep, tmp_path)
+    save_settings("192.0.2.8", "/keys/other", "", tmp_path)
+    settings = load_settings(tmp_path)
+
+    assert settings["host"] == "192.0.2.8"
+    assert settings["key_path"] == "/keys/other"
+    assert settings["destination"] == keep
+
+
+def test_missing_destination_falls_back_to_default(tmp_path):
+    (tmp_path / "settings.json").write_text(
+        '{"host": "192.0.2.5", "key_path": "/keys/c3"}\n',
+        encoding="utf-8",
+    )
+    settings = load_settings(tmp_path)
+
+    assert settings["destination"] == ""
+    assert default_destination().endswith("C3_Rlogs")
 
 
 def test_encrypted_key_errors_request_or_reject_a_passphrase(monkeypatch, tmp_path):

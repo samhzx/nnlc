@@ -13,7 +13,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from c3_rlog_downloader.settings import load_settings, save_settings, settings_directory
+from c3_rlog_downloader.settings import default_destination, load_settings, save_settings, settings_directory
 from c3_rlog_downloader.transfer import (
     CleanupPreview,
     HostKeyMismatch,
@@ -166,7 +166,7 @@ class C3DownloaderApp:
         self.host_var = tk.StringVar(value=settings.get("host", ""))
         self.key_var = tk.StringVar(value=settings.get("key_path", ""))
         self.destination_var = tk.StringVar(
-            value=str(Path.home() / "Documents" / "C3_Rlogs")
+            value=settings.get("destination") or default_destination()
         )
         self.connection_status_var = tk.StringVar(value="● 未连接")
         self.status_var = tk.StringVar(value="就绪")
@@ -667,6 +667,10 @@ class C3DownloaderApp:
         )
         if path:
             self.destination_var.set(path)
+            try:
+                self._persist_settings()
+            except OSError as exc:
+                messagebox.showerror("设置保存失败", str(exc), parent=self.root)
 
     def _open_destination(self) -> None:
         path = Path(self.destination_var.get().strip()).expanduser()
@@ -818,6 +822,19 @@ class C3DownloaderApp:
             return None
         return host, key_path
 
+    def _persist_settings(
+        self,
+        host: str | None = None,
+        key_path: str | None = None,
+        destination: str | None = None,
+    ) -> None:
+        save_settings(
+            self.host_var.get() if host is None else host,
+            self.key_var.get() if key_path is None else key_path,
+            self.destination_var.get() if destination is None else destination,
+            self.settings_dir,
+        )
+
     def connect(self) -> None:
         if self.busy or self.connection_sftp is not None:
             return
@@ -826,7 +843,7 @@ class C3DownloaderApp:
             return
         host, key_path = values
         try:
-            save_settings(host, str(key_path), self.settings_dir)
+            self._persist_settings(host=host, key_path=str(key_path))
         except OSError as exc:
             messagebox.showerror("设置保存失败", str(exc), parent=self.root)
             return
@@ -912,10 +929,10 @@ class C3DownloaderApp:
         destination = Path(destination_value).expanduser()
         try:
             destination.mkdir(parents=True, exist_ok=True)
-            save_settings(
-                self.connected_host,
-                self.connected_key_path or self.key_var.get().strip(),
-                self.settings_dir,
+            self._persist_settings(
+                host=self.connected_host,
+                key_path=self.connected_key_path or self.key_var.get().strip(),
+                destination=str(destination),
             )
         except OSError as exc:
             messagebox.showerror("目录不可用", str(exc), parent=self.root)
