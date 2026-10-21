@@ -75,13 +75,18 @@ C_BADGE_FG = "#d5e4f4"
 C_PAGE_BG = "#f2f4f8"
 C_CARD_BG = "#ffffff"
 C_BORDER = "#e2e7ef"
-C_ACCENT = "#2f7de1"
-C_ACCENT_HOVER = "#2060b8"
-C_ACCENT_DISABLED = "#9db8d2"
+C_ACCENT = "#1890ff"
+C_ACCENT_HOVER = "#40a9ff"
+C_ACCENT_DISABLED = "#b3d8ff"
 C_TEXT = "#2b333d"
 C_MUTED = "#7d8590"
-C_BTN_BORDER = "#d6dce5"
-C_BTN_HOVER = "#f0f3f7"
+C_BTN_TEXT = "#606266"
+C_BTN_TEXT_HOVER = "#303133"
+C_BTN_BORDER = "#dcdfe6"
+C_BTN_BORDER_HOVER = "#c0c4cc"
+C_BTN_DISABLED_BG = "#f5f7fa"
+C_BTN_DISABLED_FG = "#c0c4cc"
+C_BTN_DISABLED_BORDER = "#e4e7ed"
 C_STATUS_BG = "#e8ecf3"
 C_DISABLED = "#f5f6f8"
 F_TITLE = ("Microsoft YaHei UI", 16, "bold")
@@ -396,12 +401,18 @@ class NNLCApp:
         actions.pack(side="bottom", fill="x", pady=(10, 0))
         tk.Frame(inner, bg=C_BORDER, height=1).pack(side="bottom", fill="x", pady=(12, 0))
 
-        open_box, self.open_output_button = self._make_button(actions, "打开输出目录", self._open_output)
-        open_box.pack(side="left")
-        clear_box, self.clear_log_button = self._make_button(actions, "清空日志", self.clear_log)
-        clear_box.pack(side="left", padx=(8, 0))
-        save_box, self.save_log_button = self._make_button(actions, "保存日志", self.save_log)
-        save_box.pack(side="left", padx=(8, 0))
+        self.open_output_button_box, self.open_output_button = self._make_button(
+            actions, "打开输出目录", self._open_output
+        )
+        self.open_output_button_box.pack(side="left")
+        self.clear_log_button_box, self.clear_log_button = self._make_button(
+            actions, "清空日志", self.clear_log
+        )
+        self.clear_log_button_box.pack(side="left", padx=(8, 0))
+        self.save_log_button_box, self.save_log_button = self._make_button(
+            actions, "保存日志", self.save_log
+        )
+        self.save_log_button_box.pack(side="left", padx=(8, 0))
 
         tk.Label(
             actions,
@@ -419,14 +430,17 @@ class NNLCApp:
             fg="#ffffff",
             activebackground=C_ACCENT_HOVER,
             activeforeground="#ffffff",
+            disabledforeground="#ffffff",
             bd=0,
-            padx=32,
-            pady=7,
+            relief="flat",
+            highlightthickness=0,
+            padx=28,
+            pady=6,
             cursor="hand2",
             command=self.start,
         )
         self.start_button.pack(side="right")
-        self._bind_hover_primary(self.start_button)
+        self._bind_primary_hover(self.start_button)
 
         log_area = tk.Frame(inner, bg=C_CARD_BG)
         log_area.pack(fill="both", expand=True)
@@ -546,29 +560,78 @@ class NNLCApp:
             font=F_BASE,
             command=command,
             bg=C_CARD_BG,
-            fg=C_TEXT,
+            fg=C_BTN_TEXT,
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             padx=13,
             pady=4,
             cursor="hand2",
-            activebackground=C_BTN_HOVER,
+            activebackground=C_CARD_BG,
+            activeforeground=C_BTN_TEXT_HOVER,
+            disabledforeground=C_BTN_DISABLED_FG,
         )
         btn.pack(padx=1, pady=1)
-        btn.bind("<Enter>", lambda _e: btn.configure(bg=C_BTN_HOVER if str(btn["state"]) != "disabled" else C_CARD_BG))
-        btn.bind("<Leave>", lambda _e: btn.configure(bg=C_CARD_BG))
+        btn.bind("<Enter>", lambda _e: self._on_secondary_button_enter(box, btn))
+        btn.bind("<Leave>", lambda _e: self._on_secondary_button_leave(box, btn))
         return box, btn
 
-    def _bind_hover_primary(self, btn) -> None:
-        def on_enter(_event):
-            if str(btn["state"]) != "disabled":
-                btn.configure(bg=C_ACCENT_HOVER)
+    def _on_secondary_button_enter(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER_HOVER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT_HOVER)
 
-        def on_leave(_event):
-            if str(btn["state"]) != "disabled":
-                btn.configure(bg=C_ACCENT)
+    def _on_secondary_button_leave(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT)
 
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
+    def _style_secondary_button(self, box, button, enabled: bool) -> None:
+        if enabled:
+            box.configure(bg=C_BTN_BORDER)
+            button.configure(
+                state="normal",
+                bg=C_CARD_BG,
+                fg=C_BTN_TEXT,
+                disabledforeground=C_BTN_TEXT,
+                activebackground=C_CARD_BG,
+                activeforeground=C_BTN_TEXT_HOVER,
+                cursor="hand2",
+            )
+        else:
+            box.configure(bg=C_BTN_DISABLED_BORDER)
+            button.configure(
+                state="disabled",
+                bg=C_BTN_DISABLED_BG,
+                fg=C_BTN_DISABLED_FG,
+                disabledforeground=C_BTN_DISABLED_FG,
+                activebackground=C_BTN_DISABLED_BG,
+                activeforeground=C_BTN_DISABLED_FG,
+                cursor="arrow",
+            )
+
+    def _bind_primary_hover(self, button) -> None:
+        button.bind(
+            "<Enter>",
+            lambda _event: (
+                button.configure(bg=C_ACCENT_HOVER)
+                if str(button["state"]) != "disabled"
+                else None
+            ),
+        )
+        button.bind(
+            "<Leave>",
+            lambda _event: (
+                button.configure(bg=C_ACCENT)
+                if str(button["state"]) != "disabled"
+                else None
+            ),
+        )
+
+    def _disabled_cursor(self) -> str:
+        return "no" if sys.platform == "win32" else "arrow"
 
     def _toggle_threshold(self) -> None:
         auto = self.auto_threshold_var.get()
@@ -674,12 +737,24 @@ class NNLCApp:
             self.car_box.configure(bg=fill)
             self.car_entry.configure(bg=fill)
         self._toggle_threshold()
-        if busy:
-            self.start_button.configure(state="disabled", bg=C_ACCENT_DISABLED, cursor="arrow")
-        else:
-            self.start_button.configure(state="normal", bg=C_ACCENT, cursor="hand2")
-        self.open_output_button.configure(state=state)
-        self.clear_log_button.configure(state=state)
+        self.start_button.configure(
+            state="disabled" if busy else "normal",
+            bg=C_ACCENT_DISABLED if busy else C_ACCENT,
+            fg="#ffffff",
+            disabledforeground="#ffffff",
+            activebackground=C_ACCENT_DISABLED if busy else C_ACCENT_HOVER,
+            cursor=self._disabled_cursor() if busy else "hand2",
+        )
+        self._style_secondary_button(
+            self.open_output_button_box,
+            self.open_output_button,
+            enabled=not busy,
+        )
+        self._style_secondary_button(
+            self.clear_log_button_box,
+            self.clear_log_button,
+            enabled=not busy,
+        )
         if not busy:
             # Comboboxes are intentionally readonly; restoring every widget
             # to ``normal`` would let an invalid training mode be typed in.

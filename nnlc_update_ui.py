@@ -20,11 +20,13 @@ from nnlc_update import UpdateError, check_for_update, download_update, format_b
 C_HEADER_BG = "#16324f"
 C_PAGE_BG = "#f2f4f8"
 C_CARD_BG = "#ffffff"
-C_ACCENT = "#2f7de1"
-C_ACCENT_HOVER = "#2060b8"
+C_ACCENT = "#1890ff"
+C_ACCENT_HOVER = "#40a9ff"
 C_TEXT = "#2b333d"
-C_BTN_BORDER = "#d6dce5"
-C_BTN_HOVER = "#f0f3f7"
+C_BTN_TEXT = "#606266"
+C_BTN_TEXT_HOVER = "#303133"
+C_BTN_BORDER = "#dcdfe6"
+C_BTN_BORDER_HOVER = "#c0c4cc"
 F_SUB = ("Microsoft YaHei UI", 9)
 F_BASE = ("Microsoft YaHei UI", 10)
 F_BOLD = ("Microsoft YaHei UI", 10, "bold")
@@ -180,15 +182,30 @@ class GuiUpdateController:
             font=F_BASE,
             command=command,
             bg=C_CARD_BG,
-            fg=C_TEXT,
+            fg=C_BTN_TEXT,
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             cursor="hand2",
-            activebackground=C_BTN_HOVER,
+            activebackground=C_CARD_BG,
+            activeforeground=C_BTN_TEXT_HOVER,
         )
         btn.pack(fill="both", expand=True, padx=1, pady=1)
-        btn.bind("<Enter>", lambda _e: btn.configure(bg=C_BTN_HOVER))
-        btn.bind("<Leave>", lambda _e: btn.configure(bg=C_CARD_BG))
+        btn.bind("<Enter>", lambda _e: self._on_secondary_button_enter(box, btn))
+        btn.bind("<Leave>", lambda _e: self._on_secondary_button_leave(box, btn))
         return box
+
+    def _on_secondary_button_enter(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER_HOVER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT_HOVER)
+
+    def _on_secondary_button_leave(self, box, button) -> None:
+        if str(button["state"]) == "disabled":
+            return
+        box.configure(bg=C_BTN_BORDER)
+        button.configure(bg=C_CARD_BG, fg=C_BTN_TEXT)
 
     def _make_dialog_primary(self, parent, text, command=None):
         box = tk.Frame(parent, bg=C_ACCENT, width=112, height=34)
@@ -201,18 +218,22 @@ class GuiUpdateController:
             bg=C_ACCENT,
             fg="#ffffff",
             bd=0,
+            relief="flat",
+            highlightthickness=0,
             cursor="hand2",
             activebackground=C_ACCENT_HOVER,
             activeforeground="#ffffff",
         )
-        btn.pack(fill="both", expand=True)
+        btn.pack(fill="both", expand=True, padx=1, pady=1)
 
         def on_enter(_event):
             if str(btn["state"]) != "disabled":
+                box.configure(bg=C_ACCENT_HOVER)
                 btn.configure(bg=C_ACCENT_HOVER)
 
         def on_leave(_event):
             if str(btn["state"]) != "disabled":
+                box.configure(bg=C_ACCENT)
                 btn.configure(bg=C_ACCENT)
 
         btn.bind("<Enter>", on_enter)
