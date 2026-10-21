@@ -299,16 +299,82 @@ const stream_desired_edges = collect(-4.1:(8.2 / 121):4.1)
 stream_bin(value::Float64, edges::Vector{Float64}) =
   clamp(searchsortedlast(edges, value), 1, length(edges) - 1)
 
-function stream_cell(row, column::String)
-  try
-    return getproperty(row, Symbol(column))
-  catch
-    return missing
+# Access CSV fields by column index. Named lookup interns a Symbol and hashes
+# it for every field; 41 columns × two full-file passes × tens of millions of
+# rows all pay that cost. The plan is built once from the first data row.
+struct StreamColumnPlan
+  required::Vector{Int}
+  timestamp::Int
+  active::Int
+  standstill::Int
+  v_ego::Int
+  desired::Int
+  friction::Int
+  roll::Int
+  torque::Int
+  actual::Int
+  route_id::Int
+  temporal_features::Vector{Int}
+  temporal_is_desired::Vector{Bool}
+  actual_temporal::Vector{Int}
+end
+
+function stream_column_plan(row)::StreamColumnPlan
+  positions = Dict{String, Int}()
+  for (index, name) in enumerate(propertynames(row))
+    column = String(name)
+    haskey(positions, column) || (positions[column] = index)
+  end
+  locate(column::String) = get(positions, column, 0)
+  temporal_columns = stream_model_features[5:end]
+  StreamColumnPlan(
+    Int[locate(column) for column in stream_required_columns],
+    locate("timestamp"),
+    locate("active"),
+    locate("standstill"),
+    locate("v_ego"),
+    locate("desired_lateral_accel"),
+    locate("friction_input"),
+    locate("roll"),
+    locate("torque_output"),
+    locate("actual_lateral_accel"),
+    locate("route_id"),
+    Int[locate(column) for column in temporal_columns],
+    Bool[startswith(column, "desired_lateral_accel") for column in temporal_columns],
+    Int[locate(column) for column in stream_all_temporal_features
+       if startswith(column, "actual_lateral_accel")],
+  )
+end
+
+stream_cell_at(row, position::Int) = position > 0 ? row[position] : missing
+
+# CSV.Rows leaves every field as a delayed string by default, so each of the
+# 41 columns is materialized and parsed on every row. That path measured about
+# 2.2k rows/s and dominated streaming runtime. Declaring numeric columns as
+# Float64 raises the same scan to about 50k rows/s with identical values.
+# Text/bool columns stay untyped and still go through parse_bool_value/string.
+const stream_text_columns = Set([
+  "steering_pressed", "standstill", "active", "saturated",
+  "lateral_control_type", "route_id",
+])
+
+function stream_header_columns(infile::String)::Vector{Symbol}
+  open(infile, "r") do io
+    return [Symbol(strip(part)) for part in split(readline(io), ',')]
   end
 end
 
-function stream_number(row, column::String, ::Type{T}) where T <: AbstractFloat
-  value = stream_cell(row, column)
+function stream_column_types(infile::String)::Dict{Symbol, Type}
+  numeric = setdiff(Set(vcat(stream_required_columns, stream_model_features)), stream_text_columns)
+  types = Dict{Symbol, Type}()
+  for name in stream_header_columns(infile)
+    String(name) in numeric && (types[name] = Float64)
+  end
+  return types
+end
+
+function stream_number(row, position::Int, ::Type{T}) where T <: AbstractFloat
+  value = stream_cell_at(row, position)
   if value === missing || value === nothing
     return nothing
   end
@@ -320,8 +386,8 @@ function stream_number(row, column::String, ::Type{T}) where T <: AbstractFloat
   end
 end
 
-stream_float64(row, column::String) = stream_number(row, column, Float64)
-stream_timestamp(row) = stream_float64(row, "timestamp")
+stream_float64(row, position::Int) = stream_number(row, position, Float64)
+stream_timestamp(row, plan::StreamColumnPlan) = stream_float64(row, plan.timestamp)
 
 function validate_stream_columns(row)
   available_columns = Set(string.(propertynames(row)))
@@ -331,32 +397,36 @@ function validate_stream_columns(row)
   end
 end
 
-function stream_bool(row, column::String)
-  return parse_bool_value(stream_cell(row, column))
+function stream_bool(row, position::Int)
+  return parse_bool_value(stream_cell_at(row, position))
 end
 
-function stream_parse_row(row, feature_buffer::Union{Nothing, Vector{Float32}}=nothing)
+function stream_parse_row(row, plan::StreamColumnPlan,
+                          feature_buffer::Union{Nothing, Vector{Float32}}=nothing)
   # Match completecases(data) before range filtering, including temporal
   # columns that are intentionally incomplete at each segment boundary.
-  for column in stream_required_columns
-    value = stream_cell(row, column)
-    if value === missing || value === nothing || isempty(strip(string(value)))
+  # Numeric columns never stringify to empty, so only strings need the empty
+  # check. That avoids 41 allocations on every row.
+  for position in plan.required
+    value = stream_cell_at(row, position)
+    if value === missing || value === nothing ||
+       (value isa AbstractString && isempty(strip(value)))
       return nothing
     end
   end
-  if !stream_bool(row, "active") || stream_bool(row, "standstill")
+  if !stream_bool(row, plan.active) || stream_bool(row, plan.standstill)
     return nothing
   end
 
-  v_ego = stream_float64(row, "v_ego")
-  desired = stream_float64(row, "desired_lateral_accel")
-  friction = stream_float64(row, "friction_input")
-  roll = stream_float64(row, "roll")
-  torque = stream_float64(row, "torque_output")
+  v_ego = stream_float64(row, plan.v_ego)
+  desired = stream_float64(row, plan.desired)
+  friction = stream_float64(row, plan.friction)
+  roll = stream_float64(row, plan.roll)
+  torque = stream_float64(row, plan.torque)
   if any(value -> value === nothing, (v_ego, desired, friction, roll, torque))
     return nothing
   end
-  actual = stream_float64(row, "actual_lateral_accel")
+  actual = stream_float64(row, plan.actual)
   if actual === nothing || !(0.1 < v_ego < 45.0) || abs(torque) > 2.0 || abs(actual) >= 4.1 || abs(desired) >= 4.1 || abs(friction) >= 5.0 || abs(roll) >= 0.2
     return nothing
   end
@@ -369,13 +439,13 @@ function stream_parse_row(row, feature_buffer::Union{Nothing, Vector{Float32}}=n
     features[3] = Float32(friction)
     features[4] = Float32(roll)
   end
-  for (temporal_index, column) in enumerate(stream_model_features[5:end])
+  for (temporal_index, position) in enumerate(plan.temporal_features)
     feature_index = temporal_index + 4
-    value = stream_float64(row, column)
+    value = stream_float64(row, position)
     if value === nothing
       return nothing
     end
-    limit = startswith(column, "desired_lateral_accel") ? 4.1 : 0.2
+    limit = plan.temporal_is_desired[temporal_index] ? 4.1 : 0.2
     if abs(value) >= limit
       return nothing
     end
@@ -384,15 +454,13 @@ function stream_parse_row(row, feature_buffer::Union{Nothing, Vector{Float32}}=n
     end
   end
   # Validate actual temporal accelerations as load_data/filter_columns does.
-  for column in stream_all_temporal_features
-    if startswith(column, "actual_lateral_accel")
-      value = stream_float64(row, column)
-      if value === nothing || abs(value) >= 4.1
-        return nothing
-      end
+  for position in plan.actual_temporal
+    value = stream_float64(row, position)
+    if value === nothing || abs(value) >= 4.1
+      return nothing
     end
   end
-  route_value = stream_cell(row, "route_id")
+  route_value = stream_cell_at(row, plan.route_id)
   route_id = route_value === missing ? "unknown" : string(route_value)
   return (features=features, v_ego=v_ego, desired=desired,
           target=Float32(torque), route_id=route_id)
@@ -478,16 +546,19 @@ function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, Data
   previous_timestamp = nothing
   timestamps_monotonic = true
   columns_validated = false
-  for row in CSV.Rows(infile; reusebuffer=true)
+  column_types = stream_column_types(infile)
+  local plan::StreamColumnPlan
+  for row in CSV.Rows(infile; reusebuffer=true, types=column_types)
     if !columns_validated
       validate_stream_columns(row)
+      plan = stream_column_plan(row)
       columns_validated = true
     end
-    parsed = stream_parse_row(row)
+    parsed = stream_parse_row(row, plan)
     if parsed !== nothing
       valid_rows += 1
       route_counts[parsed.route_id] = get(route_counts, parsed.route_id, 0) + 1
-      timestamp = stream_timestamp(row)
+      timestamp = stream_timestamp(row, plan)
       if previous_timestamp !== nothing && timestamp !== nothing && timestamp < previous_timestamp
         timestamps_monotonic = false
       end
@@ -521,8 +592,8 @@ function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, Data
   usable_rows = valid_rows - split_gap
   train_limit = clamp(round(Int, 0.8 * usable_rows), 2, usable_rows - 2)
 
-  for row in CSV.Rows(infile; reusebuffer=true)
-    parsed = stream_parse_row(row, feature_buffer)
+  for row in CSV.Rows(infile; reusebuffer=true, types=column_types)
+    parsed = stream_parse_row(row, plan, feature_buffer)
     parsed === nothing && continue
     valid_index += 1
     is_test = route_isolated ? (parsed.route_id in test_routes) : (valid_index > train_limit + split_gap)
