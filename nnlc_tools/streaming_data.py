@@ -18,6 +18,12 @@ import pandas as pd
 DEFAULT_CHUNK_ROWS = 100_000
 
 
+def raise_if_cancelled(cancel_event) -> None:
+    """Abort a long-running streaming operation when the caller requests it."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("训练已取消")
+
+
 def require_distinct_paths(input_path: str, output_path: str) -> None:
     """Reject an in-place streaming write before it can truncate its input."""
     input_abs = os.path.abspath(input_path)

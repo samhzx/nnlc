@@ -16,7 +16,11 @@ import sys
 import pandas as pd
 
 from nnlc_tools.bool_utils import parse_bool_series
-from nnlc_tools.streaming_data import DEFAULT_CHUNK_ROWS, iter_csv_chunks
+from nnlc_tools.streaming_data import (
+    DEFAULT_CHUNK_ROWS,
+    iter_csv_chunks,
+    raise_if_cancelled,
+)
 
 CRITERIA = [
     ("high_override",    lambda df: df["steering_pressed"].mean() > 0.10,                          -15, ">10% steering override"),
@@ -100,31 +104,88 @@ def load_data_with_routes(input_path):
     sys.exit(1)
 
 
-def score_csv_stream(input_path, chunksize=DEFAULT_CHUNK_ROWS):
+def attach_route_ids(chunk, previous_timestamp=None, inferred_route=0):
+    """Return route IDs for one chunk, matching score/prune inference rules."""
+    if "route_id" in chunk.columns:
+        return chunk["route_id"].map(lambda value: "0" if pd.isna(value) else str(value)), previous_timestamp, inferred_route
+    if "timestamp" not in chunk.columns:
+        return pd.Series(["0"] * len(chunk), index=chunk.index), previous_timestamp, inferred_route
+    timestamps = pd.to_numeric(chunk["timestamp"], errors="coerce")
+    route_ids = []
+    for value in timestamps:
+        is_break = (
+            previous_timestamp is not None
+            and pd.notna(value)
+            and (value - previous_timestamp > 60 or value < previous_timestamp)
+        )
+        if is_break:
+            inferred_route += 1
+        route_ids.append(str(inferred_route))
+        if pd.notna(value):
+            previous_timestamp = value
+    return pd.Series(route_ids, index=chunk.index), previous_timestamp, inferred_route
+
+
+def keep_routes_from_scores(route_results, min_score):
+    """Return route IDs that should survive the requested score threshold."""
+    if min_score <= 0:
+        return None
+    return {
+        str(row["route_id"])
+        for row in route_results
+        if row["score"] >= min_score
+    }
+
+
+def recommend_min_score(route_results):
+    """Return the auto-train threshold derived from scored routes."""
+    total_routes = len(route_results)
+    if total_routes <= 0:
+        return 60
+    good_count = sum(1 for row in route_results if row["score"] >= 70)
+    good_ratio = min(max(good_count, 0), total_routes) / total_routes
+    if good_ratio >= 0.3:
+        return 70
+    if good_ratio >= 0.1:
+        return 60
+    return 40
+
+
+def format_score_report(route_results, min_score=0):
+    """Return the human-readable score table consumed by auto-train."""
+    if not route_results:
+        return ""
+    results_df = pd.DataFrame(route_results).sort_values("score", ascending=False)
+    displayed = results_df
+    if min_score > 0:
+        displayed = results_df[results_df["score"] >= min_score]
+    lines = [
+        f"\n{'Route ID':<45} {'Score':>5} {'Duration':>10} {'Rows':>8}  Issues",
+        "-" * 120,
+    ]
+    for _, row in displayed.iterrows():
+        route_str = str(row["route_id"])[:44]
+        lines.append(
+            f"{route_str:<45} {row['score']:>5} {row['duration_s']:>9.1f}s {row['rows']:>8}  {row['issues']}"
+        )
+    lines.append(f"\n{len(displayed)} routes scored")
+    good = int((results_df["score"] >= 70).sum())
+    lines.append(f"  {good} routes with score >= 70 (recommended for training)")
+    return "\n".join(lines)
+
+
+def score_csv_stream(input_path, chunksize=DEFAULT_CHUNK_ROWS, cancel_event=None):
     """Score a CSV while retaining only route-level counters."""
+    raise_if_cancelled(cancel_event)
     aggregates = {}
     previous_timestamp = None
     inferred_route = 0
     for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+        raise_if_cancelled(cancel_event)
         chunk = chunk.copy()
-        if "route_id" not in chunk.columns:
-            if "timestamp" in chunk.columns:
-                timestamps = pd.to_numeric(chunk["timestamp"], errors="coerce")
-                breaks = []
-                for value in timestamps:
-                    is_break = (
-                        previous_timestamp is not None
-                        and pd.notna(value)
-                        and (value - previous_timestamp > 60 or value < previous_timestamp)
-                    )
-                    if is_break:
-                        inferred_route += 1
-                    breaks.append(inferred_route)
-                    if pd.notna(value):
-                        previous_timestamp = value
-                chunk["route_id"] = breaks
-            else:
-                chunk["route_id"] = 0
+        route_ids, previous_timestamp, inferred_route = attach_route_ids(
+            chunk, previous_timestamp, inferred_route)
+        chunk["route_id"] = route_ids
 
         missing = sorted(REQUIRED_SCORE_COLUMNS.difference(chunk.columns))
         if missing:
@@ -202,16 +263,7 @@ def main():
         if not results:
             print("ERROR: Input contains no data rows")
             sys.exit(1)
-        results_df = pd.DataFrame(results).sort_values("score", ascending=False)
-        if args.min_score > 0:
-            results_df = results_df[results_df["score"] >= args.min_score]
-        print(f"\n{'Route ID':<45} {'Score':>5} {'Duration':>10} {'Rows':>8}  Issues")
-        print("-" * 120)
-        for _, row in results_df.iterrows():
-            route_str = str(row["route_id"])[:44]
-            print(f"{route_str:<45} {row['score']:>5} {row['duration_s']:>9.1f}s {row['rows']:>8}  {row['issues']}")
-        print(f"\n{len(results_df)} routes scored")
-        print(f"  {len(results_df[results_df['score'] >= 70])} routes with score >= 70 (recommended for training)")
+        print(format_score_report(results, min_score=args.min_score))
         return
 
     df, route_col = load_data_with_routes(args.input)
@@ -250,21 +302,7 @@ def main():
             "issues": ", ".join(flags) if flags else "",
         })
 
-    results_df = pd.DataFrame(results).sort_values("score", ascending=False)
-
-    if args.min_score > 0:
-        results_df = results_df[results_df["score"] >= args.min_score]
-
-    # Print results
-    print(f"\n{'Route ID':<45} {'Score':>5} {'Duration':>10} {'Rows':>8}  Issues")
-    print("-" * 120)
-    for _, row in results_df.iterrows():
-        route_str = str(row["route_id"])[:44]
-        print(f"{route_str:<45} {row['score']:>5} {row['duration_s']:>9.1f}s {row['rows']:>8}  {row['issues']}")
-
-    print(f"\n{len(results_df)} routes scored")
-    good = len(results_df[results_df["score"] >= 70])
-    print(f"  {good} routes with score >= 70 (recommended for training)")
+    print(format_score_report(results, min_score=args.min_score))
 
 
 if __name__ == "__main__":

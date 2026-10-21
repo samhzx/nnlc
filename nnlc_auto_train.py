@@ -16,12 +16,11 @@
 流程:
   1. 提取横向控制数据（含时序特征）
   2. 评估路线质量（自动推荐 min-score）
-  3. 修剪低质量路线
-  4. 移除干预帧
-  5. 可视化数据覆盖度
-  6. Julia 训练模型
-  7. 验证模型质量
-  8. 部署到 openpilot 项目
+  3. 修剪低质量路线并移除干预帧
+  4. 可视化数据覆盖度
+  5. Julia 训练模型
+  6. 验证模型质量
+  7. 部署到 openpilot 项目
 """
 
 import argparse
@@ -604,131 +603,91 @@ def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False,
 
 def step_score(input_csv, python_exe, streaming=False, cancel_event=None,
                process_holder=None):
-    """步骤2: 评估路线质量，返回自动推荐的 min_score。"""
-    command = [python_exe, "-m", "nnlc_tools.score_routes", input_csv]
-    if streaming:
-        command.append("--streaming")
-    result = run_command(
-        command,
-        "评估路线质量",
-        cancel_event=cancel_event,
-        process_holder=process_holder,
+    """步骤2: 评估路线质量，返回自动推荐的 min_score 和路线评分。"""
+    # The score pass is bounded for both GUI modes so its results can be
+    # reused by the combined prune/intervention pass. ``streaming`` remains
+    # in the signature for compatibility with existing callers.
+    from nnlc_tools.score_routes import (
+        format_score_report,
+        recommend_min_score,
+        score_csv_stream,
     )
-
-    # 解析评分结果，自动推荐 min_score
-    recommended_score = 60  # 默认值
-
-    # 从输出中提取评分分布
-    output = result.stdout
-    good_count = 0
-    acceptable_count = 0
-    poor_count = 0
-    total_routes = 0
-
-    for line in output.splitlines():
-        total_match = re.match(r"^\s*(\d+)\s+routes scored\b", line)
-        if total_match:
-            try:
-                total_routes = int(total_match.group(1))
-            except (TypeError, ValueError):
-                # The regex currently only captures digits, but keep parsing
-                # defensive so a future output change cannot abort training.
-                continue
-
-        good_match = re.match(r"^\s*(\d+)\s+routes with score >= 70\b", line)
-        if good_match:
-            try:
-                good_count = int(good_match.group(1))
-            except (TypeError, ValueError):
-                continue
-
-    if total_routes > 0:
-        good_ratio = min(max(good_count, 0), total_routes) / total_routes
-        if good_ratio >= 0.3:
-            # 30% 以上高质量，使用严格阈值
-            recommended_score = 70
-        elif good_ratio >= 0.1:
-            # 10%-30% 高质量，使用中等阈值
-            recommended_score = 60
-        else:
-            # 高质量路线不足 10%，放宽阈值
-            recommended_score = 40
-            print_warn("高质量路线不足 10%，建议补充采集更多激活行驶数据")
-    else:
-        print_warn("未能从评分输出中解析路线数量，将使用默认阈值 min-score=60")
-
+    _raise_if_cancelled(cancel_event)
+    print_info("评估路线质量")
+    route_results, error = score_csv_stream(input_csv, cancel_event=cancel_event)
+    if error:
+        raise RuntimeError(error)
+    if not route_results:
+        raise RuntimeError(f"评分失败，输入没有数据行: {input_csv}")
+    report = format_score_report(route_results)
+    if report:
+        for line in report.splitlines():
+            _emit(line)
+    recommended_score = recommend_min_score(route_results)
+    if recommended_score == 40:
+        print_warn("高质量路线不足 10%，建议补充采集更多激活行驶数据")
     print_info(f"自动推荐 min-score = {recommended_score}")
-    return recommended_score
+    return recommended_score, route_results
 
 
-def step_prune(input_csv, min_score, output_dir, python_exe, streaming=False,
-               cancel_event=None, process_holder=None):
-    """步骤3: 修剪低质量路线。"""
-    output_csv = os.path.join(output_dir, "routes_pruned.csv")
-    command = [python_exe, "-m", "nnlc_tools.prune_routes", input_csv,
-               "--min-score", str(min_score), "-o", output_csv]
-    if streaming:
-        command.append("--streaming")
-    run_command(
-        command,
-        f"修剪路线 (min-score={min_score})",
-        cancel_event=cancel_event,
-        process_holder=process_holder,
+def step_prepare_training(input_csv, min_score, output_dir, streaming=False,
+                          route_results=None, cancel_event=None,
+                          process_holder=None, keep_intermediates=True):
+    """步骤3: 修剪低质量路线并移除干预帧，直接写出最终训练 CSV。"""
+    from nnlc_tools.prune_routes import prepare_training_csv
+    from nnlc_tools.score_routes import keep_routes_from_scores
+
+    _raise_if_cancelled(cancel_event)
+    output_csv = os.path.join(output_dir, "interventions_pruned.csv")
+    keep_routes = keep_routes_from_scores(route_results or [], min_score)
+    print_info(f"修剪路线并移除干预帧 (min-score={min_score})")
+    stats = prepare_training_csv(
+        input_csv, output_csv, min_score=min_score,
+        keep_routes=keep_routes, route_results=route_results,
+        streaming=streaming, cancel_event=cancel_event)
+    if not os.path.exists(output_csv):
+        raise RuntimeError(f"准备训练数据失败，输出文件未生成: {output_csv}")
+
+    pruned_rows = (
+        stats["initial_rows"]
+        - stats["route_rows_dropped"]
+        - stats["saturated_dropped"]
+        - stats["lane_change_dropped"]
+    )
+    row_count = stats["output_rows"]
+    print_ok(f"修剪后 {pruned_rows:,} 行")
+    if stats["route_rows_dropped"]:
+        print_info(f"路线过滤删除 {stats['route_rows_dropped']:,} 行")
+    if stats["saturated_dropped"]:
+        print_info(f"饱和帧删除 {stats['saturated_dropped']:,} 行")
+    if stats["lane_change_dropped"]:
+        print_info(f"变道帧删除 {stats['lane_change_dropped']:,} 行")
+    print_ok(
+        f"最终训练数据 {row_count:,} 行"
+        f"（干预删除 {stats['intervention_dropped_rows']:,} 行，"
+        f"{stats['intervention_event_count']:,} 个事件）"
     )
 
-    if not os.path.exists(output_csv):
-        raise RuntimeError(f"修剪路线失败，输出文件未生成: {output_csv}")
-
-    row_count = count_data_rows(output_csv)
-    print_ok(f"修剪后 {row_count:,} 行")
-
-    if row_count <= 0:
+    if pruned_rows <= 0:
         raise RuntimeError(
             f"路线剪枝后没有剩余数据: {output_csv}。"
             "请降低路线阈值或检查 rlog 数据。"
         )
-
-    if row_count < 5000:
-        print_warn(f"修剪后数据量严重不足 ({row_count:,} 行)，考虑降低 min-score 或补充数据")
-    elif row_count < 20000:
-        print_warn(f"修剪后数据量偏少 ({row_count:,} 行)，模型可能过拟合")
-
-    return output_csv
-
-
-def step_interventions(input_csv, output_dir, python_exe, streaming=False,
-                       cancel_event=None, process_holder=None):
-    """步骤4: 移除干预帧。"""
-    output_csv = os.path.join(output_dir, "interventions_pruned.csv")
-    command = [python_exe, "-m", "nnlc_tools.analyze_interventions", input_csv,
-               "--prune-output", output_csv]
-    if streaming:
-        command.append("--streaming")
-    run_command(
-        command,
-        "分类并移除干预帧",
-        cancel_event=cancel_event,
-        process_holder=process_holder,
-    )
-
-    if not os.path.exists(output_csv):
-        raise RuntimeError(f"移除干预帧失败，输出文件未生成: {output_csv}")
-
-    row_count = count_data_rows(output_csv)
-    print_ok(f"最终训练数据 {row_count:,} 行")
-
     if row_count <= 0:
         raise RuntimeError(
             f"移除干预帧后没有剩余数据: {output_csv}。"
             "请检查有效驾驶数据或减少剪枝范围。"
         )
-
-    return output_csv
+    if row_count < 5000:
+        print_warn(f"修剪后数据量严重不足 ({row_count:,} 行)，考虑降低 min-score 或补充数据")
+    elif row_count < 20000:
+        print_warn(f"修剪后数据量偏少 ({row_count:,} 行)，模型可能过拟合")
+    return output_csv, stats
 
 
 def step_visualize(input_csv, output_dir, python_exe, streaming=False,
                    cancel_event=None, process_holder=None):
-    """步骤5: 可视化数据覆盖度。"""
+    """步骤4: 可视化数据覆盖度。"""
     output_png = os.path.join(output_dir, "coverage.png")
     command = [python_exe, "-m", "nnlc_tools.visualize_coverage", input_csv,
                "-o", output_png]
@@ -750,7 +709,7 @@ def step_visualize(input_csv, output_dir, python_exe, streaming=False,
 def step_train(input_csv, car_name, output_dir, cancel_event=None,
                process_holder=None, batch_size=16384, force_cpu=True,
                streaming=False):
-    """步骤6: Julia 训练模型。"""
+    """步骤5: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
         raise ValueError("batch_size 必须是正整数")
@@ -1208,7 +1167,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         skip_corrupt_rlogs: 是否跳过无法解析的损坏 rlog 并继续提取
         rlog_workers: rlog 并行解析 worker 数，正整数或 auto
         streaming_mode: 是否使用分块评分、剪枝、可视化和 Julia 流式训练
-        keep_intermediates: 是否保留完整中间 CSV 文件
+        keep_intermediates: 是否在成功后保留提取和最终训练 CSV 文件
 
     Returns:
         模型文件路径
@@ -1222,7 +1181,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # the Tk GUI.  Force a non-interactive backend so matplotlib never tries
     # to create a second Tk event loop on Windows.
     os.environ["MPLBACKEND"] = "Agg"
-    total_steps = 8 if not skip_visualize else 7
+    total_steps = 7 if not skip_visualize else 6
     python_exe = get_python_exe()
     _raise_if_cancelled(cancel_event)
     validate_score_threshold(min_score)
@@ -1264,7 +1223,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     # ---- 步骤 2: 评估路线质量 ----
     _raise_if_cancelled(cancel_event)
     print_step(2, total_steps, "评估路线质量")
-    recommended_score = step_score(
+    recommended_score, route_results = step_score(
         lateral_csv,
         python_exe,
         streaming=streaming_mode,
@@ -1277,26 +1236,21 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     else:
         print_info(f"使用指定阈值: min-score={min_score}")
 
-    # ---- 步骤 3: 修剪路线 ----
+    # ---- 步骤 3: 修剪路线并移除干预帧 ----
     _raise_if_cancelled(cancel_event)
-    print_step(3, total_steps, "修剪低质量路线")
-    pruned_csv = step_prune(lateral_csv, min_score, output_dir, python_exe,
-                             streaming=streaming_mode,
-                             cancel_event=cancel_event,
-                             process_holder=process_holder)
+    print_step(3, total_steps, "修剪路线并移除干预帧")
+    final_csv, _prepare_stats = step_prepare_training(
+        lateral_csv, min_score, output_dir,
+        streaming=streaming_mode, route_results=route_results,
+        cancel_event=cancel_event, process_holder=process_holder,
+        keep_intermediates=keep_intermediates,
+    )
+    pruned_csv = None
 
-    # ---- 步骤 4: 移除干预帧 ----
-    _raise_if_cancelled(cancel_event)
-    print_step(4, total_steps, "移除干预帧")
-    final_csv = step_interventions(pruned_csv, output_dir, python_exe,
-                                   streaming=streaming_mode,
-                                   cancel_event=cancel_event,
-                                   process_holder=process_holder)
-
-    # ---- 步骤 5: 可视化覆盖度 ----
+    # ---- 可视化覆盖度 ----
     if not skip_visualize:
         _raise_if_cancelled(cancel_event)
-        print_step(5, total_steps, "可视化数据覆盖度")
+        print_step(4, total_steps, "可视化数据覆盖度")
         step_visualize(
             final_csv,
             output_dir,
@@ -1306,9 +1260,9 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
             process_holder=process_holder,
         )
 
-    # ---- 步骤 6: 训练模型 ----
+    # ---- 训练模型 ----
     _raise_if_cancelled(cancel_event)
-    train_step = 6 if not skip_visualize else 5
+    train_step = 5 if not skip_visualize else 4
     print_step(train_step, total_steps, f"训练 {car_name} 模型")
     model_json, train_results_dir = step_train(
         final_csv,
@@ -1321,7 +1275,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         process_holder=process_holder,
     )
 
-    # ---- 步骤 7: 验证模型 ----
+    # ---- 步骤 6: 验证模型 ----
     _raise_if_cancelled(cancel_event)
     validate_step = train_step + 1
     print_step(validate_step, total_steps, "验证模型质量")
@@ -1333,7 +1287,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     if not quality_ok:
         raise RuntimeError("模型质量验证未通过，已停止部署；请调整参数或补充数据后重试。")
 
-    # ---- 步骤 8: 部署 ----
+    # ---- 步骤 7: 部署 ----
     _raise_if_cancelled(cancel_event)
     deploy_step = validate_step + 1
     print_step(deploy_step, total_steps, "部署模型")
@@ -1342,7 +1296,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     if streaming_mode and not keep_intermediates:
         training_copy = os.path.join(output_dir, "training_input", f"{car_name}.csv")
         cleanup_failures = []
-        for intermediate in {lateral_csv, pruned_csv, final_csv, training_copy}:
+        for intermediate in {lateral_csv, final_csv, training_copy}:
             try:
                 os.remove(intermediate)
             except FileNotFoundError:

@@ -18,10 +18,17 @@ import sys
 import pandas as pd
 
 from nnlc_tools.bool_utils import parse_bool_series
-from nnlc_tools.score_routes import score_route
+from nnlc_tools.analyze_interventions import prune_override_rows
+from nnlc_tools.score_routes import (
+    attach_route_ids,
+    keep_routes_from_scores,
+    score_csv_stream,
+    score_route,
+)
 from nnlc_tools.streaming_data import (
     DEFAULT_CHUNK_ROWS,
     iter_csv_chunks,
+    raise_if_cancelled,
     require_distinct_paths,
 )
 
@@ -48,7 +55,8 @@ def _infer_route_col(df):
     return None
 
 
-def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
+def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True,
+                 keep_routes=None):
     """Filter df by route score and frame-level flags.
 
     Returns (pruned_df, stats_dict).
@@ -66,13 +74,15 @@ def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
                 "--min-score requires a route_id or timestamp column; "
                 "cannot safely infer route boundaries"
             )
-        keep_routes = {
-            route_id
-            for route_id, group in df.groupby(route_col)
-            if score_route(group)[0] >= min_score
-        }
+        if keep_routes is None:
+            keep_routes = {
+                route_id
+                for route_id, group in df.groupby(route_col)
+                if score_route(group)[0] >= min_score
+            }
+        keep_keys = {str(route_id) for route_id in keep_routes}
         before = len(df)
-        df = df[df[route_col].isin(keep_routes)].copy()
+        df = df[df[route_col].map(str).isin(keep_keys)].copy()
         route_rows_dropped = before - len(df)
 
     # 2. Frame-level: drop saturated frames
@@ -103,20 +113,17 @@ def prune_routes(df, min_score=0, drop_saturated=True, drop_lane_change=True):
 
 def prune_csv_stream(input_path, output_path, min_score=0,
                      drop_saturated=True, drop_lane_change=True,
-                     chunksize=DEFAULT_CHUNK_ROWS):
+                     chunksize=DEFAULT_CHUNK_ROWS, keep_routes=None,
+                     route_results=None, cancel_event=None):
     """Prune a CSV incrementally and return the same statistics as prune_routes."""
     require_distinct_paths(input_path, output_path)
-    keep_routes = None
-    if min_score > 0:
-        from nnlc_tools.score_routes import score_csv_stream
-        route_results, error = score_csv_stream(input_path, chunksize=chunksize)
-        if error:
-            raise ValueError(error)
-        keep_routes = {
-            str(row["route_id"])
-            for row in route_results
-            if row["score"] >= min_score
-        }
+    if min_score > 0 and keep_routes is None:
+        if route_results is None:
+            route_results, error = score_csv_stream(
+                input_path, chunksize=chunksize, cancel_event=cancel_event)
+            if error:
+                raise ValueError(error)
+        keep_routes = keep_routes_from_scores(route_results, min_score)
 
     initial_rows = route_rows_dropped = saturated_dropped = lane_change_dropped = 0
     output_rows = 0
@@ -128,31 +135,22 @@ def prune_csv_stream(input_path, output_path, min_score=0,
         chunks = iter_csv_chunks(input_path, chunksize=chunksize)
         with open(output_path, "w", newline="", encoding="utf-8") as output:
             for chunk in chunks:
+                raise_if_cancelled(cancel_event)
                 initial_rows += len(chunk)
                 if min_score > 0:
+                    if "route_id" not in chunk.columns and "timestamp" not in chunk.columns:
+                        raise ValueError(
+                            "--min-score requires a route_id or timestamp column; "
+                            "cannot safely infer route boundaries"
+                        )
+                    route_ids, previous_timestamp, inferred_route = attach_route_ids(
+                        chunk, previous_timestamp, inferred_route)
+                    chunk = chunk.copy()
+                    route_key = route_ids
                     if "route_id" not in chunk.columns:
-                        if "timestamp" not in chunk.columns:
-                            raise ValueError(
-                                "--min-score requires a route_id or timestamp column; "
-                                "cannot safely infer route boundaries"
-                            )
-                        route_ids = []
-                        timestamps = pd.to_numeric(chunk["timestamp"], errors="coerce")
-                        for value in timestamps:
-                            is_break = (
-                                previous_timestamp is not None
-                                and pd.notna(value)
-                                and (value - previous_timestamp > 60 or value < previous_timestamp)
-                            )
-                            if is_break:
-                                inferred_route += 1
-                            route_ids.append(inferred_route)
-                            if pd.notna(value):
-                                previous_timestamp = value
-                        chunk = chunk.copy()
-                        chunk["route_id"] = route_ids
+                        chunk["route_id"] = route_key
                     before = len(chunk)
-                    chunk = chunk[chunk["route_id"].map(str).isin(keep_routes)]
+                    chunk = chunk[route_key.map(str).isin(keep_routes)]
                     route_rows_dropped += before - len(chunk)
                 if drop_saturated and "saturated" in chunk.columns:
                     before = len(chunk)
@@ -179,6 +177,205 @@ def prune_csv_stream(input_path, output_path, min_score=0,
         "saturated_dropped": saturated_dropped,
         "lane_change_dropped": lane_change_dropped,
         "output_rows": output_rows,
+    }
+
+
+def prepare_training_rows(df, min_score=0, drop_saturated=True, drop_lane_change=True,
+                          keep_routes=None, prune="both", gap_frames=5, cfg=None):
+    """Apply route pruning and override removal without writing intermediate CSVs."""
+    pruned, prune_stats = prune_routes(
+        df,
+        min_score=min_score,
+        drop_saturated=drop_saturated,
+        drop_lane_change=drop_lane_change,
+        keep_routes=keep_routes,
+    )
+    final_df, intervention_stats = prune_override_rows(
+        pruned, prune=prune, gap_frames=gap_frames, cfg=cfg)
+    stats = dict(prune_stats)
+    stats.update({
+        "intervention_active_rows": intervention_stats["active_rows"],
+        "intervention_dropped_rows": intervention_stats["dropped_rows"],
+        "intervention_event_count": intervention_stats["event_count"],
+        "output_rows": intervention_stats["output_rows"],
+    })
+    return final_df, stats
+
+
+def _score_loaded_dataframe(df, min_score):
+    route_col = _infer_route_col(df) if min_score > 0 else (
+        "route_id" if "route_id" in df.columns else None)
+    if min_score > 0 and route_col is None:
+        raise ValueError(
+            "--min-score requires a route_id or timestamp column; "
+            "cannot safely infer route boundaries"
+        )
+    route_results = []
+    if route_col is not None:
+        for route_id, group in df.groupby(route_col):
+            score, flags = score_route(group)
+            route_results.append({
+                "route_id": route_id,
+                "score": score,
+                "duration_s": round(len(group) * 0.01, 1),
+                "rows": len(group),
+                "issues": ", ".join(flags) if flags else "",
+            })
+    elif len(df):
+        score, flags = score_route(df)
+        route_results.append({
+            "route_id": 0,
+            "score": score,
+            "duration_s": round(len(df) * 0.01, 1),
+            "rows": len(df),
+            "issues": ", ".join(flags) if flags else "",
+        })
+    keep_routes = keep_routes_from_scores(route_results, min_score)
+    return route_results, keep_routes
+
+
+def _write_training_frame(df, output_path):
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    if output_path.endswith(".parquet"):
+        df.to_parquet(output_path, index=False)
+    else:
+        df.to_csv(output_path, index=False)
+
+
+def prepare_training_csv(input_path, output_path, min_score=0,
+                         drop_saturated=True, drop_lane_change=True,
+                         keep_routes=None, route_results=None,
+                         prune="both", gap_frames=5, cfg=None,
+                         streaming=False, chunksize=DEFAULT_CHUNK_ROWS,
+                         cancel_event=None):
+    """Reuse scores when available, then write the final training CSV."""
+    require_distinct_paths(input_path, output_path)
+    if streaming:
+        if not input_path.lower().endswith(".csv"):
+            raise ValueError("streaming only supports CSV input")
+        if route_results is None:
+            route_results, error = score_csv_stream(
+                input_path, chunksize=chunksize, cancel_event=cancel_event)
+            if error:
+                raise ValueError(error)
+        if keep_routes is None:
+            keep_routes = keep_routes_from_scores(route_results, min_score)
+        stats = _prepare_training_csv_stream(
+            input_path, output_path, min_score=min_score,
+            drop_saturated=drop_saturated, drop_lane_change=drop_lane_change,
+            keep_routes=keep_routes, prune=prune, gap_frames=gap_frames,
+            cfg=cfg, chunksize=chunksize, cancel_event=cancel_event)
+        stats["route_results"] = route_results
+        return stats
+
+    from nnlc_tools.data_io import load_data
+    raise_if_cancelled(cancel_event)
+    df = load_data(input_path)
+    if df is None:
+        raise ValueError(f"input not found: {input_path}")
+    raise_if_cancelled(cancel_event)
+    if route_results is None:
+        route_results, keep_routes = _score_loaded_dataframe(df, min_score)
+    elif keep_routes is None:
+        keep_routes = keep_routes_from_scores(route_results, min_score)
+    final_df, stats = prepare_training_rows(
+        df, min_score=min_score, drop_saturated=drop_saturated,
+        drop_lane_change=drop_lane_change, keep_routes=keep_routes,
+        prune=prune, gap_frames=gap_frames, cfg=cfg)
+    _write_training_frame(final_df, output_path)
+    raise_if_cancelled(cancel_event)
+    stats["route_results"] = route_results
+    return stats
+
+
+def _iter_pruned_training_chunks(input_path, min_score=0, drop_saturated=True,
+                                 drop_lane_change=True, keep_routes=None,
+                                 chunksize=DEFAULT_CHUNK_ROWS,
+                                 cancel_event=None):
+    """Yield pruned chunks for the combined second pass."""
+    previous_timestamp = None
+    inferred_route = 0
+    stats = {
+        "initial_rows": 0,
+        "route_rows_dropped": 0,
+        "saturated_dropped": 0,
+        "lane_change_dropped": 0,
+        "columns": None,
+    }
+    route_key_column = "_nnlc_route_key"
+    for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+        raise_if_cancelled(cancel_event)
+        stats["initial_rows"] += len(chunk)
+        route_ids, previous_timestamp, inferred_route = attach_route_ids(
+            chunk, previous_timestamp, inferred_route)
+        chunk = chunk.copy()
+        if route_key_column in chunk.columns:
+            raise ValueError(f"input CSV already contains reserved column: {route_key_column}")
+        chunk[route_key_column] = route_ids
+        if min_score > 0:
+            if keep_routes is None:
+                raise ValueError("keep_routes is required when min_score > 0")
+            before = len(chunk)
+            chunk = chunk[chunk[route_key_column].map(str).isin(keep_routes)]
+            stats["route_rows_dropped"] += before - len(chunk)
+        if drop_saturated and "saturated" in chunk.columns:
+            before = len(chunk)
+            chunk = chunk[~parse_bool_series(chunk["saturated"])]
+            stats["saturated_dropped"] += before - len(chunk)
+        if drop_lane_change and "lane_change_state" in chunk.columns:
+            before = len(chunk)
+            lcs = chunk["lane_change_state"]
+            chunk = chunk[lcs == "off"] if lcs.dtype == object else chunk[lcs == 0]
+            stats["lane_change_dropped"] += before - len(chunk)
+        if stats["columns"] is None:
+            stats["columns"] = list(chunk.columns)
+        if not chunk.empty:
+            yield chunk, stats
+    if stats["columns"] is None:
+        raise ValueError("input CSV is empty or missing")
+
+
+def _prepare_training_csv_stream(input_path, output_path, min_score=0,
+                                 drop_saturated=True, drop_lane_change=True,
+                                 keep_routes=None, prune="both", gap_frames=5,
+                                 cfg=None, chunksize=DEFAULT_CHUNK_ROWS,
+                                 cancel_event=None):
+    """Filter frames while streaming and drop override events without a temp CSV."""
+    from nnlc_tools.analyze_interventions import prune_csv_stream
+
+    prune_stats = None
+
+    def filtered_chunks():
+        nonlocal prune_stats
+        for chunk, stats in _iter_pruned_training_chunks(
+                input_path, min_score=min_score, drop_saturated=drop_saturated,
+                drop_lane_change=drop_lane_change, keep_routes=keep_routes,
+                chunksize=chunksize, cancel_event=cancel_event):
+            prune_stats = stats
+            yield chunk
+        if prune_stats is None:
+            # Empty input still needs to raise the same error as the pruner.
+            list(_iter_pruned_training_chunks(
+                input_path, min_score=min_score, drop_saturated=drop_saturated,
+                drop_lane_change=drop_lane_change, keep_routes=keep_routes,
+                chunksize=chunksize, cancel_event=cancel_event))
+
+    intervention_stats = prune_csv_stream(
+        input_path, output_path, prune=prune, gap_frames=gap_frames,
+        cfg=cfg, chunksize=chunksize, chunks=filtered_chunks(),
+        route_column="_nnlc_route_key", drop_columns={"_nnlc_route_key"},
+        cancel_event=cancel_event)
+    if prune_stats is None:
+        raise ValueError("input CSV is empty or missing")
+    return {
+        "initial_rows": prune_stats["initial_rows"],
+        "route_rows_dropped": prune_stats["route_rows_dropped"],
+        "saturated_dropped": prune_stats["saturated_dropped"],
+        "lane_change_dropped": prune_stats["lane_change_dropped"],
+        "intervention_active_rows": intervention_stats["active_rows"],
+        "intervention_dropped_rows": intervention_stats["dropped_rows"],
+        "intervention_event_count": intervention_stats["event_count"],
+        "output_rows": intervention_stats["output_rows"],
     }
 
 

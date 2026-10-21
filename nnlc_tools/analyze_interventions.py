@@ -21,6 +21,7 @@ from nnlc_tools.streaming_data import (
     DEFAULT_CHUNK_ROWS,
     iter_csv_chunks,
     open_csv_writer,
+    raise_if_cancelled,
     require_distinct_paths,
 )
 
@@ -393,6 +394,60 @@ def classify_events(
     return df
 
 
+def prune_override_rows(df, prune="both", gap_frames=DEFAULT_GAP_FRAMES, cfg=None):
+    """Drop inactive, standstill, and selected override rows from a DataFrame.
+
+    The default training path uses prune="both", which removes every override
+    event.  Classification is only computed when a single event class is kept.
+    """
+    if "steering_pressed" not in df.columns:
+        raise ValueError("missing fields: steering_pressed")
+    mask = pd.Series(True, index=df.index)
+    if "active" in df.columns:
+        mask &= parse_bool_series(df["active"])
+    if "standstill" in df.columns:
+        mask &= ~parse_bool_series(df["standstill"])
+    active_df = df.loc[mask].copy()
+    if active_df.empty:
+        return active_df.reset_index(drop=True), {
+            "active_rows": 0,
+            "dropped_rows": 0,
+            "event_count": 0,
+            "output_rows": 0,
+        }
+    active_df = active_df.reset_index(drop=True)
+    events = segment_events(active_df, gap_frames=gap_frames)
+    if not events:
+        return active_df, {
+            "active_rows": len(active_df),
+            "dropped_rows": 0,
+            "event_count": 0,
+            "output_rows": len(active_df),
+        }
+    if prune == "both":
+        drop = pd.Series(False, index=active_df.index)
+        for event in events:
+            drop.iloc[int(event["start_idx"]):int(event["end_idx"]) + 1] = True
+        pruned = active_df.loc[~drop].reset_index(drop=True)
+        dropped = int(drop.sum())
+        return pruned, {
+            "active_rows": len(pruned),
+            "dropped_rows": dropped,
+            "event_count": len(events),
+            "output_rows": len(pruned),
+        }
+    events_df = classify_events_cascade(active_df, events, cfg=cfg)
+    labelled = mark_rows(active_df, events_df)
+    pruned = labelled[labelled["_intervention"] != prune].drop(columns=["_intervention"])
+    dropped = len(labelled) - len(pruned)
+    return pruned.reset_index(drop=True), {
+        "active_rows": len(pruned),
+        "dropped_rows": dropped,
+        "event_count": len(events),
+        "output_rows": len(pruned),
+    }
+
+
 def mark_rows(active_df, events_df):
     """Add '_intervention' column to active_df: 'normal', 'genuine', or 'mechanical'.
 
@@ -408,12 +463,18 @@ def mark_rows(active_df, events_df):
 
 
 def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_GAP_FRAMES,
-                     cfg=None, chunksize=DEFAULT_CHUNK_ROWS, max_event_rows=100_000):
+                     cfg=None, chunksize=DEFAULT_CHUNK_ROWS, max_event_rows=100_000,
+                     chunks=None, route_column="route_id", drop_columns=None,
+                     cancel_event=None):
     """Classify and prune override events while streaming a CSV.
 
     The default ``prune=both`` path only retains the short gap look-ahead.
     Classification modes retain one current event and reject an abnormally
     long event instead of risking an unbounded memory allocation.
+    Pass ``chunks`` to reuse an already-open iterator instead of rereading
+    ``input_path``. ``route_column`` is an internal route key when the caller
+    needs to preserve the original route_id column. ``drop_columns`` are used
+    for event processing but omitted from the output.
     """
     if cfg is None and prune != "both":
         from nnlc_tools.steering_classifier.config import ClassifierConfig
@@ -421,6 +482,8 @@ def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_G
     require_distinct_paths(input_path, output_path)
     output_handle = None
     columns = None
+    output_columns = None
+    drop_columns = set(drop_columns or ())
     active_rows = dropped_rows = event_count = 0
     event_core = []
     event_row_count = 0
@@ -432,7 +495,10 @@ def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_G
 
     def flush_output():
         if output_buffer:
-            pd.DataFrame.from_records(output_buffer, columns=columns).to_csv(
+            frame = pd.DataFrame.from_records(output_buffer, columns=columns)
+            if drop_columns:
+                frame = frame.drop(columns=list(drop_columns), errors="ignore")
+            frame.to_csv(
                 output_handle, header=False, index=False, lineterminator="\n"
             )
             output_buffer.clear()
@@ -471,15 +537,18 @@ def prune_csv_stream(input_path, output_path, prune="both", gap_frames=DEFAULT_G
         event_row_count = 0
 
     try:
-        for chunk in iter_csv_chunks(input_path, chunksize=chunksize):
+        source = chunks if chunks is not None else iter_csv_chunks(input_path, chunksize=chunksize)
+        for chunk in source:
+            raise_if_cancelled(cancel_event)
             if columns is None:
                 columns = list(chunk.columns)
-                output_handle, _ = open_csv_writer(output_path, columns)
+                output_columns = [column for column in columns if column not in drop_columns]
+                output_handle, _ = open_csv_writer(output_path, output_columns)
             required = {"steering_pressed"}
             missing = sorted(required.difference(chunk.columns))
             if missing:
                 raise ValueError(f"missing fields: {', '.join(missing)}")
-            route_index = columns.index("route_id") if "route_id" in columns else None
+            route_index = columns.index(route_column) if route_column in columns else None
             active_index = columns.index("active") if "active" in columns else None
             standstill_index = columns.index("standstill") if "standstill" in columns else None
             pressed_index = columns.index("steering_pressed")

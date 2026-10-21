@@ -696,13 +696,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.0.8</span>
+            <span>NNLC 横向控制模型训练 v1.1.0</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.0.8</span>
+              <span class="gui-version">v1.1.0</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -742,7 +742,7 @@
               <span class="gui-hint">耗时 00:12</span>
               <span class="gui-button primary">开始训练 <span class="marker">6</span></span>
             </div>
-            <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/8] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">9</span></div>
+          <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/7] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">9</span></div>
             <div class="gui-status">训练中，请保持窗口打开...</div>
           </div>
         </div>
@@ -832,12 +832,11 @@
 
       <section id="pipeline">
         <h2>7. 程序内部的训练流程</h2>
-        <p>GUI 默认执行完整的 8 步流程，并始终生成覆盖度图和完整中间 CSV。GUI 不提供关闭这两个行为的选项。</p>
+        <p>GUI 默认执行完整的 7 步流程，并生成覆盖度图、提取 CSV 和最终训练 CSV。评分、路线剪枝和干预帧移除在一次合并扫描中完成，不再生成单独的 <code>routes_pruned.csv</code>。</p>
         <ol class="steps">
           <li><strong>提取横向控制数据</strong>递归读取 rlog，单个文件完整按时间排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
-          <li><strong>修剪低质量路线</strong>删除低于阈值的路线，生成 <code>routes_pruned.csv</code>。</li>
-          <li><strong>移除干预帧</strong>识别驾驶员修正与机械干扰，生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
+          <li><strong>修剪路线并移除干预帧</strong>删除低于阈值的路线、饱和帧、变道帧和干预事件，直接生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
           <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code> 和 <code>coverage_gaps.txt</code>。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
           <li><strong>Julia CPU 训练</strong>为当前车型准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出模型 JSON 和训练图。</li>
           <li><strong>验证模型质量</strong>校验 JSON 字段、18 维输入、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
@@ -850,7 +849,6 @@
         <h2>8. 输出目录和文件用途</h2>
         <pre><code>NNLC_Output\
 ├─ lateral_data.csv                    # rlog 提取后的完整数据
-├─ routes_pruned.csv                   # 路线阈值筛选后数据
 ├─ interventions_pruned.csv            # 移除干预后的最终训练数据
 ├─ coverage.png                        # 数据覆盖度图（始终生成）
 ├─ coverage_gaps.txt                   # 覆盖缺口补采建议，速度使用 km/h
@@ -868,10 +866,9 @@
       └─ 车型-b.png / 车型-b.pdf        # Julia 分析图</code></pre>
         <div class="callout"><strong>最终交付文件：</strong>通常使用输出目录根部的 <code>车型.json</code>。它是在质量验证通过后部署的副本，不要误用失败任务留下的中间文件。</div>
         <h3>GUI 始终保留中间 CSV</h3>
-        <p>GUI 会保留完整中间 CSV，方便检查每个步骤和排查失败原因。整个训练、质量验证和部署完成后，以下文件仍会保留：</p>
+        <p>GUI 会保留提取 CSV 和最终训练 CSV，方便检查数据和排查失败原因。整个训练、质量验证和部署完成后，以下文件仍会保留：</p>
         <ul>
           <li><code>lateral_data.csv</code></li>
-          <li><code>routes_pruned.csv</code></li>
           <li><code>interventions_pruned.csv</code></li>
           <li><code>training_input\车型.csv</code></li>
         </ul>
