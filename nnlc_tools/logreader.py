@@ -17,6 +17,14 @@ import zstandard as zstd
 CEREAL_DIR = os.path.join(os.path.dirname(__file__), "cereal")
 capnp_log = capnp.load(os.path.join(CEREAL_DIR, "log.capnp"), imports=[CEREAL_DIR])
 
+ZSTD_MAGIC = b"\x28\xB5\x2F\xFD"
+BZ2_MAGIC = b"BZ"
+COPY_CHUNK_BYTES = 1024 * 1024
+# pycapnp's file reader needs a real fileno(), so large payloads still spill
+# to an anonymous temporary file. Smaller compressed rlogs stay in memory.
+IN_MEMORY_MAX_COMPRESSED_BYTES = 32 * 1024 * 1024
+IN_MEMORY_MAX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
+
 
 def _runtime_directory():
     """Return the directory containing the executable or source project."""
@@ -40,6 +48,43 @@ def _temporary_file():
         return tempfile.TemporaryFile()
 
 
+def _is_truncated_capnp_stream(exc):
+    """Return True when pycapnp hit EOF or a truncated trailing message."""
+    if not isinstance(exc, capnp.KjException):
+        return False
+    message = str(exc)
+    return "EOF" in message or "Message ends prematurely" in message
+
+
+def _decode_compressed_stream(reader, prefer_memory):
+    """Decompress into memory when small enough, otherwise a seekable temp file.
+
+    Returns ``(buffer, temp_file)``. Exactly one of the two is not None.
+    """
+    if not prefer_memory:
+        target = _temporary_file()
+        shutil.copyfileobj(reader, target, length=COPY_CHUNK_BYTES)
+        return None, target
+
+    chunks = []
+    total = 0
+    while True:
+        chunk = reader.read(COPY_CHUNK_BYTES)
+        if not chunk:
+            break
+        next_total = total + len(chunk)
+        if next_total > IN_MEMORY_MAX_UNCOMPRESSED_BYTES:
+            target = _temporary_file()
+            for previous in chunks:
+                target.write(previous)
+            target.write(chunk)
+            shutil.copyfileobj(reader, target, length=COPY_CHUNK_BYTES)
+            return None, target
+        chunks.append(chunk)
+        total = next_total
+    return b"".join(chunks), None
+
+
 class LogReader:
     """Read and iterate over messages in an rlog file.
 
@@ -53,6 +98,7 @@ class LogReader:
 
     def __init__(self, fn, sort_by_time=False, check_time_order=None):
         self._file = None
+        self._buffer = None
         self._temporary_file = False
         self._filename = fn
         if not isinstance(sort_by_time, bool):
@@ -69,31 +115,43 @@ class LogReader:
             magic = source.read(4)
             source.seek(0)
 
-            # Decompress directly into a temporary file.  pycapnp's
-            # read_multiple(file) consumes this file one message at a time,
-            # so the uncompressed payload stays on disk instead of becoming a
-            # second full-size Python bytes object.
-            if magic == b"\x28\xB5\x2F\xFD":  # zstd magic
-                target = _temporary_file()
-                with zstd.ZstdDecompressor().stream_reader(source) as reader:
-                    shutil.copyfileobj(reader, target, length=1024 * 1024)
+            if magic == ZSTD_MAGIC or magic[:2] == BZ2_MAGIC:
+                # Small compressed rlogs decompress in RAM and use
+                # read_multiple_bytes(). Larger ones still need a real
+                # fileno() for pycapnp's file reader.
+                prefer_memory = (
+                    os.path.getsize(fn) <= IN_MEMORY_MAX_COMPRESSED_BYTES
+                )
+                if magic == ZSTD_MAGIC:
+                    reader_cm = zstd.ZstdDecompressor().stream_reader(source)
+                else:
+                    reader_cm = bz2.BZ2File(source, "rb")
+                with reader_cm as reader:
+                    buffer, target = _decode_compressed_stream(
+                        reader, prefer_memory,
+                    )
                 source.close()
-                self._temporary_file = True
-            elif magic[:2] == b"BZ":
-                target = _temporary_file()
-                with bz2.BZ2File(source, "rb") as reader:
-                    shutil.copyfileobj(reader, target, length=1024 * 1024)
-                source.close()
+                source = None
+                if buffer is not None:
+                    if not buffer:
+                        raise ValueError(f"rlog file is empty: {fn}")
+                    self._buffer = buffer
+                    return
                 self._temporary_file = True
             else:
                 target = source
+                source = None
 
+            # pycapnp's read_multiple(file) consumes this file one message
+            # at a time, so the uncompressed payload stays on disk instead
+            # of becoming a second full-size Python bytes object.
             target.flush()
             size = target.seek(0, os.SEEK_END)
             if size == 0:
                 raise ValueError(f"rlog file is empty: {fn}")
             target.seek(0)
             self._file = target
+            target = None
         except Exception:
             # Decompression or stream setup may fail before ``source`` is
             # transferred to ``self._file``.  Close both handles explicitly;
@@ -113,23 +171,40 @@ class LogReader:
         When ``skip_copy`` is true, callers must copy every value they need
         before requesting the next event. This is intended for streaming
         consumers that immediately convert selected fields to Python values.
+        In-memory compressed logs already borrow from a pinned buffer, so
+        ``skip_copy`` does not create extra copies there.
         """
         if not isinstance(skip_copy, bool):
             raise ValueError("skip_copy must be a boolean")
-        if self._file is None:
+        if self._buffer is None and self._file is None:
             return
 
-        # read_multiple requires a real file object and advances its cursor as
-        # each framed Cap'n Proto message is yielded.
-        self._file.seek(0)
+        if self._buffer is not None:
+            events = iter(capnp_log.Event.read_multiple_bytes(self._buffer))
+        else:
+            # read_multiple requires a real file object and advances its
+            # cursor as each framed Cap'n Proto message is yielded.
+            self._file.seek(0)
+            events = iter(
+                capnp_log.Event.read_multiple(self._file, skip_copy=skip_copy)
+            )
+
         yielded_events = False
-        events = iter(capnp_log.Event.read_multiple(self._file, skip_copy=skip_copy))
         previous_time = None
         while True:
             try:
                 event = next(events)
             except StopIteration:
                 break
+            except capnp.KjException as exc:
+                # Some real rlogs have a truncated Cap'n Proto trailer.
+                # The file reader treats that as EOF; the bytes reader
+                # raises "Message ends prematurely" after the last valid
+                # event. Swallow it only after at least one event so a
+                # corrupt empty payload still surfaces.
+                if yielded_events and _is_truncated_capnp_stream(exc):
+                    break
+                raise
             yielded_events = True
             if self._check_time_order:
                 current_time = event.logMonoTime
@@ -158,6 +233,7 @@ class LogReader:
 
     def close(self):
         """Release the source and any temporary decompression file."""
+        self._buffer = None
         if self._file is not None:
             try:
                 self._file.close()

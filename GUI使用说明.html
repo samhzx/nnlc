@@ -834,7 +834,7 @@
         <h2>7. 程序内部的训练流程</h2>
         <p>GUI 默认执行完整的 7 步流程，并生成覆盖度图、提取 CSV 和最终训练 CSV。评分、路线剪枝和干预帧移除在一次合并扫描中完成，不再生成单独的 <code>routes_pruned.csv</code>。</p>
         <ol class="steps">
-          <li><strong>提取横向控制数据</strong>递归读取 rlog，默认按 2 秒窗口重排事件；迟到事件超出窗口时该文件回退到全量稳定排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
+          <li><strong>提取横向控制数据</strong>递归读取 rlog，默认按 2 秒窗口重排事件；迟到事件超出窗口时该文件回退到全量稳定排序，生成带时序特征的 <code>lateral_data.csv</code>。较小的 zstd/bz2 日志在内存中解压，较大的仍写入临时文件。</li>
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
           <li><strong>修剪路线并移除干预帧</strong>删除低于阈值的路线、饱和帧、变道帧和干预事件，直接生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
           <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code> 和 <code>coverage_gaps.txt</code>。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
