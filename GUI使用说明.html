@@ -780,10 +780,10 @@
             <thead><tr><th>项目</th><th>CPU 标准模式</th><th>CPU 流式低内存模式</th></tr></thead>
             <tbody>
               <tr><td>适合场景</td><td>数据量较小、内存充足，优先追求处理速度。</td><td>超大数据、上亿行 CSV 或约 16 GB 内存电脑。</td></tr>
-              <tr><td>单个 rlog</td><td>逐个文件完整读取，并按 <code>logMonoTime</code> 稳定排序。</td><td>同样逐个文件完整读取并排序，不设置固定排序窗口。</td></tr>
-              <tr><td>后续 CSV 处理</td><td>部分步骤会完整载入数据。</td><td>评分、剪枝、覆盖度、验证抽样和 Julia 预处理采用分块或流式处理。</td></tr>
+              <tr><td>单个 rlog</td><td colspan="2">两种模式使用同一套提取器：默认 2 秒有界重排；若发现超出窗口的迟到事件，该 rlog 会丢弃候选结果并回退到全量稳定排序。</td></tr>
+              <tr><td>后续 CSV 处理</td><td>评分采用有界分块计数；路线剪枝和干预帧移除在内存中一次完成，覆盖度、验证抽样和 Julia 预处理仍完整载入数据。</td><td>评分、合并剪枝/干预、覆盖度、验证抽样和 Julia 预处理都采用分块或流式处理，不生成单独的 <code>routes_pruned.csv</code>。</td></tr>
               <tr><td>Julia batch size</td><td><code>16384</code></td><td><code>4096</code></td></tr>
-              <tr><td>速度</td><td>通常更快。</td><td>需要多遍顺序扫描，通常更慢。</td></tr>
+              <tr><td>速度</td><td>数据能放入内存时通常更快。</td><td>需要顺序扫描大型 CSV，通常更慢，但内存不会随总行数线性增加。</td></tr>
               <tr><td>训练规则</td><td colspan="2">两者都使用 CPU，并保持相同的 18 维输入、路线隔离、对称增强、损失规则及模型结构。模式不是“质量高低”选项。</td></tr>
             </tbody>
           </table>
@@ -834,7 +834,7 @@
         <h2>7. 程序内部的训练流程</h2>
         <p>GUI 默认执行完整的 7 步流程，并生成覆盖度图、提取 CSV 和最终训练 CSV。评分、路线剪枝和干预帧移除在一次合并扫描中完成，不再生成单独的 <code>routes_pruned.csv</code>。</p>
         <ol class="steps">
-          <li><strong>提取横向控制数据</strong>递归读取 rlog，单个文件完整按时间排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
+          <li><strong>提取横向控制数据</strong>递归读取 rlog，默认按 2 秒窗口重排事件；迟到事件超出窗口时该文件回退到全量稳定排序，生成带时序特征的 <code>lateral_data.csv</code>。</li>
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
           <li><strong>修剪路线并移除干预帧</strong>删除低于阈值的路线、饱和帧、变道帧和干预事件，直接生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
           <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code> 和 <code>coverage_gaps.txt</code>。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
@@ -893,11 +893,11 @@
         </div>
         <h3>覆盖度图重点看什么</h3>
         <ul>
-          <li>城市、郊区、高速车速区间是否都有足够样本。</li>
-          <li>左转与右转、正负横向加速度是否明显偏向一侧。</li>
-          <li>低速急弯、高速缓弯等边界区域是否为空。</li>
-          <li>接管比例是否过高，是否存在大量饱和或无效路线。</li>
-          <li>同目录的 <code>coverage_gaps.txt</code> 会把缺口翻译成补采建议：目标速度用 km/h，并写明当前样本、为什么要补、怎么补和路线例子。</li>
+          <li>覆盖度建议不是弹窗，而是写在同目录的 <code>coverage_gaps.txt</code>，训练日志的可视化步骤里也会打印。</li>
+          <li>热力图红色框表示该速度 × 横向加速度格子只有 1–49 个样本；完全空白的格子没有红框，常见于没跑过的高速区间。</li>
+          <li>这里的“高速”按车速分箱判断，不是地图道路类型。没跑过 90 km/h 以上路段时，高速建议会写 0 样本。</li>
+          <li>同时检查左右转向是否均衡，以及低速急弯、高速缓弯是否为空。</li>
+          <li><code>coverage_gaps.txt</code> 会把缺口翻译成补采建议：目标速度用 km/h，并写明当前样本、为什么要补、怎么补和路线例子。</li>
         </ul>
       </section>
 
@@ -938,7 +938,7 @@
         </details>
         <details>
           <summary>标准模式内存占用过高</summary>
-          <div><p>切换到“CPU 流式低内存模式”。流式模式对大型 CSV 分块处理，内存不会随总行数线性增加，但会增加顺序扫描次数和总耗时。输出磁盘需预留足够空间。</p></div>
+          <div><p>切换到“CPU 流式低内存模式”。流式模式对大型 CSV 分块处理，内存不会随总行数线性增加，但会增加顺序扫描次数和总耗时。评分、剪枝和干预处理已经合并为两遍扫描，不再单独写出 <code>routes_pruned.csv</code>。输出磁盘需预留足够空间。</p></div>
         </details>
         <details>
           <summary>模型质量验证未通过</summary>
