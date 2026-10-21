@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>C3 rlog 下载器详细使用说明</title>
+<style>
+    :root {
+      --ink: #17212b;
+      --muted: #5f6b76;
+      --line: #d8dee4;
+      --soft: #f5f7f8;
+      --paper: #ffffff;
+      --navy: #132b3a;
+      --teal: #087f8c;
+      --teal-soft: #e9f5f5;
+      --green: #18794e;
+      --green-soft: #eaf6ef;
+      --amber: #9a6700;
+      --amber-soft: #fff8df;
+      --red: #c33a2c;
+      --red-soft: #fff0ee;
+      --violet: #7656a8;
+      --shadow: 0 12px 30px rgba(20, 39, 51, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 20px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #eef1f3;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.75;
+      letter-spacing: 0;
+    }
+
+    a { color: var(--teal); }
+
+    code, pre {
+      font-family: Consolas, "SFMono-Regular", Menlo, monospace;
+      letter-spacing: 0;
+    }
+
+    code {
+      padding: 0.12em 0.35em;
+      border: 1px solid #d9e0e4;
+      border-radius: 4px;
+      color: #22313c;
+      background: #f4f6f7;
+      overflow-wrap: anywhere;
+    }
+
+    .masthead {
+      color: #fff;
+      background: var(--navy);
+      border-bottom: 5px solid var(--teal);
+    }
+
+    .masthead-inner {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 36px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: #8cd4d7;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.35; }
+
+    h1 {
+      margin: 0;
+      font-size: 46px;
+      font-weight: 750;
+    }
+
+    .lede {
+      max-width: 790px;
+      margin: 12px 0 0;
+      color: #d7e3e9;
+      font-size: 17px;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 22px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 3px 10px;
+      border: 1px solid #49616f;
+      border-radius: 4px;
+      color: #eaf2f5;
+      background: #203b4b;
+      font-size: 13px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 28px;
+      width: min(1180px, calc(100% - 40px));
+      margin: 28px auto 56px;
+      align-items: start;
+    }
+
+    .toc {
+      position: sticky;
+      top: 20px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--paper);
+      box-shadow: 0 6px 16px rgba(20, 39, 51, 0.06);
+    }
+
+    .toc-title {
+      margin: 0 0 9px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 6px 8px;
+      border-left: 3px solid transparent;
+      color: #34434e;
+      font-size: 14px;
+      text-decoration: none;
+    }
+
+    .toc a:hover,
+    .toc a:focus-visible {
+      border-left-color: var(--teal);
+      color: var(--teal);
+      background: var(--teal-soft);
+      outline: none;
+    }
+
+    main {
+      min-width: 0;
+      padding: 0 26px;
+      border: 1px solid var(--line);
+      background: var(--paper);
+      box-shadow: 0 6px 18px rgba(20, 39, 51, 0.05);
+    }
+
+    section {
+      margin: 0;
+      padding: 30px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    section:last-child { border-bottom: 0; }
+
+    h2 {
+      margin: 0 0 18px;
+      color: var(--navy);
+      font-size: 25px;
+    }
+
+    h3 {
+      margin: 24px 0 9px;
+      color: #294250;
+      font-size: 18px;
+    }
+
+    p { margin: 10px 0; }
+
+    ul, ol {
+      margin: 10px 0;
+      padding-left: 1.35em;
+    }
+
+    li + li { margin-top: 6px; }
+
+    .callout {
+      margin: 16px 0;
+      padding: 13px 15px;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+    }
+
+    .callout.warning {
+      border-left-color: var(--amber);
+      background: var(--amber-soft);
+    }
+
+    .callout.danger {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout.success {
+      border-left-color: var(--green);
+      background: var(--green-soft);
+    }
+
+    .callout strong { color: var(--navy); }
+
+    .steps {
+      display: grid;
+      gap: 12px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+      counter-reset: step;
+    }
+
+    .steps > li {
+      position: relative;
+      min-height: 48px;
+      margin: 0;
+      padding: 10px 12px 10px 58px;
+      border-bottom: 1px solid var(--line);
+      counter-increment: step;
+    }
+
+    .steps > li:last-child { border-bottom: 0; }
+
+    .steps > li::before {
+      content: counter(step);
+      position: absolute;
+      top: 9px;
+      left: 8px;
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--teal);
+      font-weight: 750;
+    }
+
+    .steps strong { display: block; }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 14px 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--paper);
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #fff;
+      background: #294553;
+      font-weight: 700;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:nth-child(even) { background: #f8fafb; }
+
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 4px;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge.yes { color: var(--green); background: var(--green-soft); }
+    .badge.no { color: #59636c; background: #edf0f2; }
+    .badge.default { color: #12626b; background: var(--teal-soft); }
+
+    .gui-window {
+      margin: 18px 0 12px;
+      overflow: hidden;
+      border: 1px solid #9aa6ad;
+      border-radius: 7px;
+      background: #f3f3f3;
+      box-shadow: var(--shadow);
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .gui-titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 38px;
+      padding: 0 12px;
+      color: #20262b;
+      background: #e8ecef;
+      border-bottom: 1px solid #bcc5ca;
+    }
+
+    .window-controls { color: #68747d; letter-spacing: 8px; }
+
+    .gui-body { padding: 18px; }
+
+    .gui-columns {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+    }
+
+    .gui-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 13px;
+      font-size: 21px;
+      font-weight: 750;
+    }
+
+    .gui-version {
+      color: #d7e6f5;
+      background: #16324f;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .gui-group {
+      position: relative;
+      margin: 0 0 12px;
+      padding: 17px 13px 11px;
+      border: 1px solid #aeb7bd;
+      background: #f7f7f7;
+    }
+
+    .gui-group-title {
+      position: absolute;
+      top: -10px;
+      left: 9px;
+      padding: 0 5px;
+      background: #f7f7f7;
+      font-weight: 700;
+    }
+
+    .gui-row {
+      display: grid;
+      grid-template-columns: 108px minmax(190px, 1fr) 210px;
+      gap: 10px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .gui-label { white-space: nowrap; }
+
+    .gui-param-row {
+      display: grid;
+      grid-template-columns: 72px minmax(100px, 1fr) 72px minmax(100px, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-height: 34px;
+    }
+
+    .gui-param-row + .gui-param-row { margin-top: 8px; }
+
+    .gui-param-row .gui-label { white-space: nowrap; }
+
+    .gui-input,
+    .gui-select {
+      min-height: 29px;
+      padding: 4px 8px;
+      overflow: hidden;
+      border: 1px solid #7f8d96;
+      color: #26343d;
+      background: #fff;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .gui-input.disabled { color: #8a9297; background: #e6e9eb; }
+
+    .gui-button {
+      display: inline-block;
+      min-height: 29px;
+      padding: 4px 11px;
+      border: 1px solid #8d989f;
+      border-radius: 3px;
+      color: #1d2930;
+      background: #f5f5f5;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .gui-button.primary {
+      color: #fff;
+      border-color: #096e78;
+      background: var(--teal);
+      font-weight: 700;
+    }
+
+    .gui-hint { color: #68747d; font-size: 12px; }
+
+    .gui-checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+      align-items: center;
+    }
+
+    .check::before {
+      content: "✓";
+      display: inline-grid;
+      width: 16px;
+      height: 16px;
+      margin-right: 5px;
+      place-items: center;
+      border: 1px solid #65757f;
+      color: #fff;
+      background: var(--teal);
+      font-size: 12px;
+      line-height: 1;
+    }
+
+    .gui-controls {
+      display: grid;
+      grid-template-columns: auto auto auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      margin: 13px 0;
+    }
+
+    .progress-track {
+      height: 7px;
+      overflow: hidden;
+      border: 1px solid #a4afb5;
+      background: #fff;
+    }
+
+    .progress-value { width: 44%; height: 100%; background: var(--teal); }
+
+    .gui-log {
+      min-height: 116px;
+      padding: 10px;
+      border: 1px solid #aeb7bd;
+      color: #27343c;
+      background: #fff;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .gui-log .info { color: #2563a6; }
+    .gui-log .step { color: #007c91; }
+    .gui-log .ok { color: #16803a; }
+
+    .gui-status {
+      margin-top: 10px;
+      padding: 5px 8px;
+      border: 1px solid #b2bbc0;
+      background: #e6e8e9;
+    }
+
+    .marker {
+      display: inline-grid;
+      width: 22px;
+      height: 22px;
+      margin-left: 5px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--red);
+      font-size: 12px;
+      font-weight: 750;
+      vertical-align: middle;
+    }
+
+    .legend-grid,
+    .preset-grid,
+    .check-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .mini-panel {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fafbfb;
+    }
+
+    .mini-panel h3 { margin: 0 0 7px; font-size: 16px; }
+    .mini-panel p { margin: 4px 0; font-size: 14px; }
+
+    .color-key {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 8px 0;
+    }
+
+    .swatch { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 auto; }
+
+    pre {
+      margin: 12px 0;
+      padding: 15px;
+      overflow: auto;
+      border: 1px solid #314b59;
+      border-radius: 6px;
+      color: #e6edf1;
+      background: #132b3a;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    details {
+      margin: 10px 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+    }
+
+    summary {
+      padding: 12px 14px;
+      color: #263b48;
+      background: #f7f9fa;
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    details > div { padding: 5px 14px 14px; }
+
+    .footer {
+      padding: 28px 20px 34px;
+      color: #cbd8de;
+      background: var(--navy);
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .footer p { margin: 3px 0; }
+
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; }
+      .toc nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .gui-row { grid-template-columns: 96px minmax(170px, 1fr); }
+      .gui-row > :last-child { grid-column: 2; }
+      .gui-columns { grid-template-columns: 1fr; }
+      .gui-param-row { grid-template-columns: 96px minmax(170px, 1fr); }
+      .gui-param-row > :nth-child(3) { grid-column: 1; }
+      .gui-param-row > :nth-child(4) { grid-column: 2; }
+      .gui-controls { grid-template-columns: auto 1fr; }
+    }
+
+    @media (max-width: 620px) {
+      body { font-size: 15px; }
+      .masthead-inner, .layout { width: min(100% - 24px, 1180px); }
+      .masthead-inner { padding: 30px 0 28px; }
+      h1 { font-size: 34px; }
+      main { padding: 0 16px; }
+      section { padding: 24px 0; }
+      h2 { font-size: 22px; }
+      .toc nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .legend-grid, .preset-grid, .check-grid { grid-template-columns: 1fr; }
+      .gui-body { padding: 12px; }
+      .gui-row { grid-template-columns: 1fr; gap: 4px; padding: 5px 0; }
+      .gui-row > :last-child { grid-column: auto; }
+      .gui-param-row { grid-template-columns: 1fr; gap: 4px; padding: 5px 0; }
+      .gui-param-row > :nth-child(3),
+      .gui-param-row > :nth-child(4) { grid-column: auto; }
+      .gui-controls { grid-template-columns: 1fr 1fr; }
+      .progress-track { grid-column: 1 / -1; }
+      th, td { min-width: 130px; }
+    }
+
+    @media print {
+      body { background: #fff; font-size: 11pt; }
+      .masthead { color: #000; background: #fff; border-bottom: 2px solid #000; }
+      .masthead-inner { width: 100%; padding: 18px 0; }
+      .lede, .eyebrow { color: #333; }
+      .meta-row, .toc { display: none; }
+      .layout { display: block; width: 100%; margin: 0; }
+      main { padding: 0; border: 0; box-shadow: none; }
+      section { break-inside: avoid; }
+      .gui-window { box-shadow: none; }
+      .footer { color: #333; background: #fff; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <p class="eyebrow">Windows 图形界面操作手册</p>
+      <h1>C3 rlog 下载器详细使用说明</h1>
+      <p class="lede">从准备 SSH 私钥、连接 comma 设备，到下载 <code>rlog.zst</code>、确认设备清理和上传训练模型。本说明与当前项目中的 <code>c3_rlog_downloader/gui.py</code> 行为保持一致。</p>
+      <div class="meta-row" aria-label="文档适用范围">
+        <span class="tag">适用：C3_Rlog_Downloader 独立 EXE</span>
+        <span class="tag">设备：comma 3 / 3X，SSH 22 端口</span>
+        <span class="tag">用户：comma</span>
+        <span class="tag">程序版本：v1.2.0</span>
+        <span class="tag">更新日期：2026-10-21</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="toc" aria-label="目录">
+      <p class="toc-title">文档目录</p>
+      <nav>
+        <a href="#start">1. 下载与启动</a>
+        <a href="#prepare">2. 使用前准备</a>
+        <a href="#overview">3. 界面总览</a>
+        <a href="#fields">4. 参数说明</a>
+        <a href="#connect">5. 连接设备</a>
+        <a href="#download">6. 开始下载</a>
+        <a href="#cleanup">7. 设备清理</a>
+        <a href="#upload">8. 上传模型</a>
+        <a href="#outputs">9. 本机文件</a>
+        <a href="#settings">10. 设置记忆</a>
+        <a href="#errors">11. 故障排查</a>
+        <a href="#checklist">12. 完成检查</a>
+      </nav>
+    </aside>
+
+    <main>
+      <section id="start">
+        <h2>1. 下载、解压与启动</h2>
+        <ol class="steps">
+          <li><strong>下载程序</strong>在 GitHub Actions 对应的成功构建中下载 <code>C3_Rlog_Downloader-windows-x64</code>。解开后得到 <code>C3_Rlog_Downloader.exe</code>。</li>
+          <li><strong>放到固定目录</strong>建议放到自己能记住的目录，例如 <code>D:\C3_Rlog_Downloader\</code>。不要放在会自动清理的临时目录。</li>
+          <li><strong>准备 SSH 私钥</strong>使用能登录设备的私钥文件。程序只读取你选择的本机路径，不会把私钥内容写入设置文件。</li>
+          <li><strong>启动 GUI</strong>双击 <code>C3_Rlog_Downloader.exe</code>。目标电脑无需另外安装 Python、Paramiko 或项目依赖。</li>
+        </ol>
+        <div class="callout"><strong>这是独立程序。</strong>下载器不依赖 NNLC 训练器、Julia 环境或 Python 源码目录。它可以单独使用，把 rlog 下载到本机后再交给训练器。</div>
+        <div class="callout warning"><strong>不要手工拼接运行目录。</strong>请使用 Actions 构建出的完整 EXE。源码构建时，在 Windows 上进入 <code>c3_rlog_downloader</code> 目录运行 <code>build_windows.ps1</code>，产物位于本目录 <code>dist\C3_Rlog_Downloader.exe</code>。</div>
+      </section>
+
+      <section id="prepare">
+        <h2>2. 使用前准备</h2>
+        <h3>设备网络</h3>
+        <p>电脑和 C3 必须能互相访问。常见方式是设备连上同一局域网，或电脑连到设备热点。程序固定连接 SSH 22 端口，用户名为 <code>comma</code>。</p>
+        <h3>SSH 私钥</h3>
+        <p>需要一份能登录该设备的私钥。加密私钥会在连接时弹出输入口令；口令只用于本次解锁，不会保存。公钥必须已经放到设备的授权列表中。</p>
+        <h3>本机磁盘</h3>
+        <p>下载目录要有足够空间。程序只下载名称完全为 <code>rlog.zst</code> 的文件，但仍可能达到数 GB 到数十 GB。下载过程会先写 <code>.part</code> 临时文件，成功后再替换成正式文件。</p>
+        <h3>设备端日志状态</h3>
+        <p>正在写入的日志不要立刻下载。最近 5 分钟修改过的文件会被跳过，避免拷贝到半截压缩流。下载前尽量让车辆熄火、设备停止写入，或等该路线完成后再导。</p>
+        <h3>推荐的目录结构</h3>
+        <pre><code>D:\C3_Rlog_Downloader\
+├─ C3_Rlog_Downloader.exe
+└─ C3_Rlogs\                      # 本机保存目录，可另外选择
+    └─ 20261021\                  # 按电脑开始导出时的日期归档
+        ├─ .c3_rlog_manifest.json  # 当天下载清单，用于断点续传
+        └─ 000000a0--68a50e9c1b--2\
+            └─ rlog.zst</code></pre>
+      </section>
+
+      <section id="overview">
+        <h2>3. GUI 界面总览</h2>
+        <p>窗口分成顶部标题、中部两列卡片、进度条、运行日志和底部状态栏。标题右侧显示版本号 <code>v1.2.0</code>。</p>
+        <div class="gui-window" aria-hidden="true">
+          <div class="gui-titlebar">
+            <span>C3 rlog 下载器 v1.2.0</span>
+            <span class="gui-dots"><i></i><i></i><i></i></span>
+          </div>
+          <div class="gui-header">
+            <div>
+              <strong>C3 rlog 下载器</strong>
+              <div class="gui-sub">通过 SSH 连接设备，按本机导出日期归档 rlog.zst</div>
+            </div>
+            <span class="gui-version">v1.2.0</span>
+          </div>
+          <div class="gui-body">
+            <div class="gui-grid">
+              <div class="gui-card">
+                <div class="gui-card-title">设备连接 <span class="gui-muted">● 未连接</span></div>
+                <div class="gui-row"><span>C3 IP 地址</span><span class="gui-field">192.168.0.10　　<span class="gui-select">连接设备</span></span></div>
+                <div class="gui-row"><span>SSH 私钥</span><span class="gui-field">C:\Users\you\.ssh\id_ed25519　···</span></div>
+              </div>
+              <div class="gui-card">
+                <div class="gui-card-title">上传下载</div>
+                <div class="gui-row"><span>下载目录</span><span class="gui-field">C:\Users\you\Documents\C3_Rlogs　···</span></div>
+                <div class="gui-row"><span>模型参数</span><span class="gui-field">BYD_TANG_DMI_24.json　　<span class="gui-select">上传</span></span></div>
+              </div>
+            </div>
+            <div class="gui-card" style="margin-top:12px;">
+              <div class="gui-card-title">下载进度</div>
+              <div class="gui-hint">0.0%　　总体 -- / --　　速度 --　　剩余 --:--</div>
+            </div>
+            <div class="gui-log"><span class="info">[10:20:31] 开始连接 192.168.0.10:22</span><br><span class="ok">[OK] 设备已连接，可以开始下载</span><br>运行日志会实时显示在这里……</div>
+            <div class="gui-actions">
+              <span class="gui-muted">就绪</span>
+              <span class="gui-select">开始下载</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="fields">
+        <h2>4. 每个参数怎样填写</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>编号与字段</th><th>作用与填写方法</th><th>默认行为</th><th>是否记忆</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><strong>1. C3 IP 地址</strong></td><td>填写设备当前 IP，不要加 <code>ssh://</code> 或端口。程序固定连接 22 端口。</td><td>空白，必须填写。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>2. 连接设备 / 断开连接</strong></td><td>IP 右侧按钮。未连接时显示“连接设备”；已连接后变成“断开连接”。连接中会显示“连接中...”。</td><td>首次为未连接。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>3. SSH 私钥</strong></td><td>选择本机私钥文件。可直接输入路径，或点击右侧 <code>···</code> 浏览。</td><td>空白，必须选择存在的文件。</td><td><span class="badge yes">只记路径</span></td></tr>
+              <tr><td><strong>4. 下载目录</strong></td><td>本机保存 rlog 的根目录。程序会在其中按当天日期再建一层目录。</td><td>优先使用 <code>%USERPROFILE%\Documents\C3_Rlogs</code>。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>5. 模型参数</strong></td><td>选择要覆盖上传到设备的训练结果 JSON。通常是训练器输出目录里的 <code>车型.json</code>。</td><td>空白，不上传也能下载。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>6. 上传</strong></td><td>把所选 JSON 覆盖上传到设备固定目录。必须先连接设备。</td><td>未连接时不可用。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>7. 开始下载</strong></td><td>扫描设备 <code>/data/media/0/realdata</code>，下载稳定的 <code>rlog.zst</code>。下载期间按钮变成“取消”。</td><td>必须先连接设备。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>8. 运行日志</strong></td><td>显示连接、扫描、跳过、失败、清理和上传结果。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="connect">
+        <h2>5. 连接设备</h2>
+        <ol class="steps">
+          <li>填写 C3 的 IP，选择 SSH 私钥，必要时再确认下载目录。</li>
+          <li>点击“连接设备”。状态点会变成“连接中...”。</li>
+          <li>如果私钥有口令，会弹出输入框。取消输入会中止本次连接，不会保存口令。</li>
+          <li>首次连接会自动接受并记录该 IP 的 SSH 主机指纹。</li>
+          <li>成功后状态点变为“已连接”，日志出现“设备已连接，可以开始下载”。</li>
+        </ol>
+        <div class="callout warning"><strong>主机指纹变化会被拒绝。</strong>同一 IP 如果再次出现不同的 SSH 主机密钥，程序会报主机密钥不匹配并拒绝连接，避免连到被替换的设备。确认是自己重装或更换设备后，需要清理本机保存的指纹记录再连。</div>
+        <div class="callout"><strong>应用只记住这些内容：</strong>IP、私钥路径、本地下载目录、训练结果 JSON 路径。不保存私钥内容、口令或下载进度以外的设备密码。</div>
+      </section>
+
+      <section id="download">
+        <h2>6. 开始下载与运行期间操作</h2>
+        <ol class="steps">
+          <li><strong>先连接</strong>未连接时不能下载或上传。</li>
+          <li><strong>点击开始下载</strong>程序扫描 <code>/data/media/0/realdata</code>，只处理普通文件，不跟随符号链接。</li>
+          <li><strong>只下载 rlog.zst</strong>文件名必须完全是 <code>rlog.zst</code>。摄像头视频、qlog 和其他日志都不会下载。</li>
+          <li><strong>跳过近 5 分钟改过的文件</strong>这些文件视为仍在写入。日志会显示跳过数量。</li>
+          <li><strong>按本机导出日期归档</strong>目录名是电脑开始导出时的 <code>YYYYMMDD</code>，不是路线目录日期，也不是远端文件修改日期。相对路径会保留，例如 <code>20261021/000000a0--68a50e9c1b--2/rlog.zst</code>。</li>
+          <li><strong>观察进度</strong>进度区显示百分比、已传/总量、文件数、速度、剩余时间和当前文件。</li>
+          <li><strong>需要停止时点取消</strong>按钮会变成“取消”。取消后不会清理设备文件。</li>
+        </ol>
+        <div class="callout"><strong>支持续传。</strong>当天目录下的 <code>.c3_rlog_manifest.json</code> 会记录已成功发布的文件。已存在且大小、修改时间和设备标识匹配的文件会跳过。未完成的文件以 <code>.part</code> 保存，下次可继续。</div>
+        <div class="callout warning"><strong>两台设备不要下到同一个子路径。</strong>如果清单发现目标位置已经属于另一台设备的同名日志，会拒绝覆盖，避免把不同车的 rlog 混在一起。</div>
+        <h3>下载结果怎么看</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>日志或状态</th><th>含义</th><th>下一步</th></tr></thead>
+            <tbody>
+              <tr><td>下载完成：N 个新增，M 个已存在</td><td>计划内的稳定 rlog 都已成功落到本机。</td><td>会继续询问是否清理设备。</td></tr>
+              <tr><td>下载有失败项，设备日志未清理</td><td>至少有一个 rlog 失败。程序不会清理设备。</td><td>根据失败路径重新下载，不要此时清理设备。</td></tr>
+              <tr><td>没有可下载的稳定 rlog</td><td>目录里没有完整的 <code>rlog.zst</code>，或文件都还太新。</td><td>等路线写完后再试，或确认设备 <code>realdata</code> 目录是否有数据。</td></tr>
+              <tr><td>远端文件在扫描后发生变化</td><td>扫描和下载之间文件又被改写。</td><td>重新扫描下载，不要使用半截文件训练。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="cleanup">
+        <h2>7. 设备清理</h2>
+        <p>只有全部稳定 rlog 都下载成功后，才会弹出清理确认。清理不是自动执行。</p>
+        <div class="callout danger"><strong>清理范围大于本次下载。</strong>确认后会删除 <code>realdata</code> 中其他未下载的旧文件，包括摄像头和其他日志；随后删除因此变空的路线目录。最近 5 分钟有变化的文件会保留。此操作不可撤销。</div>
+        <p>确认框会显示大约会删除的文件数量和总大小。选择“否”则只保留本机文件，设备日志不动。选择“是”后，状态栏显示“正在清理 C3 日志”。</p>
+        <ul>
+          <li>清理前会再次核对文件大小和修改时间；已经变化的文件会跳过。</li>
+          <li>不会跟随符号链接，也不会清理固定 <code>realdata</code> 目录以外的路径。</li>
+          <li>空目录删除失败只会记录，不会把已经成功的下载视为失败。</li>
+        </ul>
+      </section>
+
+      <section id="upload">
+        <h2>8. 上传训练模型</h2>
+        <p>下载器可以把 NNLC 训练得到的 JSON 覆盖上传到设备：</p>
+        <pre><code>/data/openpilot/sunnypilot/neural_network_data/neural_network_lateral_control</code></pre>
+        <ol class="steps">
+          <li>先连接设备。</li>
+          <li>在“模型参数”中选择训练器输出的 <code>车型.json</code>。</li>
+          <li>点击“上传”。成功后会弹窗显示远端完整路径。</li>
+        </ol>
+        <div class="callout warning"><strong>这是覆盖上传。</strong>同名文件会被直接替换。上传前确认 JSON 已经通过训练器质量验证，不要上传失败任务留下的中间文件。</div>
+      </section>
+
+      <section id="outputs">
+        <h2>9. 本机输出文件</h2>
+        <pre><code>下载目录\
+└─ YYYYMMDD\
+   ├─ .c3_rlog_manifest.json
+   ├─ 路线目录\
+   │  └─ rlog.zst
+   └─ 路线目录\rlog.zst.part          # 仅未完成时存在</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>文件</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td><code>rlog.zst</code></td><td>训练器实际读取的日志。把这一天的目录或更上层目录交给 NNLC 训练器即可。</td></tr>
+              <tr><td><code>.c3_rlog_manifest.json</code></td><td>当天成功发布的文件清单，含设备标识、大小和修改时间，用于跳过已下载文件。</td></tr>
+              <tr><td><code>rlog.zst.part</code></td><td>正在传输的临时文件。成功后会原子替换为 <code>rlog.zst</code>。</td></tr>
+              <tr><td><code>rlog.zst.part.json</code></td><td>临时文件的元数据，传输成功后删除。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout"><strong>日期目录按电脑当天日期创建。</strong>不要按路线名里的日期理解归档位置。同一天多次下载会写入同一个 <code>YYYYMMDD</code> 目录并更新清单。</div>
+      </section>
+
+      <section id="settings">
+        <h2>10. 上次设置保存在哪里</h2>
+        <p>在 Windows 中，GUI 把用户偏好写入：</p>
+        <pre><code>%APPDATA%\C3_Rlog_Downloader\settings.json</code></pre>
+        <p>保存内容只有：</p>
+        <ul>
+          <li>上次填写的 C3 IP</li>
+          <li>上次选择的 SSH 私钥路径</li>
+          <li>上次选择的本地下载目录</li>
+          <li>上次选择的模型 JSON 路径</li>
+        </ul>
+        <p>不保存私钥内容、口令、主机指纹以外的敏感信息和下载日志。配置损坏或无法读取时，程序回退到空白 IP 和默认下载目录 <code>文档\C3_Rlogs</code>。</p>
+        <div class="callout"><strong>恢复默认偏好：</strong>先退出程序，再删除 <code>%APPDATA%\C3_Rlog_Downloader\settings.json</code>。下次启动会重新创建。</div>
+      </section>
+
+      <section id="errors">
+        <h2>11. 常见问题与排查顺序</h2>
+        <details open>
+          <summary>提示无法连接或超时</summary>
+          <div><p>先确认电脑和设备在同一网络，IP 没有填错，设备 SSH 已开启。防火墙不要拦截 22 端口。可在命令行用同一私钥测试 <code>ssh comma@设备IP</code>。</p></div>
+        </details>
+        <details>
+          <summary>私钥口令错误或取消输入</summary>
+          <div><p>加密私钥必须输入正确口令。取消输入会中止连接，不会保存口令。如果反复失败，检查选中的是不是对应这台设备的那把钥匙。</p></div>
+        </details>
+        <details>
+          <summary>主机密钥不匹配</summary>
+          <div><p>同一 IP 的 SSH 指纹和本机记录不一致。可能是设备重装、更换，或网络中出现了另一台同 IP 设备。确认环境安全前不要继续。确认是自己的设备后，再清理本机记录的该 IP 指纹。</p></div>
+        </details>
+        <details>
+          <summary>无法访问 realdata 目录</summary>
+          <div><p>设备未完全启动、存储未挂载，或路径不存在。等设备进入可用状态后再连。程序只扫描 <code>/data/media/0/realdata</code>，不会改到其他目录下载。</p></div>
+        </details>
+        <details>
+          <summary>下载失败且设备未被清理</summary>
+          <div><p>这是保护行为。只要有一个稳定 rlog 失败，就不会询问清理。根据日志中的远端路径重试；磁盘满、中途断网、文件在扫描后变化都可能导致失败。</p></div>
+        </details>
+        <details>
+          <summary>目标目录已有另一台设备的同名日志</summary>
+          <div><p>请给每台车使用独立下载目录，或先把旧车数据移走。程序拒绝覆盖，是为了避免训练时混入其他车辆的 rlog。</p></div>
+        </details>
+        <details>
+          <summary>清理后发现设备文件变少</summary>
+          <div><p>如果当时点了确认，这是预期行为：未下载的旧摄像头和其他日志也会被删除。只有最近 5 分钟改过的文件会留下。以后若只想备份 rlog、不想清设备，下载完成后选择“否”。</p></div>
+        </details>
+        <details>
+          <summary>上传模型后车上没有变化</summary>
+          <div><p>确认上传的是训练器质量验证通过后的 <code>车型.json</code>，路径无误，并且设备上的 openpilot/sunnypilot 会读取该目录。上传成功只表示文件已覆盖到固定远端路径，不表示车辆已经加载新模型。</p></div>
+        </details>
+      </section>
+
+      <section id="checklist">
+        <h2>12. 下载完成后的检查清单</h2>
+        <ol class="steps">
+          <li><strong>确认状态栏不是失败或取消</strong>成功下载后应看到下载完成，以及你选择的清理结果。</li>
+          <li><strong>打开当天日期目录</strong>确认存在完整的 <code>rlog.zst</code>，而不是只留下 <code>.part</code>。</li>
+          <li><strong>核对跳过数量</strong>如果跳过的近期文件很多，等车辆停稳后再补下一轮。</li>
+          <li><strong>不要把半截日志拿去训练</strong>失败清单里的文件应重新下载。</li>
+          <li><strong>需要清设备时再确认弹窗</strong>没把握就选“否”，先保留设备日志。</li>
+          <li><strong>交给训练器时选对目录</strong>可以把某一天的目录，或包含多天日期目录的上层目录，作为 NNLC 训练器的 reallog 目录。</li>
+        </ol>
+        <div class="callout"><strong>下一步：</strong>使用 NNLC 训练器读取这些 <code>rlog.zst</code>。下载器只负责把设备日志安全拷到电脑，不训练模型。</div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
