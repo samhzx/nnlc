@@ -1066,6 +1066,8 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   println(out_streams, size(X_train))
   println(out_streams, size(y_train))
   println(out_streams, "Batch size: $batch_size; symmetric augmentation is generated per batch")
+  println(out_streams, "Training progress: 0/$epoch_max")
+  flush(out_streams)
 
   if use_existing_model
       old_model = "$model_path.bson"
@@ -1193,6 +1195,8 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         end
       
         t = now()
+        println(out_streams, "Training progress: $epoch/$epoch_max")
+        flush(out_streams)
         if (t - last_log_time) > Dates.Millisecond(10000) || epoch % logstep == 0 || epoch >= epoch_max
             loss_cur = l
             if isfinite(loss_last)

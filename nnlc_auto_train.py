@@ -309,6 +309,22 @@ def print_info(message):
     _emit(f"  {Colors.BLUE}[INFO]{Colors.RESET} {message}")
 
 
+def _windows_child_creationflags():
+    """Start Windows children without a console, while remaining cancellable.
+
+    ``CREATE_NO_WINDOW`` prevents ``julia.exe`` from flashing a black console
+    in the windowed GUI. ``CREATE_NEW_PROCESS_GROUP`` is kept so cancellation
+    can still signal the child tree when the hidden-window flag is unavailable.
+    """
+    if os.name != "nt":
+        return 0
+    flags = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if no_window is None:
+        no_window = 0x08000000
+    return flags | int(no_window)
+
+
 def _terminate_process_tree(process):
     """Terminate a child process and any workers it started."""
     if process is None or process.poll() is not None:
@@ -389,7 +405,7 @@ def run_command(cmd, description, check=True, cancel_event=None,
         "env": env,
     }
     if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_kwargs["creationflags"] = _windows_child_creationflags()
     else:
         popen_kwargs["start_new_session"] = True
 
@@ -706,6 +722,61 @@ def step_visualize(input_csv, output_dir, python_exe, streaming=False,
     return output_png
 
 
+def _forward_process_output(process, cancel_event=None, idle_message=None,
+                            idle_timeout=30):
+    """Forward child output line-by-line and emit a heartbeat while it is silent.
+
+    Julia's first run can compile for several minutes before printing anything.
+    A blocking ``for line in stdout`` loop would leave the GUI log blank during
+    that time, so idle periods get an explicit compiling hint instead.
+    """
+    if idle_timeout <= 0:
+        raise ValueError("idle_timeout must be positive")
+    output_queue = queue.Queue()
+    reader_done = threading.Event()
+
+    def read_output():
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output_queue.put(line)
+        finally:
+            reader_done.set()
+
+    reader = threading.Thread(target=read_output, name="nnlc-julia-reader", daemon=True)
+    reader.start()
+    started_at = time.time()
+    last_output_at = started_at
+    last_heartbeat_at = started_at
+    if idle_message:
+        print_info(idle_message)
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set() and process.poll() is None:
+                _terminate_process_tree(process)
+            try:
+                line = output_queue.get(timeout=0.5)
+            except queue.Empty:
+                if reader_done.is_set() and output_queue.empty():
+                    break
+                now = time.time()
+                if (
+                    idle_message
+                    and process.poll() is None
+                    and (now - last_output_at) >= idle_timeout
+                    and (now - last_heartbeat_at) >= idle_timeout
+                ):
+                    print_info(f"{idle_message}（已等待 {int(now - started_at)} 秒）")
+                    last_heartbeat_at = now
+                continue
+            last_output_at = time.time()
+            last_heartbeat_at = last_output_at
+            _emit("    " + line.rstrip())
+        return process.wait()
+    finally:
+        reader_done.wait(timeout=1)
+
+
 def step_train(input_csv, car_name, output_dir, cancel_event=None,
                process_holder=None, batch_size=16384, force_cpu=True,
                streaming=False):
@@ -763,6 +834,7 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     print_info(f"Julia 训练中（{mode_label}，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
     print_warn("Julia 首次运行需编译依赖（约 3-10 分钟无输出属正常），请耐心等待")
+    print_info("若暂时没有新日志，训练器会定期提示正在编译")
     print_info("训练日志会实时显示在下方:\n" + "-" * 60)
 
     start_time = time.time()
@@ -787,7 +859,7 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
         "bufsize": 1,
     }
     if os.name == "nt":
-        process_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process_kwargs["creationflags"] = _windows_child_creationflags()
     else:
         process_kwargs["start_new_session"] = True
     process = subprocess.Popen(cmd, **process_kwargs)
@@ -796,10 +868,14 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     if cancel_event is not None and cancel_event.is_set():
         _terminate_process_tree(process)
     try:
-        if process.stdout is not None:
-            for line in process.stdout:
-                _emit("    " + line.rstrip())
-        result = subprocess.CompletedProcess(cmd, process.wait())
+        result = subprocess.CompletedProcess(
+            cmd,
+            _forward_process_output(
+                process,
+                cancel_event=cancel_event,
+                idle_message="Julia 正在编译依赖，请继续等待",
+            ),
+        )
     finally:
         if process_holder is not None:
             process_holder["process"] = None
