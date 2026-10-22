@@ -198,18 +198,89 @@ COLUMNS = [
 ]
 
 
+DATE_DIR_NAME_RE = re.compile(r"^\d{8}$")
+DAY_CSV_NAME = "lateral_data.csv"
+
+
+def _natural_path_key(path):
+    normalized = os.fspath(path).replace("\\", "/")
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", normalized)]
+
+
 def find_rlogs(input_dir):
     """Find all rlog files in the input directory."""
     patterns = ["**/rlog.zst", "**/rlog.bz2", "**/rlog"]
     files = []
     for pattern in patterns:
         files.extend(glob.glob(os.path.join(input_dir, pattern), recursive=True))
-    def natural_path_key(path):
-        normalized = os.fspath(path).replace("\\", "/")
-        return [int(part) if part.isdigit() else part.lower()
-                for part in re.split(r"(\d+)", normalized)]
+    return sorted(set(files), key=_natural_path_key)
 
-    return sorted(set(files), key=natural_path_key)
+
+def is_date_dir_name(name):
+    """Return True when a path component is an 8-digit YYYYMMDD directory name."""
+    return bool(DATE_DIR_NAME_RE.fullmatch(os.fspath(name)))
+
+
+def uses_date_cached_extraction(input_dir):
+    """Enable per-day CSV caches when the rlog root is organized by YYYYMMDD.
+
+    Date mode is used when the input directory itself is named YYYYMMDD, or
+    when at least one of its direct subdirectories is named YYYYMMDD.
+    """
+    input_dir = os.path.abspath(input_dir)
+    if is_date_dir_name(os.path.basename(input_dir)):
+        return True
+    try:
+        names = os.listdir(input_dir)
+    except OSError:
+        return False
+    return any(
+        is_date_dir_name(name) and os.path.isdir(os.path.join(input_dir, name))
+        for name in names
+    )
+
+
+def date_directory_for_rlog(input_dir, rlog_path):
+    """Return the YYYYMMDD directory that owns an rlog, or None if it has none.
+
+    When the input root itself is a date directory, every rlog under it belongs
+    to that root. Otherwise the first YYYYMMDD path component after the input
+    root is the cache directory.
+    """
+    input_dir = os.path.abspath(input_dir)
+    rlog_path = os.path.abspath(rlog_path)
+    if is_date_dir_name(os.path.basename(input_dir)):
+        try:
+            common = os.path.commonpath([input_dir, rlog_path])
+        except ValueError:
+            return None
+        return input_dir if common == input_dir else None
+    try:
+        relative = os.path.relpath(rlog_path, input_dir)
+    except ValueError:
+        return None
+    if relative.startswith(".."):
+        return None
+    current = input_dir
+    for part in relative.split(os.sep)[:-1]:
+        current = os.path.join(current, part)
+        if is_date_dir_name(part):
+            return current
+    return None
+
+
+def group_rlogs_by_date_directory(input_dir, rlog_files):
+    """Group rlogs by their date directory, preserving the given file order."""
+    grouped = {}
+    skipped = []
+    for rlog_path in rlog_files:
+        date_dir = date_directory_for_rlog(input_dir, rlog_path)
+        if date_dir is None:
+            skipped.append(rlog_path)
+            continue
+        grouped.setdefault(date_dir, []).append(rlog_path)
+    return grouped, skipped
 
 
 class _LateEventBeyondWindow(RuntimeError):
@@ -457,6 +528,13 @@ def _temporal_column_specs():
         for column in ("actual_lateral_accel", "desired_lateral_accel", "roll"):
             specs.append((int(round(offset / 0.01)), COLUMNS.index(column), f"{column}{suffix}"))
     return specs
+
+
+def csv_output_columns(temporal=False):
+    """Return the CSV column names produced by extraction."""
+    return COLUMNS + (
+        [spec[2] for spec in _temporal_column_specs()] if temporal else []
+    ) + ["route_id"]
 
 
 def _replace_with_retry(source_path, target_path, attempts=5, delay=0.5):
@@ -854,9 +932,7 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
     worker_factory = worker_factory or _RlogWorker
     rlog_files = [os.fspath(path) for path in rlog_files]
     worker_count = resolve_rlog_workers(rlog_workers, len(rlog_files))
-    output_columns = COLUMNS + (
-        [spec[2] for spec in _temporal_column_specs()] if temporal else []
-    ) + ["route_id"]
+    output_columns = csv_output_columns(temporal)
     expected_header = _csv_header_bytes(output_columns)
     skipped_rlogs = []
     rows_written = rows_seen = rows_filtered = 0
@@ -995,6 +1071,203 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
     }
 
 
+def _temporary_output_path(output_path):
+    """Create a sibling temp file in the destination directory."""
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f".{os.path.basename(output_path)}.", suffix=".tmp",
+        dir=output_dir, delete=False,
+    )
+    temp_path = temp_file.name
+    temp_file.close()
+    return temp_path
+
+
+def _discard_temp_output(temp_path):
+    if not _remove_with_retry(temp_path):
+        print(f"WARNING: Unable to remove temporary extract output: {temp_path}", flush=True)
+
+
+def daily_csv_is_reusable(path, expected_header):
+    """Return True when a per-day cache exists, is readable, and has the expected header."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        expected_columns = next(csv.reader(io.StringIO(
+            expected_header.decode("utf-8"),
+        )))
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            actual_columns = next(reader, None)
+            if actual_columns != expected_columns:
+                return False
+            return all(len(row) == len(expected_columns) for row in reader)
+    except (OSError, UnicodeError, csv.Error):
+        return False
+
+
+def _extract_rlogs_to_csv_atomic(rlog_files, output_path, **kwargs):
+    """Extract rlogs to a temp sibling, then replace the destination on success."""
+    temp_path = _temporary_output_path(output_path)
+    success = False
+    try:
+        stats = extract_rlogs_to_csv(rlog_files, temp_path, **kwargs)
+        cancel_event = kwargs.get("cancel_event")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("提取已取消")
+        if stats["rows_written"] > 0:
+            _replace_with_retry(temp_path, output_path)
+            success = True
+        return stats
+    finally:
+        if not success:
+            _discard_temp_output(temp_path)
+
+
+def _merge_csv_files(csv_paths, output_path, expected_header):
+    """Concatenate daily CSVs in the given order, keeping a single header."""
+    temp_path = _temporary_output_path(output_path)
+    success = False
+    rows_written = 0
+    try:
+        with open(temp_path, "wb") as output:
+            output.write(expected_header)
+            for csv_path in csv_paths:
+                with open(csv_path, "rb") as source:
+                    actual_header = source.readline()
+                    if actual_header.rstrip(b"\r\n") != expected_header.rstrip(b"\r\n"):
+                        raise RuntimeError(f"Cached CSV has an invalid header: {csv_path}")
+                    last_byte = b""
+                    while True:
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        rows_written += chunk.count(b"\n")
+                        last_byte = chunk[-1:]
+                        output.write(chunk)
+                    if last_byte and last_byte not in (b"\n", b"\r"):
+                        output.write(b"\n")
+                        rows_written += 1
+        if rows_written > 0:
+            _replace_with_retry(temp_path, output_path)
+            success = True
+        return rows_written
+    finally:
+        if not success:
+            _discard_temp_output(temp_path)
+
+
+def _empty_extract_stats():
+    return {
+        "rows_written": 0,
+        "rows_seen": 0,
+        "rows_filtered": 0,
+        "skipped_rlogs": [],
+        "exact_sort_fallbacks": 0,
+        "max_lateness_seconds": 0.0,
+        "reused_days": 0,
+        "extracted_days": 0,
+        "skipped_outside_date_dirs": [],
+    }
+
+
+def extract_directory_to_csv(input_dir, output_path, temporal=False,
+                             filter_overrides=False, skip_corrupt=False,
+                             show_progress=True, worker_factory=None,
+                             rlog_workers="auto", cancel_event=None,
+                             rlog_files=None):
+    """Extract an rlog directory to CSV, using per-day caches when applicable.
+
+    When the input tree is organized by YYYYMMDD, each date directory stores
+    ``lateral_data.csv``. Existing readable files with the current temporal
+    header are reused as-is. Newly extracted days are written atomically so a
+    cancelled run cannot replace a day file with a partial CSV. The combined
+    output is then concatenated in date-name order.
+
+    Without YYYYMMDD directories, this writes only ``output_path`` and does
+    not create files inside the data directory.
+    """
+    if rlog_files is None:
+        rlog_files = find_rlogs(input_dir)
+    rlog_files = [os.fspath(path) for path in rlog_files]
+    extract_kwargs = {
+        "temporal": temporal,
+        "filter_overrides": filter_overrides,
+        "skip_corrupt": skip_corrupt,
+        "show_progress": show_progress,
+        "worker_factory": worker_factory,
+        "rlog_workers": rlog_workers,
+        "cancel_event": cancel_event,
+    }
+
+    if not uses_date_cached_extraction(input_dir):
+        stats = _extract_rlogs_to_csv_atomic(rlog_files, output_path, **extract_kwargs)
+        stats.update({
+            "reused_days": 0,
+            "extracted_days": 0,
+            "skipped_outside_date_dirs": [],
+        })
+        return stats
+
+    grouped, skipped_outside = group_rlogs_by_date_directory(input_dir, rlog_files)
+    stats = _empty_extract_stats()
+    stats["skipped_outside_date_dirs"] = skipped_outside
+    for path in skipped_outside:
+        print(f"WARNING: Skipping rlog outside YYYYMMDD directory: {path}", flush=True)
+
+    expected_header = _csv_header_bytes(csv_output_columns(temporal))
+    day_csvs = []
+    extract_failed = False
+    date_dirs = sorted(
+        grouped,
+        key=lambda path: (_natural_path_key(os.path.basename(path)), _natural_path_key(path)),
+    )
+    for date_dir in date_dirs:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("提取已取消")
+        day_csv = os.path.join(date_dir, DAY_CSV_NAME)
+        day_rlogs = grouped[date_dir]
+        if daily_csv_is_reusable(day_csv, expected_header):
+            print(f"Reusing cached CSV: {day_csv}", flush=True)
+            stats["reused_days"] += 1
+            day_csvs.append(day_csv)
+            continue
+        print(f"Extracting {len(day_rlogs)} rlog(s) to {day_csv}", flush=True)
+        day_stats = _extract_rlogs_to_csv_atomic(day_rlogs, day_csv, **extract_kwargs)
+        stats["rows_seen"] += day_stats["rows_seen"]
+        stats["rows_filtered"] += day_stats["rows_filtered"]
+        stats["skipped_rlogs"].extend(day_stats["skipped_rlogs"])
+        stats["exact_sort_fallbacks"] += day_stats["exact_sort_fallbacks"]
+        stats["max_lateness_seconds"] = max(
+            stats["max_lateness_seconds"],
+            day_stats["max_lateness_seconds"],
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("提取已取消")
+        if day_stats["rows_written"] <= 0:
+            extract_failed = True
+            continue
+        stats["extracted_days"] += 1
+        day_csvs.append(day_csv)
+
+    print(
+        f"Date-cached extraction: reused {stats['reused_days']} day(s), "
+        f"extracted {stats['extracted_days']} day(s)",
+        flush=True,
+    )
+    if extract_failed:
+        print(
+            "ERROR: No data extracted from one or more YYYYMMDD directories",
+            flush=True,
+        )
+        return stats
+    if not day_csvs:
+        return stats
+    stats["rows_written"] = _merge_csv_files(day_csvs, output_path, expected_header)
+    return stats
+
+
 def add_temporal_columns(df):
     """Add lagged/lead columns for temporal model training.
 
@@ -1057,42 +1330,23 @@ def main():
         else:
             fmt = "csv"
 
+    extract_kwargs = {
+        "temporal": args.temporal,
+        "filter_overrides": args.filter_overrides,
+        "skip_corrupt": args.skip_corrupt,
+        "rlog_workers": args.rlog_workers,
+        "rlog_files": rlog_files,
+    }
+
     if fmt == "csv":
         # CSV is the pipeline's native format. Write rows as they arrive so
         # memory usage is bounded by one sorted rlog plus the temporal
-        # look-ahead buffer instead of the complete dataset. Use a temporary
-        # sibling file so a failure can never replace a valid existing output
-        # with a partial CSV.
-        output_dir = os.path.dirname(os.path.abspath(args.output))
-        os.makedirs(output_dir, exist_ok=True)
-        temp_file = tempfile.NamedTemporaryFile(
-            prefix=f".{os.path.basename(args.output)}.", suffix=".tmp",
-            dir=output_dir, delete=False,
-        )
-        temp_path = temp_file.name
-        temp_file.close()
-        success = False
-        try:
-            stats = extract_rlogs_to_csv(
-                rlog_files,
-                temp_path,
-                temporal=args.temporal,
-                filter_overrides=args.filter_overrides,
-                skip_corrupt=args.skip_corrupt,
-                rlog_workers=args.rlog_workers,
-            )
-            rows_written = stats["rows_written"]
-            rows_seen = stats["rows_seen"]
-            rows_filtered = stats["rows_filtered"]
-            if rows_written > 0:
-                _replace_with_retry(temp_path, args.output)
-                success = True
-        finally:
-            if not success:
-                try:
-                    os.unlink(temp_path)
-                except FileNotFoundError:
-                    pass
+        # look-ahead buffer instead of the complete dataset. Date-organized
+        # trees also keep a per-day CSV beside the rlogs, then merge into -o.
+        stats = extract_directory_to_csv(args.input, args.output, **extract_kwargs)
+        rows_written = stats["rows_written"]
+        rows_seen = stats["rows_seen"]
+        rows_filtered = stats["rows_filtered"]
 
         if rows_written == 0:
             if stats["skipped_rlogs"]:
@@ -1116,13 +1370,10 @@ def main():
         temp_file.close()
         extraction_success = False
         try:
-            stats = extract_rlogs_to_csv(
-                rlog_files,
+            stats = extract_directory_to_csv(
+                args.input,
                 temp_path,
-                temporal=args.temporal,
-                filter_overrides=args.filter_overrides,
-                skip_corrupt=args.skip_corrupt,
-                rlog_workers=args.rlog_workers,
+                **extract_kwargs,
             )
             extraction_success = stats["rows_written"] > 0
         finally:

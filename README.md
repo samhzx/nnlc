@@ -243,6 +243,8 @@ python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv \
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parquet --format parquet
 ```
 
+如果输入目录本身名为 `YYYYMMDD`，或其**直接子目录**包含 `YYYYMMDD` 日期目录（如下载器按本机导出日期保存的结构），提取器会按天在该日期目录写入 `lateral_data.csv`。某日已有该文件且表头与当前时序列一致时，会完全跳过该日，即使后来又放入新 rlog。需要让补下载的日志进入训练时，请手动删除对应日期目录中的 `lateral_data.csv`。训练开始前仍会按日期名顺序把各日 CSV 合成输出路径的总表。没有日期目录时，行为与原来相同，一次性提取到 `-o`，不会在数据目录写入 CSV。
+
 ### 2. 评估路线质量
 
 ```bash
@@ -393,6 +395,8 @@ python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parque
 
 每个 rlog 都在主提取进程之外的独立工作进程中解析，多个 worker 可以同时处理不同 rlog。运行日志会即时打印完成文件的完整路径，最终 CSV 始终按输入 rlog 顺序合并；每个 rlog 的 temporal 窗口也只在当前 rlog 内计算，不会跨文件串联。工作进程每处理 100 个文件会主动重启，避免原生解析库长期运行产生资源累积。若 `pycapnp` 等原生库导致 worker 崩溃，容错模式会在全新进程中重试当前文件一次，仍失败才记录并跳过；严格模式会显示该文件路径和退出码后立即停止。只有 worker 完整返回的分段 CSV 才会合并到最终数据中，崩溃产生的半截文件不会参与训练。
 
+当输入根目录名为 `YYYYMMDD`，或其直接子目录含 `YYYYMMDD` 时，提取器会把各日结果缓存为 `日期目录/lateral_data.csv`（与训练输出文件名相同，但位于日期目录中）。该文件可读且表头与当前时序列一致时直接复用，不会因为后来增删 rlog 或文件时间变化而自动失效。日志会打印复用了几天、新提取了几天，再按日期名顺序合成 `-o` 的总 `lateral_data.csv`。取消提取时不会留下半截日 CSV。同一路线若在不同日期目录各有一份，会进入总表两次，不会跨天去重。没有日期目录时不会改写数据目录。旧版其它缓存格式不会被读取或转换。
+
 ### score_routes
 
 ```
@@ -541,6 +545,8 @@ CSV 提取器逐个处理 rlog 文件：默认用 2 秒有界重排，并仅将�
 
 最后的 `--0`、`--1` 是每分钟分段号；程序会将上述分段统一识别为路线
 `000000a0--68a50e9c1b`，日期目录不会被当作路线 ID。
+
+下载器按本机导出日期保存的 `YYYYMMDD` 目录（例如 `20261016/`）会启用按天 CSV 缓存；`0828/` 这种不足 8 位的目录名不会。
 
 ### 使用 CPU 进行 Julia 训练
 
