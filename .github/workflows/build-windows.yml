@@ -40,7 +40,10 @@ jobs:
 
       - name: Build one-file executable
         shell: pwsh
-        run: .\build_windows.ps1
+        run: |
+          # Packaging uses a clean virtualenv inside build_windows.ps1 so
+          # pytest from the previous step is not frozen into the EXE.
+          .\build_windows.ps1
 
       - name: Verify release layout
         shell: pwsh

@@ -9,6 +9,7 @@ build/
 *.parquet
 data/
 .venv/
+.packaging-venv/
 .pytest_cache/
 .DS_Store
 julia-runtime/

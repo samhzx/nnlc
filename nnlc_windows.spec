@@ -141,6 +141,14 @@ a = Analysis(
     excludes=[
         # Pandas' optional imports can collect SciPy from an existing build environment.
         "scipy",
+        # Keep unit-test tooling out of the frozen EXE. GitHub Actions installs
+        # pytest before packaging; excluding it here prevents pygments/pluggy
+        # from being pulled into the one-file bundle.
+        "pytest",
+        "py",
+        "pygments",
+        "pluggy",
+        "iniconfig",
         "tkinter.test",
         "numpy.tests",
         "pandas.tests",

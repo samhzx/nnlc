@@ -12,14 +12,26 @@ function Invoke-Python {
     if ($LASTEXITCODE -ne 0) { throw "Python command failed ($LASTEXITCODE)" }
 }
 
-Write-Host "Installing Python dependencies and PyInstaller ..."
-Invoke-Python "pip install --upgrade pip"
-Invoke-Python "pip install -e . pyinstaller"
-
 Write-Host "Cleaning previous PyInstaller output ..."
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "build"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "dist"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "release"
+
+Write-Host "Creating a clean packaging virtual environment ..."
+$VenvDir = Join-Path $ProjectDir ".packaging-venv"
+if (Test-Path -LiteralPath $VenvDir) {
+    Remove-Item -Recurse -Force $VenvDir
+}
+Invoke-Python "venv `"$VenvDir`""
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+    throw "packaging virtual environment was not created: $VenvPython"
+}
+$Python = "`"$VenvPython`""
+
+Write-Host "Installing Python dependencies and PyInstaller ..."
+Invoke-Python "pip install --upgrade pip"
+Invoke-Python "pip install -e . pyinstaller"
 
 Write-Host "Generating version assets ..."
 Invoke-Python "build_tools.generate_version_assets --pyproject pyproject.toml --output-dir build\version-assets"
