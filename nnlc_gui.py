@@ -189,8 +189,10 @@ class NNLCApp:
         if not isinstance(saved_car, str) or not saved_car.strip():
             saved_car = "BYD_TANG_DMI_24"
 
-        self.data_var = tk.StringVar()
-        self.output_var = tk.StringVar(value=self._default_output())
+        saved_data_dir = saved_preferences.get("data_dir", "")
+        saved_output_dir = saved_preferences.get("output_dir", "")
+        self.data_var = tk.StringVar(value=saved_data_dir)
+        self.output_var = tk.StringVar(value=saved_output_dir or self._default_output())
         self.car_var = tk.StringVar(value=saved_car)
         self.threshold_var = tk.StringVar()
         self.training_mode_var = tk.StringVar(value=saved_mode)
@@ -245,9 +247,18 @@ class NNLCApp:
             car = preferences.get("car")
             if isinstance(car, str):
                 preferences["car"] = car.strip()
+            preferences["data_dir"] = cls._saved_path(preferences.get("data_dir"))
+            preferences["output_dir"] = cls._saved_path(preferences.get("output_dir"))
             return preferences
         except (OSError, ValueError, TypeError):
             return {}
+
+    @classmethod
+    def _saved_path(cls, value) -> str:
+        """Normalize a persisted directory path, ignoring invalid values."""
+        if not isinstance(value, str):
+            return ""
+        return cls._normalize_path(value)
 
     def _save_preferences(self) -> None:
         car = self.car_var.get().strip()
@@ -264,6 +275,8 @@ class NNLCApp:
                     {
                         "car": car,
                         "training_mode": training_mode,
+                        "data_dir": self._saved_path(self.data_var.get()),
+                        "output_dir": self._saved_path(self.output_var.get()),
                         "keep_intermediates": bool(self.keep_intermediates_var.get()),
                     },
                     handle,
@@ -332,6 +345,8 @@ class NNLCApp:
         output_picker = PathPicker(dir_inner, self.output_var, self._choose_output)
         self._form_row(dir_inner, 1, "输出目录", output_picker)
         self.path_pickers = [data_picker, output_picker]
+        data_picker.entry.bind("<FocusOut>", lambda _e: self._save_preferences(), add="+")
+        output_picker.entry.bind("<FocusOut>", lambda _e: self._save_preferences(), add="+")
 
         param_card, param_inner = self._make_card(body, "训练参数")
         param_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
@@ -654,11 +669,13 @@ class NNLCApp:
         path = filedialog.askdirectory(title="选择包含 reallog/rlog 的目录")
         if path:
             self.data_var.set(self._normalize_path(path))
+            self._save_preferences()
 
     def _choose_output(self) -> None:
         path = filedialog.askdirectory(title="选择输出目录")
         if path:
             self.output_var.set(self._normalize_path(path))
+            self._save_preferences()
 
     def _open_output(self) -> None:
         output_dir = Path(self.output_var.get().strip())

@@ -696,13 +696,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.1.0</span>
+            <span>NNLC 横向控制模型训练 v1.1.1</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.1.0</span>
+              <span class="gui-version">v1.1.1</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -756,8 +756,8 @@
               <tr><th>编号与字段</th><th>作用与填写方法</th><th>默认行为</th><th>是否记忆</th></tr>
             </thead>
             <tbody>
-              <tr><td><strong>1. reallog 目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>空白，必须选择存在的目录。</td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击输入框右侧的 <code>···</code> 浏览按钮。</td><td>优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>1. reallog 目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>首次空白，以后回填上次路径。开始训练时目录必须存在。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击输入框右侧的 <code>···</code> 浏览按钮。</td><td>首次优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。以后回填上次路径。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>3. 车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>4. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>5. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
@@ -905,12 +905,14 @@
         <h2>10. 上次设置保存在哪里</h2>
         <p>在 Windows 中，GUI 把用户偏好写入：</p>
         <pre><code>%APPDATA%\NNLC\settings.json</code></pre>
-        <p>保存内容只有：</p>
+        <p>保存内容包括：</p>
         <ul>
+          <li>上次选择的 reallog 目录</li>
+          <li>上次选择的输出目录</li>
           <li>上次填写的车型</li>
           <li>上次选择的训练模式</li>
         </ul>
-        <p>输入目录、输出目录、手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。</p>
+        <p>手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。已保存的目录下次会回填，即使当前不存在；开始训练时仍会检查 reallog 目录是否有效。</p>
         <div class="callout"><strong>恢复默认偏好：</strong>先退出 GUI，再删除 <code>%APPDATA%\NNLC\settings.json</code>。下次启动时会重新创建。</div>
       </section>
 
