@@ -213,6 +213,7 @@ PAD_CARD = 18
 PAD_ROW = 7
 INPUT_H = 34
 LABEL_W = 72
+MODE_BOX_W = 150
 
 
 def window_dimensions_for_height(height: int) -> tuple[int, int]:
@@ -522,7 +523,7 @@ class NNLCApp:
         tk.Label(param_inner, text="训练模式", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
             row=0, column=2, sticky="w", pady=PAD_ROW
         )
-        self.mode_box = self._fixed_box(param_inner, width=200)
+        self.mode_box = self._fixed_box(param_inner, width=MODE_BOX_W)
         self.mode_box.grid(row=0, column=3, sticky="w", padx=(10, 0), pady=PAD_ROW)
         self.training_mode_combo = ttk.Combobox(
             self.mode_box,
