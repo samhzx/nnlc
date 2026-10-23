@@ -161,6 +161,19 @@ def format_progress_title(current: int, total: int, title: str) -> str:
     return f"{current} / {total}  {heading}"
 
 
+def progress_step_color(index: int, current: int, *, completed: bool = False) -> str:
+    """Color pipeline labels: done, current, and pending."""
+    if completed:
+        return C_STEP_DONE
+    if current <= 0:
+        return C_STEP_TODO
+    if index < current - 1:
+        return C_STEP_DONE
+    if index == current - 1:
+        return C_STEP_CURRENT
+    return C_STEP_TODO
+
+
 APP_TITLE = "NNLC 横向控制模型训练"
 APP_SUBTITLE = "从 reallog 提取数据，完成评分、训练与模型部署"
 C_HEADER_BG = "#16324f"
@@ -184,6 +197,11 @@ C_BTN_DISABLED_FG = "#c0c4cc"
 C_BTN_DISABLED_BORDER = "#e4e7ed"
 C_STATUS_BG = "#e8ecf3"
 C_DISABLED = "#f5f6f8"
+C_STEP_DONE = "#2b333d"
+C_STEP_CURRENT = C_ACCENT
+C_STEP_TODO = C_MUTED
+WINDOW_ASPECT_WIDTH = 16
+WINDOW_ASPECT_HEIGHT = 9
 F_TITLE = ("Microsoft YaHei UI", 16, "bold")
 F_VERSION = ("Microsoft YaHei UI", 9, "bold")
 F_SUB = ("Microsoft YaHei UI", 9)
@@ -194,7 +212,12 @@ PAD_PAGE = 20
 PAD_CARD = 18
 PAD_ROW = 7
 INPUT_H = 34
-LABEL_W = 92
+LABEL_W = 72
+
+
+def window_dimensions_for_height(height: int) -> tuple[int, int]:
+    """Return a fixed 16:9 window size for the laid-out content height."""
+    return round(height * WINDOW_ASPECT_WIDTH / WINDOW_ASPECT_HEIGHT), height
 
 
 if tk is not None:
@@ -414,10 +437,10 @@ class NNLCApp:
         self._build_statusbar()
 
     def _lock_window_to_content(self) -> None:
-        """Keep the window at the laid-out size so extra blank height cannot appear."""
+        """Keep the original content height and size the width to 16:9."""
         self.root.update_idletasks()
-        width = max(self.root.winfo_reqwidth(), 1200)
         height = self.root.winfo_reqheight()
+        width, height = window_dimensions_for_height(height)
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(width, height)
         self.root.maxsize(width, height)
@@ -489,7 +512,7 @@ class NNLCApp:
         param_inner.columnconfigure(1, weight=1)
 
         tk.Label(param_inner, text="目标车型", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
-            row=0, column=0, sticky="e", pady=PAD_ROW
+            row=0, column=0, sticky="w", pady=PAD_ROW
         )
         self.car_box = self._fixed_box(param_inner)
         self.car_box.grid(row=0, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
@@ -497,7 +520,7 @@ class NNLCApp:
         self.config_widgets.append(self.car_entry)
 
         tk.Label(param_inner, text="训练模式", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
-            row=0, column=2, sticky="e", pady=PAD_ROW
+            row=0, column=2, sticky="w", pady=PAD_ROW
         )
         self.mode_box = self._fixed_box(param_inner, width=200)
         self.mode_box.grid(row=0, column=3, sticky="w", padx=(10, 0), pady=PAD_ROW)
@@ -513,7 +536,7 @@ class NNLCApp:
         self.config_widgets.append(self.training_mode_combo)
 
         tk.Label(param_inner, text="路线阈值", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
-            row=1, column=0, sticky="e", pady=PAD_ROW
+            row=1, column=0, sticky="w", pady=PAD_ROW
         )
         self.thr_box = self._fixed_box(param_inner)
         self.thr_box.grid(row=1, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
@@ -707,7 +730,7 @@ class NNLCApp:
 
     def _form_row(self, parent, row, label_text, widget) -> None:
         tk.Label(parent, text=label_text, font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
-            row=row, column=0, sticky="e", pady=PAD_ROW
+            row=row, column=0, sticky="w", pady=PAD_ROW
         )
         widget.grid(row=row, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
 
@@ -889,9 +912,13 @@ class NNLCApp:
         if getattr(self, "progress_bar", None) is not None:
             self.progress_bar.configure(maximum=total, value=current)
 
-    def _update_progress_step_labels(self, current: int) -> None:
+    def _update_progress_step_labels(self, current: int, *, completed: bool = False) -> None:
         for index, label in enumerate(getattr(self, "progress_step_labels", ())):
-            label.configure(fg=C_ACCENT if index < current else C_MUTED)
+            color = progress_step_color(index, current, completed=completed)
+            label.configure(
+                fg=color,
+                font=F_BOLD if color == C_STEP_CURRENT else F_SUB,
+            )
 
     def _open_training_log(self, car: str) -> None:
         self._close_training_log()
@@ -1034,13 +1061,15 @@ class NNLCApp:
             self.elapsed_var.set(f"耗时 {minutes:02d}:{seconds:02d}")
         self.root.after(1000, self._update_elapsed)
 
-    def _finish_running(self, status: str) -> None:
+    def _finish_running(self, status: str, *, completed: bool = False) -> None:
         leftover = self._log_line_buffer.strip()
         if leftover:
             latest = latest_visible_log_line(leftover)
             if latest:
                 self._set_latest_log(latest)
             self._log_line_buffer = ""
+        if completed:
+            self._update_progress_step_labels(self.progress_current, completed=True)
         self._close_training_log()
         self._set_running(False)
         self.status_var.set(status)
@@ -1173,7 +1202,7 @@ class NNLCApp:
                     self._append_log(payload)
                 elif kind == "done":
                     self._append_event("训练完成")
-                    self._finish_running("训练完成")
+                    self._finish_running("训练完成", completed=True)
                     messagebox.showinfo("训练完成", f"模型已输出到：\n{payload}")
                 elif kind == "error":
                     if isinstance(payload, tuple) and len(payload) == 2:

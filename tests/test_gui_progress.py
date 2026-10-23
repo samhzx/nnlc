@@ -9,6 +9,8 @@ from nnlc_gui import (
     format_progress_title,
     latest_visible_log_line,
     parse_pipeline_step,
+    progress_step_color,
+    window_dimensions_for_height,
     create_training_log_file,
     sanitize_log_car_name,
     training_log_filename,
@@ -110,8 +112,28 @@ def test_format_progress_title_uses_waiting_state():
     assert format_progress_title(5, 7, "训练 BYD_QZJ_05_DMI 模型") == "5 / 7  训练 BYD_QZJ_05_DMI 模型"
 
 
-def test_progress_highlights_all_steps_up_to_current_in_button_blue():
-    from nnlc_gui import C_ACCENT, C_MUTED
+def test_progress_step_color_marks_done_current_and_pending():
+    from nnlc_gui import C_STEP_CURRENT, C_STEP_DONE, C_STEP_TODO
+
+    assert [progress_step_color(index, 0) for index in range(7)] == [C_STEP_TODO] * 7
+    assert [progress_step_color(index, 5) for index in range(7)] == [
+        C_STEP_DONE, C_STEP_DONE, C_STEP_DONE, C_STEP_DONE, C_STEP_CURRENT, C_STEP_TODO, C_STEP_TODO,
+    ]
+    assert [progress_step_color(index, 1) for index in range(7)] == [
+        C_STEP_CURRENT, C_STEP_TODO, C_STEP_TODO, C_STEP_TODO, C_STEP_TODO, C_STEP_TODO, C_STEP_TODO,
+    ]
+    assert [progress_step_color(index, 7, completed=True) for index in range(7)] == [C_STEP_DONE] * 7
+
+
+def test_window_dimensions_keep_content_height_and_use_16_9_width():
+    from nnlc_gui import PAD_ROW
+
+    assert PAD_ROW == 7
+    assert window_dimensions_for_height(601) == (1068, 601)
+
+
+def test_progress_highlights_done_current_and_pending_steps():
+    from nnlc_gui import C_STEP_CURRENT, C_STEP_DONE, C_STEP_TODO, F_BOLD, F_SUB
 
     app = NNLCApp.__new__(NNLCApp)
     app.progress_current = 0
@@ -125,10 +147,46 @@ def test_progress_highlights_all_steps_up_to_current_in_button_blue():
     app._set_progress(5, 7, "训练 BYD_QZJ_05_DMI 模型")
 
     assert [label.options["fg"] for label in app.progress_step_labels] == [
-        C_ACCENT, C_ACCENT, C_ACCENT, C_ACCENT, C_ACCENT, C_MUTED, C_MUTED,
+        C_STEP_DONE, C_STEP_DONE, C_STEP_DONE, C_STEP_DONE, C_STEP_CURRENT, C_STEP_TODO, C_STEP_TODO,
     ]
+    assert [label.options["font"] for label in app.progress_step_labels] == [
+        F_SUB, F_SUB, F_SUB, F_SUB, F_BOLD, F_SUB, F_SUB,
+    ]
+    app._update_progress_step_labels(7, completed=True)
+    assert [label.options["fg"] for label in app.progress_step_labels] == [C_STEP_DONE] * 7
     app._reset_progress_card()
-    assert all(label.options["fg"] == C_MUTED for label in app.progress_step_labels)
+    assert all(label.options["fg"] == C_STEP_TODO for label in app.progress_step_labels)
+
+
+def test_finish_running_marks_steps_complete_only_on_success():
+    from nnlc_gui import C_STEP_CURRENT, C_STEP_DONE, C_STEP_TODO
+
+    class _Updater:
+        def on_training_finished(self):
+            pass
+
+    def make_app():
+        app = NNLCApp.__new__(NNLCApp)
+        app._log_line_buffer = ""
+        app.progress_current = 5
+        app.progress_step_labels = [_Widget() for _ in range(PIPELINE_STEP_COUNT)]
+        app._update_progress_step_labels(5)
+        app._close_training_log = lambda: None
+        app._set_running = lambda _running: None
+        app.status_var = _Var()
+        app.updater = _Updater()
+        return app
+
+    completed_app = make_app()
+    completed_app._finish_running("训练完成", completed=True)
+    assert [label.options["fg"] for label in completed_app.progress_step_labels] == [C_STEP_DONE] * 7
+
+    failed_app = make_app()
+    failed_app._finish_running("训练失败")
+    assert [label.options["fg"] for label in failed_app.progress_step_labels] == [
+        C_STEP_DONE, C_STEP_DONE, C_STEP_DONE, C_STEP_DONE,
+        C_STEP_CURRENT, C_STEP_TODO, C_STEP_TODO,
+    ]
 
 
 def test_append_log_writes_immediately_and_keeps_file_after_close(tmp_path, monkeypatch):

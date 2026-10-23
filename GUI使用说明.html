@@ -368,7 +368,7 @@
 
     .gui-row {
       display: grid;
-      grid-template-columns: 108px minmax(190px, 1fr) 210px;
+      grid-template-columns: 72px minmax(190px, 1fr) 210px;
       gap: 10px;
       align-items: center;
       min-height: 34px;
@@ -469,6 +469,10 @@
       color: #68747d;
       font-size: 12px;
       text-align: center;
+    }
+
+    .gui-progress-steps .done {
+      color: #2b333d;
     }
 
     .gui-progress-steps .active {
@@ -766,7 +770,7 @@
               </div>
               <div class="progress-track"><div class="progress-value"></div></div>
               <div class="gui-progress-steps">
-                <span class="active">提取</span><span class="active">评分</span><span class="active">修剪</span><span class="active">覆盖度</span><span class="active">训练</span><span>验证</span><span>部署</span>
+                <span class="done">提取</span><span class="done">评分</span><span class="done">修剪</span><span class="done">覆盖度</span><span class="active">训练</span><span>验证</span><span>部署</span>
               </div>
               <div class="gui-log">
                 <div class="gui-hint">最新日志 <span class="marker">9</span></div>
