@@ -446,10 +446,34 @@
 
     .gui-controls {
       display: grid;
-      grid-template-columns: auto auto auto 1fr auto;
+      grid-template-columns: auto auto 1fr auto;
       gap: 10px;
       align-items: center;
       margin: 13px 0;
+    }
+
+    .gui-progress-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin: 12px 0 6px;
+      font-weight: 700;
+    }
+
+    .gui-progress-steps {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 4px;
+      margin: 6px 0 10px;
+      color: #68747d;
+      font-size: 12px;
+      text-align: center;
+    }
+
+    .gui-progress-steps .active {
+      color: #1890ff;
+      font-weight: 700;
     }
 
     .progress-track {
@@ -459,15 +483,14 @@
       background: #fff;
     }
 
-    .progress-value { width: 44%; height: 100%; background: var(--teal); }
+    .progress-value { width: 71.4%; height: 100%; background: #1890ff; }
 
     .gui-log {
-      min-height: 116px;
+      min-height: 64px;
       padding: 10px;
       border: 1px solid #aeb7bd;
       color: #27343c;
       background: #fff;
-      font-family: Consolas, monospace;
       font-size: 12px;
     }
 
@@ -696,13 +719,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.1.3</span>
+            <span>NNLC 横向控制模型训练 v1.1.4</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.1.3</span>
+              <span class="gui-version">v1.1.4</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -735,14 +758,28 @@
                 <div class="gui-hint">取消自动推荐后可输入 0-100 的整数；流式模式适合超大数据和 16GB 内存电脑。</div>
               </div>
             </div>
+            <div class="gui-group">
+              <span class="gui-group-title">训练进度</span>
+              <div class="gui-progress-head">
+                <span>5 / 7  训练 BYD_TANG_DMI_24 模型 <span class="marker">8</span></span>
+                <span class="gui-hint">耗时 12:48</span>
+              </div>
+              <div class="progress-track"><div class="progress-value"></div></div>
+              <div class="gui-progress-steps">
+                <span class="active">提取</span><span class="active">评分</span><span class="active">修剪</span><span class="active">覆盖度</span><span class="active">训练</span><span>验证</span><span>部署</span>
+              </div>
+              <div class="gui-log">
+                <div class="gui-hint">最新日志 <span class="marker">9</span></div>
+                正在编译训练代码（自动微分，本次迭代），请继续等待（已等待 86 秒）
+                <div class="gui-hint" style="margin-top:8px;">完整日志写入程序运行目录的 logs/*.log</div>
+              </div>
+            </div>
             <div class="gui-controls">
               <span class="gui-button">打开输出目录 <span class="marker">7</span></span>
-              <span class="gui-button">清空日志 <span class="marker">8</span></span>
-              <span class="gui-button">保存日志 <span class="marker">10</span></span>
-              <span class="gui-hint">耗时 00:12</span>
+              <span class="gui-button">打开日志 <span class="marker">10</span></span>
+              <span></span>
               <span class="gui-button primary">开始训练 <span class="marker">6</span></span>
             </div>
-          <div class="gui-log"><span class="info">[10:20:31] 训练任务已启动</span><br><span class="step">[步骤 1/7] 提取横向控制数据</span><br><span class="ok">[OK] 数据量合格</span><br>训练日志会实时显示在这里…… <span class="marker">9</span></div>
             <div class="gui-status">训练中，请保持窗口打开...</div>
           </div>
         </div>
@@ -762,11 +799,11 @@
               <tr><td><strong>4. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>5. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
               <tr><td><strong>自动推荐</strong></td><td>控制路线阈值是否由程序自动选择。取消勾选后，路线阈值输入框才可编辑。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数与按钮会被锁定。</td><td>点击后清空旧的界面日志。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>7. 打开输出目录</strong></td><td>在 Windows 文件资源管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间不可用。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>8. 清空日志</strong></td><td>删除当前窗口中的运行日志，不影响输出目录中的文件。</td><td>只清空界面显示。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>9. 运行日志</strong></td><td>显示命令、步骤、行数、警告、Julia 输出、模型验证结果和最终路径。报错时应保存完整日志。</td><td>自动滚动到底部。</td><td><span class="badge no">不保存到文件</span></td></tr>
-              <tr><td><strong>10. 保存日志</strong></td><td>将当前窗口日志保存为带时间戳的 <code>.log</code> 文件，默认写入 EXE 所在目录。</td><td>没有日志时提示先运行任务。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数会被锁定，开始训练按钮不可点。</td><td>点击后重置进度卡，并立刻创建本次日志文件。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>7. 打开输出目录</strong></td><td>在文件管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>8. 训练进度</strong></td><td>显示固定 7 步进度：提取、评分、修剪、覆盖度、训练、验证、部署。标题形如 <code>5 / 7  训练 车型 模型</code>。未开始时为 <code>0 / 7  等待开始</code>。</td><td>总进度只按流水线步骤前进，不使用 Julia 的 epoch 数字。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>9. 最新日志</strong></td><td>只显示当前最新一行，并按标签实际宽度铺满；超出部分用省略号截断。完整内容写入程序运行目录 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同一秒同车型再次启动时会追加 <code>_2</code>、<code>_3</code> 等编号。</td><td>每次训练独立创建文件，从点击开始训练起增量写入；取消、失败或关窗也保留已写内容。</td><td><span class="badge no">写入运行目录</span></td></tr>
+              <tr><td><strong>10. 打开日志</strong></td><td>打开本次训练写入的日志文件。还没有本次文件时，改为打开程序运行目录下的 <code>logs</code> 文件夹。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -812,22 +849,17 @@
           <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
           <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
           <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。rlog 提取默认自动使用多个 worker 并行解析。</li>
-          <li><strong>点击开始训练</strong>运行日志会先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。</li>
-          <li><strong>观察日志</strong>运行日志会实时追加步骤、警告和 Julia 输出；耗时显示会持续更新，但不代表准确百分比。</li>
+          <li><strong>点击开始训练</strong>进度卡先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。同时在程序运行目录创建独立日志 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同秒冲突时自动追加编号。</li>
+          <li><strong>观察进度</strong>进度条按 7 个流水线步骤前进，卡片只显示最新一行日志；耗时会持续更新，但不代表 Julia epoch 百分比。完整日志请点“打开日志”。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
         </ol>
-        <div class="callout warning"><strong>Julia 训练前半段可能暂时没有新输出。</strong>这不一定是在重新编译依赖。运行日志会先提示“Julia 正在启动”，随后区分“加载已缓存依赖”“读取训练数据”和“编译训练代码（仅本次进程）”。该环境第一次训练才会编译依赖并写入缓存，可能需要几分钟；之后同一 <code>NNLC_Runtime</code> 会加载缓存，不必每次重编依赖。若暂时没有新输出，日志大约每 30 秒按当前阶段重复提示。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。进入训练循环后，运行日志会每轮追加 <code>Training progress: epoch/epoch_max</code>。Windows GUI 启动 Julia 时不再弹出黑色控制台，进度只显示在本窗口日志中。</div>
+        <div class="callout warning"><strong>Julia 训练前半段可能暂时没有新输出。</strong>这不一定是在重新编译依赖。进度卡和完整日志会先提示“Julia 正在启动”，随后区分“加载已缓存依赖”“读取训练数据”和“编译训练代码（仅本次进程）”。该环境第一次训练才会编译依赖并写入缓存，可能需要几分钟；之后同一 <code>NNLC_Runtime</code> 会加载缓存，不必每次重编依赖。若暂时没有新输出，日志大约每 30 秒按当前阶段重复提示。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。进入训练循环后，完整日志会每轮追加 <code>Training progress: epoch/epoch_max</code>，但窗口总进度仍停在第 5/7 步，直到验证开始。Windows GUI 启动 Julia 时不再弹出黑色控制台。</div>
         <div class="callout"><strong>rlog 并行提示：</strong>命令行默认自动选择并行度，`--rlog-workers 1` 可恢复串行模式。SSD 通常适合更高并行度，机械硬盘或低内存设备应降低 worker 数。超线程可能提升吞吐，但收益取决于解压、磁盘和物理核心数，建议通过实际基准测试选择。</div>
         <div class="callout danger"><strong>不要直接强制关闭。</strong>训练中点击窗口关闭按钮会询问是否中断。确认退出后，GUI 会结束当前 Python/Julia 子进程树；未完成的模型不会部署。</div>
-        <h3>日志颜色含义</h3>
-        <div class="legend-grid">
-          <div class="color-key"><span class="swatch" style="background:#2563a6"></span><span><strong>蓝色：</strong>普通信息、路径和模式</span></div>
-          <div class="color-key"><span class="swatch" style="background:#16803a"></span><span><strong>绿色：</strong>步骤成功、验证通过</span></div>
-          <div class="color-key"><span class="swatch" style="background:#a15c00"></span><span><strong>橙色：</strong>警告，任务可能仍会继续</span></div>
-          <div class="color-key"><span class="swatch" style="background:#c62828"></span><span><strong>红色：</strong>错误、质量验证失败</span></div>
-          <div class="color-key"><span class="swatch" style="background:#7a3e9d"></span><span><strong>紫色：</strong>标题和阶段总结</span></div>
-          <div class="color-key"><span class="swatch" style="background:#007c91"></span><span><strong>青色：</strong>当前流程步骤</span></div>
-        </div>
+        <h3>完整日志写在哪里</h3>
+        <p>完整训练日志不保存在输出目录，而是写入程序运行目录：</p>
+        <pre><code>NNLC_Trainer.exe 所在目录\logs/YYYYMMDD_HHMMSS_车型.log</code></pre>
+        <p>源码直接运行时，这个目录就是项目根目录下的 <code>logs</code>。窗口只显示最新一行；排查失败时请打开这份文件，而不是只看进度卡。</p>
       </section>
 
       <section id="pipeline">
@@ -972,7 +1004,7 @@
         </details>
         <details>
           <summary>怎样提供一份可分析的错误日志</summary>
-          <div><p>不要只截取最后一行。应包含：GUI 选择的模式、阈值、从失败步骤标题开始的全部内容、执行命令、Traceback 或 Julia 错误、退出码，以及被跳过的 rlog 清单。路径中的个人用户名可以打码，但应保留目录层级和文件名。</p></div>
+          <div><p>不要只截取进度卡上的最新一行。请打开程序运行目录 <code>logs</code> 中对应的 <code>YYYYMMDD_HHMMSS_车型.log</code>，并包含：GUI 选择的模式、阈值、从失败步骤标题开始的全部内容、执行命令、Traceback 或 Julia 错误、退出码，以及被跳过的 rlog 清单。路径中的个人用户名可以打码，但应保留目录层级和文件名。</p></div>
         </details>
       </section>
 
@@ -984,7 +1016,7 @@
           <li><strong>确认最终模型位置</strong>输出目录根部应存在与车型名称一致的 <code>车型.json</code>。</li>
           <li><strong>检查跳过日志清单</strong>确认被跳过的数量不会显著破坏数据覆盖。</li>
           <li><strong>检查覆盖度与验证图</strong>打开 <code>coverage.png</code> 和 <code>validation</code> 中的两张曲线图，确认没有明显空白或异常形状。</li>
-          <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志；同名旧模型通常位于 <code>车型.json.bak</code>。</li>
+          <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志。同名旧模型通常位于输出目录的 <code>车型.json.bak</code>；本次完整日志位于程序运行目录的 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>。</li>
         </ol>
         <div class="callout danger"><strong>道路验证注意安全。</strong>新模型应先在可控环境中低风险验证，并随时准备接管。离线质量验证通过不等于覆盖了所有车辆状态和道路工况。</div>
       </section>

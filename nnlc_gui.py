@@ -12,14 +12,17 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, font as tkfont, messagebox, ttk
 except ImportError:  # Some minimal Python builds (including CI macOS) omit Tk.
     tk = None
     filedialog = messagebox = ttk = None
+    tkfont = None
 
 from nnlc_auto_train import _terminate_process_tree, auto_train
 from nnlc_runtime import application_directory
@@ -28,20 +31,9 @@ from nnlc_version import get_version
 
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_ANSI_COLOR_TAGS = {
-    31: "error",
-    32: "success",
-    33: "warning",
-    34: "info",
-    35: "heading",
-    36: "step",
-    91: "error",
-    92: "success",
-    93: "warning",
-    94: "info",
-    95: "heading",
-    96: "step",
-}
+_PIPELINE_STEP_RE = re.compile(r"^\[(\d+)/(\d+)\]\s+(.+)$")
+PIPELINE_STEP_COUNT = 7
+PIPELINE_STEP_LABELS = ("提取", "评分", "修剪", "覆盖度", "训练", "验证", "部署")
 TRAINING_MODES = {
     "CPU 标准模式": 16384,
     "CPU 流式低内存模式": 4096,
@@ -64,6 +56,109 @@ class _QueueWriter(io.TextIOBase):
 
     def flush(self) -> None:
         return None
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI color codes from console output."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
+def sanitize_log_car_name(car_name: str) -> str:
+    """Keep a car name safe for a single log filename."""
+    sanitized = re.sub(r"[\\/:*?\"<>|]+", "_", str(car_name).strip())
+    sanitized = re.sub(r"\s+", "_", sanitized)
+    sanitized = sanitized.strip("._")
+    return sanitized or "model"
+
+
+def training_log_filename(car_name: str, when: datetime | None = None) -> str:
+    stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return f"{stamp}_{sanitize_log_car_name(car_name)}.log"
+
+
+def training_log_directory(base_dir: str | os.PathLike[str] | None = None) -> Path:
+    root = Path(base_dir) if base_dir is not None else application_directory()
+    return root / "logs"
+
+
+def training_log_path(car_name: str, when: datetime | None = None,
+                      base_dir: str | os.PathLike[str] | None = None) -> Path:
+    return training_log_directory(base_dir) / training_log_filename(car_name, when)
+
+
+def create_training_log_file(
+    car_name: str,
+    when: datetime | None = None,
+    base_dir: str | os.PathLike[str] | None = None,
+):
+    """Create a new log without overwriting or appending to another run."""
+    base_path = training_log_path(car_name, when=when, base_dir=base_dir)
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate = base_path
+    suffix = 2
+    while True:
+        try:
+            handle = candidate.open("x", encoding="utf-8", newline="\n")
+            return candidate, handle
+        except FileExistsError:
+            candidate = base_path.with_name(f"{base_path.stem}_{suffix}{base_path.suffix}")
+            suffix += 1
+
+
+def parse_pipeline_step(text: str) -> tuple[int, int, str] | None:
+    """Parse a pipeline heading such as ``[5/7] 训练 BYD_QZJ_05_DMI 模型``."""
+    found = None
+    for raw_line in strip_ansi(text).splitlines():
+        line = raw_line.strip()
+        if not line.startswith("["):
+            continue
+        match = _PIPELINE_STEP_RE.fullmatch(line)
+        if match is None:
+            continue
+        current = int(match.group(1))
+        total = int(match.group(2))
+        title = match.group(3).strip()
+        if current < 1 or total != PIPELINE_STEP_COUNT or current > total or not title:
+            continue
+        found = (current, total, title)
+    return found
+
+
+def latest_visible_log_line(text: str) -> str:
+    """Return the last non-empty console line for the progress card."""
+    visible = ""
+    for raw_line in strip_ansi(text).replace("\r", "\n").splitlines():
+        line = raw_line.strip()
+        if line:
+            visible = line
+    return visible
+
+
+def ellipsize_to_width(text: str, font, max_width: int) -> str:
+    """Fit one line into ``max_width`` pixels, appending an ellipsis when needed."""
+    if max_width <= 0 or not text:
+        return text
+    if font.measure(text) <= max_width:
+        return text
+    ellipsis = "…"
+    ellipsis_width = font.measure(ellipsis)
+    if ellipsis_width >= max_width:
+        return ellipsis
+    available = max_width - ellipsis_width
+    low = 0
+    high = len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if font.measure(text[:mid]) <= available:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low] + ellipsis
+
+
+def format_progress_title(current: int, total: int, title: str) -> str:
+    heading = title.strip() or "等待开始"
+    return f"{current} / {total}  {heading}"
 
 
 APP_TITLE = "NNLC 横向控制模型训练"
@@ -95,7 +190,6 @@ F_SUB = ("Microsoft YaHei UI", 9)
 F_SECTION = ("Microsoft YaHei UI", 11, "bold")
 F_BASE = ("Microsoft YaHei UI", 10)
 F_BOLD = ("Microsoft YaHei UI", 10, "bold")
-F_LOG = ("Consolas", 10)
 PAD_PAGE = 20
 PAD_CARD = 18
 PAD_ROW = 7
@@ -168,16 +262,33 @@ if tk is not None:
 class NNLCApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.geometry("1200x880")
-        self.root.minsize(1060, 780)
+        self.root.geometry("1200x640")
+        self.root.resizable(False, False)
+        try:
+            self.root.attributes("-zoomed", False)
+        except tk.TclError:
+            pass
+        # macOS still shows the green zoom button unless it is explicitly disabled.
+        if sys.platform == "darwin":
+            try:
+                self.root.createcommand("tk::mac::ZoomWindow", lambda: None)
+            except tk.TclError:
+                pass
         self.messages: queue.Queue = queue.Queue()
         self.worker: threading.Thread | None = None
         self.started_at: float | None = None
         self.config_widgets = []
         self.path_pickers = []
-        self._ansi_log_tag: str | None = None
         self.cancel_event = threading.Event()
         self.process_holder = {}
+        self.log_file = None
+        self.current_log_path: Path | None = None
+        self._log_write_failed = False
+        self._log_line_buffer = ""
+        self.progress_current = 0
+        self.progress_total = PIPELINE_STEP_COUNT
+        self.progress_heading = "等待开始"
+        self.progress_step_labels = []
 
         saved_preferences = self._load_preferences()
         saved_mode = saved_preferences.get("training_mode")
@@ -200,7 +311,10 @@ class NNLCApp:
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.keep_intermediates_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="就绪")
-        self.elapsed_var = tk.StringVar(value="未开始")
+        self.elapsed_var = tk.StringVar(value="耗时 00:00")
+        self.progress_title_var = tk.StringVar(value=format_progress_title(0, PIPELINE_STEP_COUNT, "等待开始"))
+        self.latest_log_var = tk.StringVar(value="等待开始训练")
+        self._latest_log_text = "等待开始训练"
         try:
             self.app_version = get_version()
         except Exception:
@@ -209,6 +323,8 @@ class NNLCApp:
         self._closing = False
         self.updater = GuiUpdateController(self)
         self._build_widgets()
+        self._lock_window_to_content()
+        self.root.after_idle(self._refresh_latest_log_display)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._poll_messages()
         if getattr(sys, "frozen", False) and sys.platform == "win32":
@@ -294,8 +410,18 @@ class NNLCApp:
         self.root.configure(bg=C_PAGE_BG)
         self._build_header()
         self._build_body()
-        self._build_statusbar()
         self._build_log()
+        self._build_statusbar()
+
+    def _lock_window_to_content(self) -> None:
+        """Keep the window at the laid-out size so extra blank height cannot appear."""
+        self.root.update_idletasks()
+        width = max(self.root.winfo_reqwidth(), 1200)
+        height = self.root.winfo_reqheight()
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(width, height)
+        self.root.maxsize(width, height)
+        self.root.resizable(False, False)
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -307,6 +433,15 @@ class NNLCApp:
             except tk.TclError:
                 pass
         style.configure("TCombobox", padding=(8, 2))
+        style.configure(
+            "NNLC.Horizontal.TProgressbar",
+            troughcolor="#e8edf3",
+            background=C_ACCENT,
+            lightcolor=C_ACCENT,
+            darkcolor=C_ACCENT,
+            bordercolor="#e8edf3",
+            thickness=10,
+        )
 
     def _build_header(self) -> None:
         header = tk.Frame(self.root, bg=C_HEADER_BG, height=84)
@@ -409,33 +544,104 @@ class NNLCApp:
         self._toggle_threshold()
 
     def _build_log(self) -> None:
-        card, inner = self._make_card(self.root, "运行日志")
-        card.pack(fill="both", expand=True, padx=PAD_PAGE, pady=(14, 0))
+        card, inner = self._make_card(self.root, "训练进度")
+        card.pack(fill="x", padx=PAD_PAGE, pady=(12, 8))
 
-        actions = tk.Frame(inner, bg=C_CARD_BG)
-        actions.pack(side="bottom", fill="x", pady=(10, 0))
-        tk.Frame(inner, bg=C_BORDER, height=1).pack(side="bottom", fill="x", pady=(12, 0))
-
-        self.open_output_button_box, self.open_output_button = self._make_button(
-            actions, "打开输出目录", self._open_output
-        )
-        self.open_output_button_box.pack(side="left")
-        self.clear_log_button_box, self.clear_log_button = self._make_button(
-            actions, "清空日志", self.clear_log
-        )
-        self.clear_log_button_box.pack(side="left", padx=(8, 0))
-        self.save_log_button_box, self.save_log_button = self._make_button(
-            actions, "保存日志", self.save_log
-        )
-        self.save_log_button_box.pack(side="left", padx=(8, 0))
-
+        header = tk.Frame(inner, bg=C_CARD_BG)
+        header.pack(fill="x")
         tk.Label(
-            actions,
+            header,
+            textvariable=self.progress_title_var,
+            font=F_BOLD,
+            bg=C_CARD_BG,
+            fg=C_TEXT,
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            header,
             textvariable=self.elapsed_var,
             font=F_BASE,
             bg=C_CARD_BG,
             fg=C_MUTED,
-        ).pack(side="left", expand=True)
+            anchor="e",
+        ).pack(side="right")
+
+        self.progress_bar = ttk.Progressbar(
+            inner,
+            orient="horizontal",
+            mode="determinate",
+            maximum=PIPELINE_STEP_COUNT,
+            value=0,
+            style="NNLC.Horizontal.TProgressbar",
+        )
+        self.progress_bar.pack(fill="x", pady=(10, 4))
+
+        steps = tk.Frame(inner, bg=C_CARD_BG)
+        steps.pack(fill="x")
+        self.progress_step_labels = []
+        for index, label in enumerate(PIPELINE_STEP_LABELS):
+            steps.columnconfigure(index, weight=1)
+            step_label = tk.Label(
+                steps,
+                text=label,
+                font=F_SUB,
+                bg=C_CARD_BG,
+                fg=C_MUTED,
+                anchor="center",
+            )
+            step_label.grid(row=0, column=index, sticky="ew")
+            self.progress_step_labels.append(step_label)
+
+        latest_box = tk.Frame(
+            inner,
+            bg="#fbfcfe",
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            highlightcolor=C_BORDER,
+        )
+        latest_box.pack(fill="x", pady=(12, 0))
+        latest_inner = tk.Frame(latest_box, bg="#fbfcfe")
+        latest_inner.pack(fill="x", padx=12, pady=10)
+        tk.Label(
+            latest_inner,
+            text="最新日志",
+            font=F_SUB,
+            bg="#fbfcfe",
+            fg=C_MUTED,
+            anchor="w",
+        ).pack(fill="x")
+        self.latest_log_label = tk.Label(
+            latest_inner,
+            textvariable=self.latest_log_var,
+            font=F_BASE,
+            bg="#fbfcfe",
+            fg=C_TEXT,
+            anchor="w",
+            justify="left",
+            wraplength=0,
+        )
+        self.latest_log_label.pack(fill="x", pady=(4, 0))
+        self._latest_log_text = "等待开始训练"
+
+        tk.Label(
+            inner,
+            text="完整日志写入程序运行目录的 logs/*.log",
+            font=F_SUB,
+            bg=C_CARD_BG,
+            fg=C_MUTED,
+            anchor="w",
+        ).pack(fill="x", pady=(8, 0))
+
+        actions = tk.Frame(inner, bg=C_CARD_BG)
+        actions.pack(fill="x", pady=(14, 0))
+        self.open_output_button_box, self.open_output_button = self._make_button(
+            actions, "打开输出目录", self._open_output
+        )
+        self.open_output_button_box.pack(side="left")
+        self.open_log_button_box, self.open_log_button = self._make_button(
+            actions, "打开日志", self._open_log
+        )
+        self.open_log_button_box.pack(side="left", padx=(8, 0))
 
         self.start_button = tk.Button(
             actions,
@@ -457,39 +663,9 @@ class NNLCApp:
         self.start_button.pack(side="right")
         self._bind_primary_hover(self.start_button)
 
-        log_area = tk.Frame(inner, bg=C_CARD_BG)
-        log_area.pack(fill="both", expand=True)
-        self.log = tk.Text(
-            log_area,
-            wrap="word",
-            state="disabled",
-            height=16,
-            font=F_LOG,
-            bg="#fbfcfe",
-            fg=C_TEXT,
-            insertbackground=C_TEXT,
-            selectbackground="#cfe2f5",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground=C_BORDER,
-            highlightcolor=C_BORDER,
-            padx=8,
-            pady=8,
-        )
-        scroll_y = ttk.Scrollbar(log_area, orient="vertical", command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll_y.set)
-        scroll_y.pack(side="right", fill="y")
-        self.log.pack(side="left", fill="both", expand=True)
-        self.log.tag_configure("info", foreground="#2563a6")
-        self.log.tag_configure("success", foreground="#16803a")
-        self.log.tag_configure("warning", foreground="#a15c00")
-        self.log.tag_configure("error", foreground="#c62828")
-        self.log.tag_configure("heading", foreground="#7a3e9d")
-        self.log.tag_configure("step", foreground="#007c91")
-
     def _build_statusbar(self) -> None:
         bar = tk.Frame(self.root, bg=C_STATUS_BG, height=28)
-        bar.pack(fill="x", side="bottom", pady=(14, 0))
+        bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
         tk.Label(
             bar,
@@ -682,65 +858,133 @@ class NNLCApp:
         if not output_dir.is_dir():
             messagebox.showinfo("输出目录", "输出目录尚未创建，请先完成一次训练。")
             return
-        try:
-            if sys.platform == "win32":
-                os.startfile(output_dir)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(output_dir)])
-            else:
-                subprocess.Popen(["xdg-open", str(output_dir)])
-        except OSError as exc:
-            messagebox.showerror("打开失败", str(exc))
+        self._open_path(output_dir)
 
-    def clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-        self._ansi_log_tag = None
-
-    def save_log(self) -> None:
-        content = self.log.get("1.0", "end-1c")
-        if not content.strip():
-            messagebox.showinfo("保存日志", "当前没有可保存的日志。")
+    def _open_log(self) -> None:
+        if self.current_log_path is not None and self.current_log_path.is_file():
+            self._open_path(self.current_log_path)
             return
-        filename = time.strftime("%Y%m%d_%H%M%S") + "_log.log"
-        path = application_directory() / filename
-        try:
-            path.write_text(content, encoding="utf-8")
-        except OSError as exc:
-            messagebox.showerror("保存失败", str(exc))
+        log_dir = training_log_directory()
+        if log_dir.is_dir():
+            self._open_path(log_dir)
             return
-        messagebox.showinfo("保存日志", f"日志已保存到：\n{path}")
+        messagebox.showinfo("打开日志", "还没有训练日志，请先开始一次训练。")
 
-    def _append_log(self, text: str, tag: str | None = None) -> None:
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        self.log.configure(state="normal")
-        if tag is not None:
-            self.log.insert("end", _ANSI_ESCAPE_RE.sub("", text), tag)
+    def _reset_progress_card(self) -> None:
+        self.progress_current = 0
+        self.progress_total = PIPELINE_STEP_COUNT
+        self.progress_heading = "等待开始"
+        self.progress_title_var.set(format_progress_title(0, PIPELINE_STEP_COUNT, "等待开始"))
+        self._set_latest_log("等待开始训练")
+        self._update_progress_step_labels(0)
+        if getattr(self, "progress_bar", None) is not None:
+            self.progress_bar.configure(maximum=PIPELINE_STEP_COUNT, value=0)
+
+    def _set_progress(self, current: int, total: int, title: str) -> None:
+        self.progress_current = current
+        self.progress_total = total
+        self.progress_heading = title
+        self.progress_title_var.set(format_progress_title(current, total, title))
+        self._update_progress_step_labels(current)
+        if getattr(self, "progress_bar", None) is not None:
+            self.progress_bar.configure(maximum=total, value=current)
+
+    def _update_progress_step_labels(self, current: int) -> None:
+        for index, label in enumerate(getattr(self, "progress_step_labels", ())):
+            label.configure(fg=C_ACCENT if index < current else C_MUTED)
+
+    def _open_training_log(self, car: str) -> None:
+        self._close_training_log()
+        path, self.log_file = create_training_log_file(car)
+        self.current_log_path = path
+        self._log_write_failed = False
+        self._log_line_buffer = ""
+
+    def _write_training_log(self, text: str) -> None:
+        if self.log_file is None or self._log_write_failed:
+            return
+        try:
+            self.log_file.write(text)
+            self.log_file.flush()
+        except OSError as exc:
+            self._log_write_failed = True
+            handle = self.log_file
+            self.log_file = None
+            try:
+                handle.close()
+            except OSError:
+                pass
+            message = (
+                "无法继续保存本次完整训练日志。训练仍会继续，但之后的输出不会写入日志文件。\n\n"
+                f"日志文件：{self.current_log_path}\n原因：{exc}"
+            )
+            self.status_var.set("日志保存失败，训练仍继续")
+            if messagebox is not None:
+                messagebox.showerror("训练日志写入失败", message)
+
+    def _close_training_log(self) -> None:
+        handle = self.log_file
+        self.log_file = None
+        if handle is None:
+            return
+        try:
+            handle.flush()
+        except OSError:
+            pass
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+    def _append_log(self, text: str) -> None:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        self._write_training_log(normalized)
+        self._log_line_buffer += normalized
+        if "\n" not in self._log_line_buffer:
+            return
+        *complete, self._log_line_buffer = self._log_line_buffer.split("\n")
+        chunk = "\n".join(complete)
+        step = parse_pipeline_step(chunk)
+        if step is not None:
+            current, total, title = step
+            self._set_progress(current, total, title)
+        latest = latest_visible_log_line(chunk)
+        if latest:
+            self._set_latest_log(latest)
+
+    def _append_event(self, text: str) -> None:
+        self._append_log(f"[{time.strftime('%H:%M:%S')}] {text}\n")
+
+    def _append_training_error(self, exc: BaseException, traceback_text: str) -> None:
+        summary = f"训练失败：{exc}"
+        details = traceback_text.rstrip()
+        if details:
+            self._append_log(f"{summary}\n完整异常堆栈：\n{details}\n")
         else:
-            current_tag = self._ansi_log_tag
-            position = 0
-            for match in _ANSI_ESCAPE_RE.finditer(text):
-                if match.start() > position:
-                    self.log.insert("end", text[position:match.start()], current_tag)
-                sequence = match.group()
-                if sequence.endswith("m"):
-                    parameters = sequence[2:-1]
-                    codes = [int(value) if value.isdecimal() else 0 for value in parameters.split(";")]
-                    for code in codes:
-                        if code in (0, 39):
-                            current_tag = None
-                        elif code in _ANSI_COLOR_TAGS:
-                            current_tag = _ANSI_COLOR_TAGS[code]
-                position = match.end()
-            if position < len(text):
-                self.log.insert("end", text[position:], current_tag)
-            self._ansi_log_tag = current_tag
-        self.log.see("end")
-        self.log.configure(state="disabled")
+            self._append_log(f"{summary}\n")
 
-    def _append_event(self, text: str, tag: str) -> None:
-        self._append_log(f"[{time.strftime('%H:%M:%S')}] {text}\n", tag)
+    def _set_latest_log(self, text: str) -> None:
+        self._latest_log_text = text
+        self._refresh_latest_log_display()
+
+    def _refresh_latest_log_display(self) -> None:
+        text = getattr(self, "_latest_log_text", "")
+        label = getattr(self, "latest_log_label", None)
+        if label is None or tkfont is None:
+            self.latest_log_var.set(text)
+            return
+        container = label.master
+        container.update_idletasks()
+        max_width = container.winfo_width()
+        if max_width <= 1:
+            self.latest_log_var.set(text)
+            return
+        try:
+            font = tkfont.Font(font=label.cget("font"))
+        except tk.TclError:
+            self.latest_log_var.set(text)
+            return
+        self.latest_log_var.set(ellipsize_to_width(text, font, max_width))
 
     def _set_running(self, running: bool) -> None:
         busy = running or self.updater.in_progress
@@ -765,12 +1009,12 @@ class NNLCApp:
         self._style_secondary_button(
             self.open_output_button_box,
             self.open_output_button,
-            enabled=not busy,
+            enabled=True,
         )
         self._style_secondary_button(
-            self.clear_log_button_box,
-            self.clear_log_button,
-            enabled=not busy,
+            self.open_log_button_box,
+            self.open_log_button,
+            enabled=True,
         )
         if not busy:
             # Comboboxes are intentionally readonly; restoring every widget
@@ -791,6 +1035,13 @@ class NNLCApp:
         self.root.after(1000, self._update_elapsed)
 
     def _finish_running(self, status: str) -> None:
+        leftover = self._log_line_buffer.strip()
+        if leftover:
+            latest = latest_visible_log_line(leftover)
+            if latest:
+                self._set_latest_log(latest)
+            self._log_line_buffer = ""
+        self._close_training_log()
         self._set_running(False)
         self.status_var.set(status)
         self.updater.on_training_finished()
@@ -811,6 +1062,7 @@ class NNLCApp:
             process = self.process_holder.get("process")
             if process is not None and process.poll() is None:
                 _terminate_process_tree(process)
+        self._close_training_log()
         self._closing = True
         self.updater.cancel_and_join_on_close()
         self.root.destroy()
@@ -848,20 +1100,24 @@ class NNLCApp:
                 messagebox.showerror("参数错误", "路线阈值必须在 0-100 之间。")
                 return
 
-        self.clear_log()
-        self._append_event("训练任务已启动", "info")
+        training_mode = self.training_mode_var.get().strip()
+        batch_size = TRAINING_MODES.get(training_mode)
+        if batch_size is None:
+            messagebox.showerror("参数错误", "请选择有效的训练模式。")
+            return
+        try:
+            self._open_training_log(car)
+        except OSError as exc:
+            messagebox.showerror("保存失败", f"无法创建训练日志：\n{exc}")
+            return
+        self._reset_progress_card()
+        self._append_event("训练任务已启动")
         self._set_running(True)
         self.status_var.set("训练中，请保持窗口打开...")
         self.elapsed_var.set("耗时 00:00")
         self.started_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.process_holder = {}
-        training_mode = self.training_mode_var.get().strip()
-        batch_size = TRAINING_MODES.get(training_mode)
-        if batch_size is None:
-            messagebox.showerror("参数错误", "请选择有效的训练模式。")
-            self._set_running(False)
-            return
         skip_visualize = not self.skip_viz_var.get()
         self.worker = threading.Thread(
             target=self._run_worker,
@@ -907,7 +1163,7 @@ class NNLCApp:
                 )
             self.messages.put(("done", model_path))
         except BaseException as exc:
-            self.messages.put(("error", exc))
+            self.messages.put(("error", (exc, traceback.format_exc())))
 
     def _poll_messages(self) -> None:
         try:
@@ -916,13 +1172,17 @@ class NNLCApp:
                 if kind == "log":
                     self._append_log(payload)
                 elif kind == "done":
+                    self._append_event("训练完成")
                     self._finish_running("训练完成")
-                    self._append_event("训练完成", "success")
                     messagebox.showinfo("训练完成", f"模型已输出到：\n{payload}")
                 elif kind == "error":
+                    if isinstance(payload, tuple) and len(payload) == 2:
+                        exc, traceback_text = payload
+                    else:
+                        exc, traceback_text = payload, ""
+                    self._append_training_error(exc, traceback_text)
                     self._finish_running("训练失败")
-                    self._append_event(f"训练失败：{payload}", "error")
-                    messagebox.showerror("训练失败", str(payload))
+                    messagebox.showerror("训练失败", str(exc))
                 elif self.updater.handle_message(kind, payload):
                     pass
         except queue.Empty:

@@ -16,3 +16,4 @@ julia-runtime/
 julia-depot/
 NNLC_Runtime/
 release/
+logs/
