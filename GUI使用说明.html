@@ -378,7 +378,7 @@
 
     .gui-param-row {
       display: grid;
-      grid-template-columns: 72px minmax(100px, 1fr) 72px minmax(100px, 1fr);
+      grid-template-columns: 88px minmax(100px, 1fr) 72px minmax(100px, 1fr);
       gap: 8px;
       align-items: center;
       min-height: 34px;
@@ -731,7 +731,7 @@
               <div class="gui-group">
                 <span class="gui-group-title">目录设置</span>
                 <div class="gui-row">
-                  <span class="gui-label">reallog 目录 <span class="marker">1</span></span>
+                  <span class="gui-label">日志目录 <span class="marker">1</span></span>
                   <span class="gui-input">D:\reallog</span>
                   <span class="gui-button">···</span>
                 </div>
@@ -744,7 +744,7 @@
               <div class="gui-group">
                 <span class="gui-group-title">训练参数</span>
                 <div class="gui-param-row">
-                  <span class="gui-label">车型 <span class="marker">3</span></span>
+                  <span class="gui-label">目标车型 <span class="marker">3</span></span>
                   <span class="gui-input">BYD_TANG_DMI_24</span>
                   <span class="gui-label">训练模式 <span class="marker">4</span></span>
                   <span class="gui-select">CPU 标准模式　⌄</span>
@@ -793,13 +793,13 @@
               <tr><th>编号与字段</th><th>作用与填写方法</th><th>默认行为</th><th>是否记忆</th></tr>
             </thead>
             <tbody>
-              <tr><td><strong>1. reallog 目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>首次空白，以后回填上次路径。开始训练时目录必须存在。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>1. 日志目录</strong></td><td>选择包含 rlog 的上层目录。程序递归查找 <code>rlog</code>、<code>rlog.zst</code>、<code>rlog.bz2</code>。</td><td>首次空白，以后回填上次路径。开始训练时目录必须存在。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击输入框右侧的 <code>···</code> 浏览按钮。</td><td>首次优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。以后回填上次路径。</td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>3. 车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>3. 目标车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>4. 训练模式</strong></td><td>在 CPU 标准模式和 CPU 流式低内存模式之间选择。选择方法见下一节。</td><td>首次为 CPU 标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>5. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
               <tr><td><strong>自动推荐</strong></td><td>控制路线阈值是否由程序自动选择。取消勾选后，路线阈值输入框才可编辑。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、车型、阈值和模式，再启动后台训练。训练期间参数会被锁定，开始训练按钮不可点。</td><td>点击后重置进度卡，并立刻创建本次日志文件。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、目标车型、阈值和模式，再启动后台训练。训练期间参数会被锁定，开始训练按钮不可点。</td><td>点击后重置进度卡，并立刻创建本次日志文件。</td><td><span class="badge no">不适用</span></td></tr>
               <tr><td><strong>7. 打开输出目录</strong></td><td>在文件管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
               <tr><td><strong>8. 训练进度</strong></td><td>显示固定 7 步进度：提取、评分、修剪、覆盖度、训练、验证、部署。标题形如 <code>5 / 7  训练 车型 模型</code>。未开始时为 <code>0 / 7  等待开始</code>。</td><td>总进度只按流水线步骤前进，不使用 Julia 的 epoch 数字。</td><td><span class="badge no">不适用</span></td></tr>
               <tr><td><strong>9. 最新日志</strong></td><td>只显示当前最新一行，并按标签实际宽度铺满；超出部分用省略号截断。完整内容写入程序运行目录 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同一秒同车型再次启动时会追加 <code>_2</code>、<code>_3</code> 等编号。</td><td>每次训练独立创建文件，从点击开始训练起增量写入；取消、失败或关窗也保留已写内容。</td><td><span class="badge no">写入运行目录</span></td></tr>
@@ -847,7 +847,7 @@
         <ol class="steps">
           <li><strong>确认输入目录</strong>目录必须存在，并且内部至少包含一个受支持的 rlog 文件。</li>
           <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
-          <li><strong>检查车型与阈值</strong>车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
+          <li><strong>检查目标车型与阈值</strong>目标车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
           <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。rlog 提取默认自动使用多个 worker 并行解析。</li>
           <li><strong>点击开始训练</strong>进度卡先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。同时在程序运行目录创建独立日志 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同秒冲突时自动追加编号。</li>
           <li><strong>观察进度</strong>进度条按 7 个流水线步骤前进，卡片只显示最新一行日志；耗时会持续更新，但不代表 Julia epoch 百分比。完整日志请点“打开日志”。</li>
@@ -939,19 +939,19 @@
         <pre><code>%APPDATA%\NNLC\settings.json</code></pre>
         <p>保存内容包括：</p>
         <ul>
-          <li>上次选择的 reallog 目录</li>
+          <li>上次选择的日志目录</li>
           <li>上次选择的输出目录</li>
-          <li>上次填写的车型</li>
+          <li>上次填写的目标车型</li>
           <li>上次选择的训练模式</li>
         </ul>
-        <p>手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。已保存的目录下次会回填，即使当前不存在；开始训练时仍会检查 reallog 目录是否有效。</p>
+        <p>手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。已保存的目录下次会回填，即使当前不存在；开始训练时仍会检查日志目录是否有效。</p>
         <div class="callout"><strong>恢复默认偏好：</strong>先退出 GUI，再删除 <code>%APPDATA%\NNLC\settings.json</code>。下次启动时会重新创建。</div>
       </section>
 
       <section id="errors">
         <h2>11. 常见问题与排查顺序</h2>
         <details open>
-          <summary>提示“请选择有效的 reallog 目录”</summary>
+          <summary>提示“请选择有效的日志目录”</summary>
           <div><p>当前填写的路径为空、目录不存在，或移动了原目录。重新点击输入框右侧的 <code>···</code> 浏览按钮选择实际存在的目录。路径使用 <code>\</code> 或 <code>/</code> 不影响程序，GUI 会按 Windows 规则统一显示。</p></div>
         </details>
         <details>

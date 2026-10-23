@@ -476,7 +476,7 @@ class NNLCApp:
         dir_inner.columnconfigure(1, weight=1)
 
         data_picker = PathPicker(dir_inner, self.data_var, self._choose_data)
-        self._form_row(dir_inner, 0, "reallog 目录", data_picker)
+        self._form_row(dir_inner, 0, "日志目录", data_picker)
         output_picker = PathPicker(dir_inner, self.output_var, self._choose_output)
         self._form_row(dir_inner, 1, "输出目录", output_picker)
         self.path_pickers = [data_picker, output_picker]
@@ -488,7 +488,7 @@ class NNLCApp:
         param_inner.columnconfigure(0, minsize=LABEL_W)
         param_inner.columnconfigure(1, weight=1)
 
-        tk.Label(param_inner, text="车型", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+        tk.Label(param_inner, text="目标车型", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
             row=0, column=0, sticky="e", pady=PAD_ROW
         )
         self.car_box = self._fixed_box(param_inner)
@@ -842,7 +842,7 @@ class NNLCApp:
         self._save_preferences()
 
     def _choose_data(self) -> None:
-        path = filedialog.askdirectory(title="选择包含 reallog/rlog 的目录")
+        path = filedialog.askdirectory(title="选择日志目录")
         if path:
             self.data_var.set(self._normalize_path(path))
             self._save_preferences()
@@ -1079,13 +1079,13 @@ class NNLCApp:
         self.output_var.set(output_dir)
         car = self.car_var.get().strip()
         if not data_dir or not os.path.isdir(data_dir):
-            messagebox.showerror("参数错误", "请选择有效的 reallog 目录。")
+            messagebox.showerror("参数错误", "请选择有效的日志目录。")
             return
         if not output_dir:
             messagebox.showerror("参数错误", "请选择输出目录。")
             return
         if not car:
-            messagebox.showerror("参数错误", "车型不能为空。")
+            messagebox.showerror("参数错误", "目标车型不能为空。")
             return
         self._save_preferences()
 
