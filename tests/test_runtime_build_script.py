@@ -60,9 +60,20 @@ def test_julia_training_emits_epoch_progress():
     assert 'println(out_streams, "Training progress: 0/$epoch_max")' in contents
     assert 'println(out_streams, "Training progress: $epoch/$epoch_max")' in contents
     assert "flush(out_streams)" in contents
+    loading_deps = contents.find('nnlc_announce_stage(stdout, "loading_deps"')
+    using_csv = contents.find("\nusing CSV\n")
+    deps_ready = contents.find('nnlc_announce_stage(stdout, "deps_ready"')
+    loading_data = contents.find('nnlc_announce_stage(out_streams, "loading_data"')
+    csv_read = contents.find("CSV.read(infile, DataFrame)")
+    compiling = contents.find('nnlc_announce_stage(out_streams, "compiling_train"')
+    train_loop = contents.find("while epoch < epoch_min || (epoch < epoch_max)")
+    assert 0 <= loading_deps < using_csv
+    assert using_csv < deps_ready
+    assert 0 <= loading_data < csv_read
+    assert 0 <= compiling < train_loop
 
 
-def test_forward_process_output_emits_compiling_hint(monkeypatch):
+def test_forward_process_output_emits_startup_hint(monkeypatch):
     import threading
     import nnlc_auto_train
 
@@ -105,7 +116,7 @@ def test_forward_process_output_emits_compiling_hint(monkeypatch):
     monkeypatch.setattr(nnlc_auto_train.threading, "Thread", fake_thread)
     assert nnlc_auto_train._forward_process_output(
         process,
-        idle_message="Julia 正在编译依赖，请继续等待",
+        idle_message=nnlc_auto_train._julia_idle_message(nnlc_auto_train.JULIA_STAGE_STARTING),
         idle_timeout=30,
     ) == 0
-    assert messages[0] == "Julia 正在编译依赖，请继续等待"
+    assert messages[0] == nnlc_auto_train._julia_idle_message(nnlc_auto_train.JULIA_STAGE_STARTING)

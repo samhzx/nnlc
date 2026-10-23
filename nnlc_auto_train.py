@@ -722,13 +722,71 @@ def step_visualize(input_csv, output_dir, python_exe, streaming=False,
     return output_png
 
 
+JULIA_STAGE_STARTING = "starting"
+JULIA_STAGE_LOADING_DEPS = "loading_deps"
+JULIA_STAGE_DEPS_READY = "deps_ready"
+JULIA_STAGE_LOADING_DATA = "loading_data"
+JULIA_STAGE_COMPILING_TRAIN = "compiling_train"
+JULIA_STAGE_TRAINING = "training"
+
+JULIA_STAGE_IDLE_MESSAGES = {
+    JULIA_STAGE_STARTING: "Julia 正在启动，请继续等待",
+    JULIA_STAGE_LOADING_DEPS: "正在加载已缓存的 Julia 依赖；该环境第一次训练才会编译并写入缓存",
+    JULIA_STAGE_DEPS_READY: "依赖已加载，正在准备训练，请继续等待",
+    JULIA_STAGE_LOADING_DATA: "正在读取训练数据，请继续等待",
+    JULIA_STAGE_COMPILING_TRAIN: "正在编译训练代码（自动微分，仅本次进程），请继续等待",
+    JULIA_STAGE_TRAINING: "训练进行中，请继续等待",
+}
+
+_JULIA_STAGE_LINE_RE = re.compile(
+    r"\[NNLC_STAGE:(?P<stage>[a-z_]+)\]\s*(?P<message>.*)$"
+)
+_JULIA_STAGE_FALLBACKS = (
+    ("正在加载 Julia 依赖", JULIA_STAGE_LOADING_DEPS),
+    ("Julia 依赖加载完成", JULIA_STAGE_DEPS_READY),
+    ("正在读取训练数据", JULIA_STAGE_LOADING_DATA),
+    ("Loading data...", JULIA_STAGE_LOADING_DATA),
+    ("使用两遍扫描的流式低内存预处理", JULIA_STAGE_LOADING_DATA),
+    ("Streaming pass", JULIA_STAGE_LOADING_DATA),
+    ("正在编译训练代码", JULIA_STAGE_COMPILING_TRAIN),
+    ("训练代码已编译", JULIA_STAGE_TRAINING),
+    ("Training progress: 0/", JULIA_STAGE_COMPILING_TRAIN),
+    ("Training progress:", JULIA_STAGE_TRAINING),
+    ("CPU mode enabled", JULIA_STAGE_DEPS_READY),
+)
+
+
+def _julia_idle_message(stage=None):
+    """Return the GUI heartbeat text for a Julia trainer stage."""
+    if not stage:
+        return JULIA_STAGE_IDLE_MESSAGES[JULIA_STAGE_STARTING]
+    return JULIA_STAGE_IDLE_MESSAGES.get(
+        stage, JULIA_STAGE_IDLE_MESSAGES[JULIA_STAGE_STARTING]
+    )
+
+
+def _parse_julia_log_line(raw_line):
+    """Split a Julia log line into display text and an optional stage name."""
+    line = raw_line.rstrip("\n\r")
+    match = _JULIA_STAGE_LINE_RE.search(line.strip())
+    if match:
+        stage = match.group("stage")
+        message = match.group("message").strip()
+        return (message or line.strip(), stage)
+    stripped = line.strip()
+    for needle, stage in _JULIA_STAGE_FALLBACKS:
+        if needle in stripped:
+            return line, stage
+    return line, None
+
+
 def _forward_process_output(process, cancel_event=None, idle_message=None,
                             idle_timeout=30):
     """Forward child output line-by-line and emit a heartbeat while it is silent.
 
-    Julia's first run can compile for several minutes before printing anything.
-    A blocking ``for line in stdout`` loop would leave the GUI log blank during
-    that time, so idle periods get an explicit compiling hint instead.
+    Julia can stay quiet during startup, cached-dependency loading, CSV reads,
+    or first-epoch compilation. Heartbeats follow the latest known stage
+    instead of always saying packages are being compiled.
     """
     if idle_timeout <= 0:
         raise ValueError("idle_timeout must be positive")
@@ -748,8 +806,9 @@ def _forward_process_output(process, cancel_event=None, idle_message=None,
     started_at = time.time()
     last_output_at = started_at
     last_heartbeat_at = started_at
-    if idle_message:
-        print_info(idle_message)
+    current_idle_message = idle_message
+    if current_idle_message:
+        print_info(current_idle_message)
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set() and process.poll() is None:
@@ -761,17 +820,22 @@ def _forward_process_output(process, cancel_event=None, idle_message=None,
                     break
                 now = time.time()
                 if (
-                    idle_message
+                    current_idle_message
                     and process.poll() is None
                     and (now - last_output_at) >= idle_timeout
                     and (now - last_heartbeat_at) >= idle_timeout
                 ):
-                    print_info(f"{idle_message}（已等待 {int(now - started_at)} 秒）")
+                    print_info(
+                        f"{current_idle_message}（已等待 {int(now - started_at)} 秒）"
+                    )
                     last_heartbeat_at = now
                 continue
+            display_line, stage = _parse_julia_log_line(line)
+            if idle_message and stage:
+                current_idle_message = _julia_idle_message(stage)
             last_output_at = time.time()
             last_heartbeat_at = last_output_at
-            _emit("    " + line.rstrip())
+            _emit("    " + display_line.rstrip())
         return process.wait()
     finally:
         reader_done.wait(timeout=1)
@@ -833,8 +897,9 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     mode_label = "CPU 流式低内存模式" if streaming else "CPU 模式"
     print_info(f"Julia 训练中（{mode_label}，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
-    print_warn("Julia 首次运行需编译依赖（约 3-10 分钟无输出属正常），请耐心等待")
-    print_info("若暂时没有新日志，训练器会定期提示正在编译")
+    print_info("首次在该 Julia 环境训练时会编译依赖并缓存；之后会加载缓存，不必每次重新编译依赖")
+    print_info("每次训练仍会加载依赖、读取数据，并在本次进程中编译训练代码")
+    print_info("若暂时没有新日志，训练器会按当前阶段定期提示，请继续等待")
     print_info("训练日志会实时显示在下方:\n" + "-" * 60)
 
     start_time = time.time()
@@ -873,7 +938,7 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
             _forward_process_output(
                 process,
                 cancel_event=cancel_event,
-                idle_message="Julia 正在编译依赖，请继续等待",
+                idle_message=_julia_idle_message(JULIA_STAGE_STARTING),
             ),
         )
     finally:

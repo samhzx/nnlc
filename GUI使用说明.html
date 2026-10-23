@@ -816,7 +816,7 @@
           <li><strong>观察日志</strong>运行日志会实时追加步骤、警告和 Julia 输出；耗时显示会持续更新，但不代表准确百分比。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
         </ol>
-        <div class="callout warning"><strong>首次 Julia 训练可能 3 至 10 分钟没有新输出。</strong>这是 Julia 编译依赖的正常现象。启动 Julia 后，运行日志会先提示“Julia 正在编译依赖，请继续等待”；若仍无输出，会大约每 30 秒重复一次。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。编译结束后，运行日志会每轮追加 <code>Training progress: epoch/epoch_max</code>。Windows GUI 启动 Julia 时不再弹出黑色控制台，进度只显示在本窗口日志中。</div>
+        <div class="callout warning"><strong>Julia 训练前半段可能暂时没有新输出。</strong>这不一定是在重新编译依赖。运行日志会先提示“Julia 正在启动”，随后区分“加载已缓存依赖”“读取训练数据”和“编译训练代码（仅本次进程）”。该环境第一次训练才会编译依赖并写入缓存，可能需要几分钟；之后同一 <code>NNLC_Runtime</code> 会加载缓存，不必每次重编依赖。若暂时没有新输出，日志大约每 30 秒按当前阶段重复提示。只要程序未弹出失败、系统仍有 CPU 或磁盘活动，就先继续等待。进入训练循环后，运行日志会每轮追加 <code>Training progress: epoch/epoch_max</code>。Windows GUI 启动 Julia 时不再弹出黑色控制台，进度只显示在本窗口日志中。</div>
         <div class="callout"><strong>rlog 并行提示：</strong>命令行默认自动选择并行度，`--rlog-workers 1` 可恢复串行模式。SSD 通常适合更高并行度，机械硬盘或低内存设备应降低 worker 数。超线程可能提升吞吐，但收益取决于解压、磁盘和物理核心数，建议通过实际基准测试选择。</div>
         <div class="callout danger"><strong>不要直接强制关闭。</strong>训练中点击窗口关闭按钮会询问是否中断。确认退出后，GUI 会结束当前 Python/Julia 子进程树；未完成的模型不会部署。</div>
         <h3>日志颜色含义</h3>
@@ -936,7 +936,7 @@
         </details>
         <details>
           <summary>长时间停在 Julia 训练开始位置</summary>
-          <div><p>首次运行会编译 Julia 依赖，约 3 至 10 分钟无输出可能正常。查看任务管理器中的 CPU、磁盘活动和可用内存。若最终出现非零退出码，保留从“命令:”开始到错误末尾的完整日志。</p></div>
+          <div><p>先看最新一条阶段提示：启动、加载已缓存依赖、读取数据，或编译本次训练代码。该电脑上的第一次训练才需要编译依赖并写入缓存，可能要几分钟；之后同一环境主要是加载缓存、读 CSV，以及在本次进程中编译训练代码。查看任务管理器中的 CPU、磁盘活动和可用内存。若最终出现非零退出码，保留从“命令:”开始到错误末尾的完整日志。</p></div>
         </details>
         <details>
           <summary>路线剪枝后没有剩余数据</summary>

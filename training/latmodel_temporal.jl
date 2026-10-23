@@ -33,6 +33,13 @@
 #     Pkg.add(package)
 # end
 
+function nnlc_announce_stage(io, stage::AbstractString, message::AbstractString)
+  println(io, "[NNLC_STAGE:", stage, "] ", message)
+  flush(io)
+end
+
+nnlc_announce_stage(stdout, "loading_deps", "正在加载 Julia 依赖（已缓存则直接加载，首次才会编译）")
+
 # Import packages
 using CSV
 using DataFrames
@@ -65,6 +72,8 @@ using ArgParse
 using Optim
 
 using TeeStreams
+
+nnlc_announce_stage(stdout, "deps_ready", "Julia 依赖加载完成")
 
 # Custom AdaGrad optimizer that uses Float32 literals
 struct CustomAdaGrad <: Optimisers.AbstractRule
@@ -147,9 +156,11 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
 
     println(out_streams, "Using existing data")
   end
+  nnlc_announce_stage(out_streams, "loading_data", "正在读取训练数据")
+  println(out_streams, "Loading data...")
+  flush(out_streams)
   data = CSV.read(infile, DataFrame)
   if !use_existing_data
-    println(out_streams, "Loading data...")
     # Remove rows with missing data
     data = data[completecases(data), :]
 
@@ -541,6 +552,7 @@ function stream_rows_to_dataframe(rows::Vector{Vector{Float32}})::DataFrame
 end
 
 function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, DataFrame}
+  nnlc_announce_stage(out_streams, "loading_data", "正在读取训练数据")
   route_counts = Dict{String, Int}()
   valid_rows = 0
   previous_timestamp = nothing
@@ -1132,6 +1144,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     early_stop_start_epoch = epoch_min
     constraint_phase_started = false
 
+    nnlc_announce_stage(out_streams, "compiling_train", "正在编译训练代码（自动微分，仅本次进程）")
     while epoch < epoch_min || (epoch < epoch_max)
         # Constraint weights stay at 0 until after epoch_min, then ramp in.
         λ = λmax * min(1f0, max(0f0, Float32(epoch) - λ_start_epoch) / λ_ramp_epochs)
@@ -1197,6 +1210,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
         t = now()
         println(out_streams, "Training progress: $epoch/$epoch_max")
         flush(out_streams)
+        if epoch == 1
+          nnlc_announce_stage(out_streams, "training", "训练代码已编译，进入训练循环")
+        end
         if (t - last_log_time) > Dates.Millisecond(10000) || epoch % logstep == 0 || epoch >= epoch_max
             loss_cur = l
             if isfinite(loss_last)
