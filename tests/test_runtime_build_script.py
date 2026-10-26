@@ -32,6 +32,28 @@ def test_windows_bundle_excludes_scipy():
         assert name in excludes
 
 
+def test_windows_bundle_declares_shared_input_profile_module():
+    spec_path = BUILD_SCRIPT.parent / "nnlc_windows.spec"
+    tree = ast.parse(spec_path.read_text(encoding="utf-8"))
+    hiddenimports = next(
+        node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "hiddenimports"
+            for target in node.targets
+        )
+    )
+    assert "nnlc_tools.model_inputs" in ast.literal_eval(hiddenimports)
+
+
+def test_julia_runtime_workflow_runs_18d_and_23d_preprocessing_smoke_tests():
+    workflow = BUILD_SCRIPT.parent / ".github" / "workflows" / "build-windows-runtime.yml"
+    contents = workflow.read_text(encoding="utf-8")
+
+    assert "tests\\julia\\test_model_input_profiles.jl" in contents
+
+
 def test_windows_build_uses_clean_packaging_venv():
     script = Path(__file__).resolve().parents[1] / "build_windows.ps1"
     contents = script.read_text(encoding="utf-8")

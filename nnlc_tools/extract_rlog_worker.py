@@ -93,6 +93,7 @@ def _process_request(request):
             temporal=bool(request.get("temporal", False)),
             filter_overrides=bool(request.get("filter_overrides", False)),
             route_id=request.get("route_id", "unknown"),
+            input_dim=int(request.get("input_dim", 18)),
         )
         extract_segment(
             rlog_path,

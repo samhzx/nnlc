@@ -113,6 +113,7 @@ hiddenimports = [
     "nnlc_update_ui",
     "nnlc_version",
     "nnlc_tools",
+    "nnlc_tools.model_inputs",
     "nnlc_tools.logreader",
     "nnlc_tools.extract_lateral_data",
     "nnlc_tools.extract_rlog_worker",

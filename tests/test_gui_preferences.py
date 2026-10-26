@@ -26,6 +26,7 @@ def test_load_preferences_reads_directory_paths(tmp_path, monkeypatch):
         json.dumps({
             "car": " BYD_TANG_DMI_24 ",
             "training_mode": "流式模式",
+            "input_dim": 23,
             "data_dir": str(tmp_path / "rlogs"),
             "output_dir": str(tmp_path / "out"),
         }),
@@ -36,6 +37,7 @@ def test_load_preferences_reads_directory_paths(tmp_path, monkeypatch):
     preferences = NNLCApp._load_preferences()
 
     assert preferences["car"] == "BYD_TANG_DMI_24"
+    assert preferences["input_dim"] == 23
     assert preferences["data_dir"] == os.path.normpath(str(tmp_path / "rlogs"))
     assert preferences["output_dir"] == os.path.normpath(str(tmp_path / "out"))
 
@@ -54,12 +56,25 @@ def test_load_preferences_ignores_non_string_directories(tmp_path, monkeypatch):
     assert preferences["output_dir"] == ""
 
 
+def test_legacy_preferences_without_input_dim_default_to_18(tmp_path, monkeypatch):
+    from nnlc_gui import DEFAULT_INPUT_DIM, normalize_input_dim
+
+    settings = tmp_path / "legacy-settings.json"
+    settings.write_text(json.dumps({"training_mode": "标准模式"}), encoding="utf-8")
+    monkeypatch.setattr(NNLCApp, "_preferences_path", staticmethod(lambda: settings))
+
+    preferences = NNLCApp._load_preferences()
+
+    assert normalize_input_dim(preferences.get("input_dim", DEFAULT_INPUT_DIM)) == 18
+
+
 def test_save_preferences_writes_directory_paths(tmp_path, monkeypatch):
     settings = tmp_path / "NNLC" / "settings.json"
     monkeypatch.setattr(NNLCApp, "_preferences_path", staticmethod(lambda: settings))
     app = NNLCApp.__new__(NNLCApp)
     app.car_var = _Var(" BYD_TANG_DMI_24 ")
     app.training_mode_var = _Var("流式模式")
+    app.input_dim_var = _Var("23 维")
     app.data_var = _Var(str(tmp_path / "rlogs"))
     app.output_var = _Var(str(tmp_path / "out"))
     app.keep_intermediates_var = _Var(True)
@@ -69,16 +84,42 @@ def test_save_preferences_writes_directory_paths(tmp_path, monkeypatch):
     saved = json.loads(settings.read_text(encoding="utf-8"))
     assert saved["car"] == "BYD_TANG_DMI_24"
     assert saved["training_mode"] == "流式模式"
+    assert saved["input_dim"] == 23
     assert saved["data_dir"] == os.path.normpath(str(tmp_path / "rlogs"))
     assert saved["output_dir"] == os.path.normpath(str(tmp_path / "out"))
     assert saved["keep_intermediates"] is True
 
 
 def test_legacy_training_modes_map_to_current_labels():
-    from nnlc_gui import LEGACY_TRAINING_MODES, TRAINING_MODES
+    from nnlc_gui import (
+        INPUT_DIM_OPTIONS,
+        LEGACY_TRAINING_MODES,
+        TRAINING_MODES,
+        normalize_input_dim,
+    )
 
     assert TRAINING_MODES == {"标准模式": 16384, "流式模式": 4096}
     assert LEGACY_TRAINING_MODES["CPU 标准模式"] == "标准模式"
     assert LEGACY_TRAINING_MODES["CPU 流式低内存模式"] == "流式模式"
     assert LEGACY_TRAINING_MODES["低内存模式"] == "流式模式"
     assert LEGACY_TRAINING_MODES["CPU 低内存模式"] == "流式模式"
+    assert INPUT_DIM_OPTIONS == {"18 维": 18, "23 维": 23}
+    assert normalize_input_dim(None) == 18
+    assert normalize_input_dim(23) == 23
+    assert normalize_input_dim(True) == 18
+
+
+def test_training_mode_and_input_dimension_callbacks_are_independent(monkeypatch):
+    app = NNLCApp.__new__(NNLCApp)
+    app.training_mode_var = _Var("标准模式")
+    app.input_dim_var = _Var("18 维")
+    monkeypatch.setattr(app, "_update_streaming_options", lambda: None)
+    monkeypatch.setattr(app, "_save_preferences", lambda: None)
+
+    app.training_mode_var._value = "流式模式"
+    app._on_training_mode_changed()
+    assert app.input_dim_var.get() == "18 维"
+
+    app.input_dim_var._value = "23 维"
+    app._on_input_dim_changed()
+    assert app.training_mode_var.get() == "流式模式"

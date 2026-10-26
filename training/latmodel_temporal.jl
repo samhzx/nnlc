@@ -93,7 +93,7 @@ end
 Optimisers.init(o::CustomAdaGrad, x::AbstractArray) = fill!(similar(x, Float32), 0f0)
 
 # Define constants
-const t_list = [-0.3f0 -0.2f0 -0.1f0 0.3f0 0.6f0 1f0 1.5f0]
+include(joinpath(@__DIR__, "model_input_profiles.jl"))
 const non_model_columns = Set([
   :torque_output,
   :combined_column,
@@ -104,7 +104,9 @@ const non_model_columns = Set([
   :route_id,
   :timestamp,
 ])
-const temporal_split_gap_rows = 180
+temporal_split_gap_rows(input_dim::Int) = Int(round(
+  (maximum(model_temporal_offsets(input_dim)) - minimum(model_temporal_offsets(input_dim))) * 100,
+))
 const max_test_rows = 100_000
 const training_random_seed = 20260907
 
@@ -149,7 +151,8 @@ function parse_bool_value(value)
   return normalized in ("true", "1", "yes", "on", "t", "y")
 end
 
-function load_data(infile::String, use_existing_data::Bool, outdir::String, out_streams)::DataFrame
+function load_data(infile::String, use_existing_data::Bool, outdir::String,
+                   out_streams, input_dim::Int)::DataFrame
   # Load the data into a DataFrame
   if use_existing_data
     infile = replace(infile, ".csv" => "_balanced.csv")
@@ -177,19 +180,13 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
       data = filter(row -> row.standstill == false, data)
       println(out_streams, f"Filtered out {old_nrows - nrow(data)} standstill rows")
     end
-    # Select only columns needed for training (extractor outputs many extra columns)
-    # Model inputs: v_ego, desired_lateral_accel, friction_input, roll, temporal lat accels, temporal rolls
-    # Target: torque_output
-    # friction_input 由 extract_lateral_data.py 精确计算，与 nnlc.py 运行时 update_friction_input 逻辑一致
-    temporal_lat_accel_cols = filter(c -> occursin(r"^desired_lateral_accel_t[mp]\d+$", c), names(data))
-    temporal_roll_cols = filter(c -> occursin(r"^roll_t[mp]\d+$", c), names(data))
+    # Select and order exactly the feature profile used by the inference runtime.
+    model_features = ordered_model_features(names(data), input_dim)
     metadata_cols = filter(c -> c in names(data), ["route_id", "timestamp"])
-    keep_cols = vcat(["v_ego", "desired_lateral_accel", "friction_input", "roll", "torque_output"], temporal_lat_accel_cols, temporal_roll_cols, metadata_cols)
+    keep_cols = vcat(model_features, ["torque_output"], metadata_cols)
     select!(data, Symbol.(keep_cols))
 
-    # 重排列顺序：与 nnlc.py 运行时 feedforward (nn_input) 输入完全一致
-    # 列顺序：v_ego, desired_lateral_accel, friction_input, roll, torque_output,
-    # 时序desired_lat(7), 时序roll(7)，最后保留不参与训练的路线划分元数据。
+    # Preserve the selected inference feature order; target and route metadata follow it.
     select!(data, keep_cols)
 
     if nrow(data) == 0
@@ -285,23 +282,7 @@ function load_data(infile::String, use_existing_data::Bool, outdir::String, out_
   return data
 end
 
-# Streaming mode keeps only bounded reservoir samples in memory.  It uses the
-# same 18 model features and range filters as load_data, but scans the CSV in
-# two passes so route isolation and training-only normalization remain intact.
-const stream_offsets = [-0.3, -0.2, -0.1, 0.3, 0.6, 1.0, 1.5]
-stream_suffix(offset) = replace(f"_t{offset:+.1f}", "." => "", "+" => "p", "-" => "m")
-const stream_model_features = vcat(
-  ["v_ego", "desired_lateral_accel", "friction_input", "roll"],
-  ["desired_lateral_accel" * stream_suffix(offset) for offset in stream_offsets],
-  ["roll" * stream_suffix(offset) for offset in stream_offsets],
-)
-const stream_all_temporal_features = vcat(
-  [feature * stream_suffix(offset) for offset in stream_offsets for feature in ["actual_lateral_accel", "desired_lateral_accel", "roll"]],
-)
-const stream_required_columns = vcat(
-  ["timestamp", "v_ego", "a_ego", "steering_angle_deg", "steering_rate_deg", "steering_torque", "steering_pressed", "standstill", "desired_curvature", "curvature", "active", "lateral_control_type", "actual_lateral_accel", "desired_lateral_accel", "torque_output", "saturated", "roll", "lane_change_state", "friction_input", "route_id"],
-  stream_all_temporal_features,
-)
+# Streaming mode uses the same explicit feature profile as standard loading.
 const stream_train_sample_size = 20
 const stream_test_sample_size = 100_000
 const stream_v_ego_edges = collect(0.1:((45.0 - 0.1) / 121):45.0)
@@ -319,6 +300,7 @@ struct StreamColumnPlan
   active::Int
   standstill::Int
   v_ego::Int
+  a_ego::Int
   desired::Int
   friction::Int
   roll::Int
@@ -330,20 +312,21 @@ struct StreamColumnPlan
   actual_temporal::Vector{Int}
 end
 
-function stream_column_plan(row)::StreamColumnPlan
+function stream_column_plan(row, profile)::StreamColumnPlan
   positions = Dict{String, Int}()
   for (index, name) in enumerate(propertynames(row))
     column = String(name)
     haskey(positions, column) || (positions[column] = index)
   end
   locate(column::String) = get(positions, column, 0)
-  temporal_columns = stream_model_features[5:end]
+  temporal_columns = profile.model_features[profile.base_feature_count + 1:end]
   StreamColumnPlan(
-    Int[locate(column) for column in stream_required_columns],
+    Int[locate(column) for column in profile.required_columns],
     locate("timestamp"),
     locate("active"),
     locate("standstill"),
     locate("v_ego"),
+    locate("a_ego"),
     locate("desired_lateral_accel"),
     locate("friction_input"),
     locate("roll"),
@@ -352,7 +335,7 @@ function stream_column_plan(row)::StreamColumnPlan
     locate("route_id"),
     Int[locate(column) for column in temporal_columns],
     Bool[startswith(column, "desired_lateral_accel") for column in temporal_columns],
-    Int[locate(column) for column in stream_all_temporal_features
+    Int[locate(column) for column in profile.all_temporal_features
        if startswith(column, "actual_lateral_accel")],
   )
 end
@@ -375,8 +358,8 @@ function stream_header_columns(infile::String)::Vector{Symbol}
   end
 end
 
-function stream_column_types(infile::String)::Dict{Symbol, Type}
-  numeric = setdiff(Set(vcat(stream_required_columns, stream_model_features)), stream_text_columns)
+function stream_column_types(infile::String, profile)::Dict{Symbol, Type}
+  numeric = setdiff(Set(vcat(profile.required_columns, profile.model_features)), stream_text_columns)
   types = Dict{Symbol, Type}()
   for name in stream_header_columns(infile)
     String(name) in numeric && (types[name] = Float64)
@@ -400,9 +383,9 @@ end
 stream_float64(row, position::Int) = stream_number(row, position, Float64)
 stream_timestamp(row, plan::StreamColumnPlan) = stream_float64(row, plan.timestamp)
 
-function validate_stream_columns(row)
+function validate_stream_columns(row, profile)
   available_columns = Set(string.(propertynames(row)))
-  missing_columns = sort(collect(setdiff(Set(stream_required_columns), available_columns)))
+  missing_columns = sort(collect(setdiff(Set(profile.required_columns), available_columns)))
   if !isempty(missing_columns)
     error("流式训练 CSV 缺少必需列：$(join(missing_columns, ", "))。请使用带 --temporal 的数据提取流程重新生成 CSV")
   end
@@ -412,7 +395,7 @@ function stream_bool(row, position::Int)
   return parse_bool_value(stream_cell_at(row, position))
 end
 
-function stream_parse_row(row, plan::StreamColumnPlan,
+function stream_parse_row(row, plan::StreamColumnPlan, profile,
                           feature_buffer::Union{Nothing, Vector{Float32}}=nothing)
   # Match completecases(data) before range filtering, including temporal
   # columns that are intentionally incomplete at each segment boundary.
@@ -434,7 +417,11 @@ function stream_parse_row(row, plan::StreamColumnPlan,
   friction = stream_float64(row, plan.friction)
   roll = stream_float64(row, plan.roll)
   torque = stream_float64(row, plan.torque)
+  a_ego = stream_float64(row, plan.a_ego)
   if any(value -> value === nothing, (v_ego, desired, friction, roll, torque))
+    return nothing
+  end
+  if length(profile.model_features) == 23 && a_ego === nothing
     return nothing
   end
   actual = stream_float64(row, plan.actual)
@@ -444,14 +431,17 @@ function stream_parse_row(row, plan::StreamColumnPlan,
 
   features = feature_buffer
   if features !== nothing
-    length(features) == length(stream_model_features) || error("流式特征缓冲区维度错误")
+    length(features) == length(profile.model_features) || error("流式特征缓冲区维度错误")
     features[1] = Float32(v_ego)
     features[2] = Float32(desired)
     features[3] = Float32(friction)
     features[4] = Float32(roll)
+    if length(profile.model_features) == 23
+      features[5] = Float32(a_ego)
+    end
   end
   for (temporal_index, position) in enumerate(plan.temporal_features)
-    feature_index = temporal_index + 4
+    feature_index = temporal_index + profile.base_feature_count
     value = stream_float64(row, position)
     if value === nothing
       return nothing
@@ -531,42 +521,43 @@ function stream_choose_test_routes(route_counts::Dict{String, Int}, row_count::I
   return Set(selected)
 end
 
-function stream_rows_to_dataframe(rows::Vector{Vector{Float32}})::DataFrame
+function stream_rows_to_dataframe(rows::Vector{Vector{Float32}}, profile)::DataFrame
   if isempty(rows)
     return DataFrame()
   end
-  columns = [Vector{Float32}(undef, length(rows)) for _ in 1:length(stream_model_features)]
+  columns = [Vector{Float32}(undef, length(rows)) for _ in 1:length(profile.model_features)]
   targets = Vector{Float32}(undef, length(rows))
   for (row_index, row) in enumerate(rows)
-    for column_index in 1:length(stream_model_features)
+    for column_index in 1:length(profile.model_features)
       columns[column_index][row_index] = row[column_index]
     end
-    targets[row_index] = row[length(stream_model_features) + 1]
+    targets[row_index] = row[length(profile.model_features) + 1]
   end
   result = DataFrame()
-  for (column_index, column_name) in enumerate(stream_model_features)
+  for (column_index, column_name) in enumerate(profile.model_features)
     result[!, Symbol(column_name)] = columns[column_index]
   end
   result[!, :torque_output] = targets
   return result
 end
 
-function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, DataFrame}
+function load_data_streaming(infile::String, out_streams, input_dim::Int)::Tuple{DataFrame, DataFrame}
   nnlc_announce_stage(out_streams, "loading_data", "正在读取训练数据")
+  profile = stream_profile(input_dim)
   route_counts = Dict{String, Int}()
   valid_rows = 0
   previous_timestamp = nothing
   timestamps_monotonic = true
   columns_validated = false
-  column_types = stream_column_types(infile)
+  column_types = stream_column_types(infile, profile)
   local plan::StreamColumnPlan
   for row in CSV.Rows(infile; reusebuffer=true, types=column_types)
     if !columns_validated
-      validate_stream_columns(row)
-      plan = stream_column_plan(row)
+      validate_stream_columns(row, profile)
+      plan = stream_column_plan(row, profile)
       columns_validated = true
     end
-    parsed = stream_parse_row(row, plan)
+    parsed = stream_parse_row(row, plan, profile)
     if parsed !== nothing
       valid_rows += 1
       route_counts[parsed.route_id] = get(route_counts, parsed.route_id, 0) + 1
@@ -598,14 +589,14 @@ function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, Data
   test_seen = 0
   train_rng = MersenneTwister(44)
   test_rng = MersenneTwister(43)
-  feature_buffer = Vector{Float32}(undef, length(stream_model_features))
+  feature_buffer = Vector{Float32}(undef, length(profile.model_features))
   valid_index = 0
-  split_gap = route_isolated ? 0 : min(temporal_split_gap_rows, valid_rows ÷ 5)
+  split_gap = route_isolated ? 0 : min(temporal_split_gap_rows(input_dim), valid_rows ÷ 5)
   usable_rows = valid_rows - split_gap
   train_limit = clamp(round(Int, 0.8 * usable_rows), 2, usable_rows - 2)
 
   for row in CSV.Rows(infile; reusebuffer=true, types=column_types)
-    parsed = stream_parse_row(row, plan, feature_buffer)
+    parsed = stream_parse_row(row, plan, profile, feature_buffer)
     parsed === nothing && continue
     valid_index += 1
     is_test = route_isolated ? (parsed.route_id in test_routes) : (valid_index > train_limit + split_gap)
@@ -637,13 +628,14 @@ function load_data_streaming(infile::String, out_streams)::Tuple{DataFrame, Data
     error("流式训练集和测试集都至少需要 2 条数据")
   end
   println(out_streams, "Streaming pass 2: training=$(length(train_rows)) rows; test=$(length(test_rows)) rows")
-  return stream_rows_to_dataframe(train_rows), stream_rows_to_dataframe(test_rows)
+  return stream_rows_to_dataframe(train_rows, profile), stream_rows_to_dataframe(test_rows, profile)
 end
 
 # Keep complete routes on one side of the split. If there is only one usable
 # route, use a chronological split with a gap large enough to separate the
 # temporal input windows on both sides of the boundary.
-function split_train_test_indices(data::DataFrame, out_streams; train_fraction::Float64=0.8)
+function split_train_test_indices(data::DataFrame, out_streams; train_fraction::Float64=0.8,
+                                 input_dim::Int=18)
   row_count = nrow(data)
   if row_count < 4
     error("至少需要 4 条有效数据，才能保证训练集和测试集各至少 2 条")
@@ -707,7 +699,7 @@ function split_train_test_indices(data::DataFrame, out_streams; train_fraction::
 
   println(out_streams, "无法进行完整路线隔离，使用带时序隔离区的顺序划分")
   ordered_indices = :timestamp in propertynames(data) ? sortperm(data[!, :timestamp]) : collect(1:row_count)
-  split_gap = min(temporal_split_gap_rows, row_count ÷ 5)
+  split_gap = min(temporal_split_gap_rows(input_dim), row_count ÷ 5)
   usable_rows = row_count - split_gap
   train_count = clamp(round(Int, train_fraction * usable_rows), 2, usable_rows - 2)
   test_start = train_count + split_gap + 1
@@ -756,7 +748,11 @@ function balance_training_data(data::DataFrame, row_indices::Vector{Int}, out_st
   return balanced
 end
 
-function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384, prepared_test::Union{Nothing, DataFrame}=nothing)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
+function train_model(working_dir::String, use_existing_model::Bool, data::DataFrame, out_streams; force_cpu::Bool=true, requested_batch_size::Int=16384, prepared_test::Union{Nothing, DataFrame}=nothing, input_dim::Int=18)::NamedTuple{(:model, :input_mean, :input_std, :X_train, :y_train, :X_test, :y_test, :test_loss), Tuple{Flux.Chain, Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}, Matrix{Float32}, Vector{Float32}, Float32}}
+  t_list = permutedims(model_temporal_offsets(input_dim))
+  model_features = model_input_features(input_dim)
+  expected_input_dim = input_dim
+  base_feature_count = input_dim - 2 * length(t_list)
   model_path = joinpath(working_dir, Base.basename(working_dir))
 
   if prepared_test === nothing && nrow(data) < 4
@@ -766,14 +762,16 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   end
 
   feature_names = model_feature_names(data)
-  if feature_names != stream_model_features
-    error("模型输入列不完整或顺序错误：期望 18 列 $(join(stream_model_features, ", "))，实际 $(join(feature_names, ", "))")
+  if feature_names != model_features
+    error("模型输入列不完整或顺序错误：期望 $(input_dim) 列 $(join(model_features, ", "))，实际 $(join(feature_names, ", "))")
   end
 
   if prepared_test === nothing
     # Keep only row indices until sampling is complete. This avoids materializing
     # full 80/20 DataFrame copies for large extracted datasets.
-    train_indices, test_indices = split_train_test_indices(data, out_streams)
+    train_indices, test_indices = split_train_test_indices(
+      data, out_streams; input_dim=input_dim
+    )
     test_indices = limit_test_indices(test_indices, out_streams)
     train = balance_training_data(data, train_indices, out_streams)
     test = data[test_indices, :]
@@ -841,10 +839,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   data = nothing
   GC.gc()
 
-  input_dim = size(X_train, 2)
-  expected_input_dim = 4 + 2 * length(t_list)
-  if input_dim != expected_input_dim
-    error("模型输入特征数量错误：期望 $(expected_input_dim)，实际 $(input_dim)")
+  actual_input_dim = size(X_train, 2)
+  if actual_input_dim != input_dim
+    error("模型输入特征数量错误：期望 $(input_dim)，实际 $(actual_input_dim)")
   end
   if size(X_train, 1) != length(y_train) || size(X_test, 1) != length(y_test)
     error("训练/测试特征与目标数量不一致：X_train=$(size(X_train))，y_train=$(size(y_train))，X_test=$(size(X_test))，y_test=$(size(y_test))")
@@ -853,7 +850,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
   # Define the model
   Random.seed!(training_random_seed)
   model = Chain(
-      Dense(input_dim, 7, sigmoid),
+      Dense(actual_input_dim, 7, sigmoid),
       Dense(7, 13, sigmoid),
       Dense(13, 3),
       Dense(3, 1)
@@ -878,13 +875,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
   function prepare_test_grid(lat_jerk_func, v_ego_range, lateral_acceleration_range, lateral_jerk_range, roll_range, lateral_error_range, roll_rate_range)
     num_test_samples = size(v_ego_range, 1) * size(lateral_acceleration_range, 1) * size(lateral_jerk_range, 1) * size(roll_range, 1) * size(lateral_error_range, 1) * size(roll_rate_range, 1)
-    out_grid = Matrix{Float32}(undef, 4 + 2 * size(t_list,2), num_test_samples)
+    out_grid = Matrix{Float32}(undef, expected_input_dim, num_test_samples)
     i = 1
     
     # Pre-allocate arrays for better performance
     lat_accels = Vector{Float32}(undef, length(t_list))
     rolls = Vector{Float32}(undef, length(t_list))
-    grid_tmp = Vector{Float32}(undef, 4 + 2 * length(t_list))
+    grid_tmp = Vector{Float32}(undef, expected_input_dim)
     
     for la in lateral_acceleration_range
       for lj in lateral_jerk_range
@@ -899,7 +896,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
                 end
                 
                 # Construct grid_tmp without intermediate allocations
-                # 列顺序与 nnlc.py 运行时 nn_input 完全一致：v_ego, desired_lateral_accel, friction_input, roll, 时序lat, 时序roll
+                # Match the runtime order, including a_ego for the 23-D profile.
                 grid_tmp[1] = v_ego
                 grid_tmp[2] = la
                 # friction_input 近似：lat_accel_friction_factor*(setpoint-measurement) + lat_jerk_friction_factor*lookahead_lateral_jerk
@@ -907,10 +904,13 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
                 # 系数 0.7/0.4 与 latcontrol_torque_ext_base.py 中 lat_accel_friction_factor/lat_jerk_friction_factor 一致
                 grid_tmp[3] = 0.7f0 * le + 0.4f0 * lj
                 grid_tmp[4] = roll
+                if input_dim == 23
+                  grid_tmp[5] = 0f0
+                end
                 
                 @inbounds for idx in 1:length(t_list)
-                  grid_tmp[4 + idx] = lat_accels[idx]
-                  grid_tmp[4 + length(t_list) + idx] = rolls[idx]
+                  grid_tmp[base_feature_count + idx] = lat_accels[idx]
+                  grid_tmp[base_feature_count + length(t_list) + idx] = rolls[idx]
                 end
                 
                 # Normalize and store in out_grid
@@ -1091,8 +1091,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
     # deterministic and independent of the random numbers consumed by Dense.
     Random.seed!(training_random_seed + 1)
     train_data_loader = DataLoader((X_train', y_train), batchsize=batch_size, shuffle=true)
-    symmetry_signs = ones(Float32, input_dim)
-    symmetry_signs[2:end] .= -1f0
+    symmetry_signs = model_symmetry_signs(input_dim)
     symmetry_signs = reshape(symmetry_signs, :, 1) |> device
 
     train_batch! = function(x, y, lambda, monotonic_lambda, odd_lambda, origin_lambda)
@@ -1380,7 +1379,7 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
           for roll in roll_range
             lat_accels = [lataccel + t * latjerk for t in t_list]
             rolls = [roll for t in t_list]
-            input_data = [vego lataccel latjerk roll]
+            input_data = model_base_row(vego, lataccel, latjerk, roll, input_dim)
             # t_list is declared as a 1×N matrix, so these comprehensions are
             # already row-shaped.  Transposing them creates N×1 arrays and
             # makes hcat fail against the 1×4 input row.
@@ -1459,8 +1458,9 @@ function train_model(working_dir::String, use_existing_model::Bool, data::DataFr
 
 end
 
-function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{Float32}, y_train::Vector{Float32}, X_test::Matrix{Float32}, y_test::Vector{Float32}, input_mean::Matrix{Float32}, input_std::Matrix{Float32}, x_var_names::String, out_streams, test_loss::Float32)
+function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{Float32}, y_train::Vector{Float32}, X_test::Matrix{Float32}, y_test::Vector{Float32}, input_mean::Matrix{Float32}, input_std::Matrix{Float32}, x_var_names::String, out_streams, test_loss::Float32, input_dim::Int)
 
+  t_list = permutedims(model_temporal_offsets(input_dim))
   car_name = Base.basename(plot_path)
 
   function feedforward_function(input_data)
@@ -1560,7 +1560,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
           fill!(rolls, 0f0)
           
           # Create input data
-          input_data = [speed la lj 0f0]
+          input_data = model_base_row(speed, la, lj, 0f0, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           
           # Get model prediction
@@ -1616,7 +1616,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
               rolls[idx] = 0f0
           end
           
-          input_data = [speed la 0f0 0f0]
+          input_data = model_base_row(speed, la, 0f0, 0f0, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           
@@ -1672,7 +1672,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
           fill!(lat_accels, la)
           fill!(rolls, gla)
           
-          input_data = [speed la 0f0 gla]
+          input_data = model_base_row(speed, la, 0f0, gla, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           
@@ -1731,7 +1731,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
       fill!(rolls, 0f0)
       
       for (i, lj) in enumerate(lateral_jerk_range)
-          input_data = [speed la lj 0f0]
+          input_data = model_base_row(speed, la, lj, 0f0, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           x_model[i] = lj
@@ -1772,7 +1772,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
               rolls[idx] = 0f0
           end
           
-          input_data = [speed la 0f0 0f0]
+          input_data = model_base_row(speed, la, 0f0, 0f0, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           
@@ -1814,7 +1814,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
           # Fill rolls with constant value
           fill!(rolls, ro)
           
-          input_data = [speed la 0f0 ro]
+          input_data = model_base_row(speed, la, 0f0, ro, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           
@@ -1860,7 +1860,7 @@ function test_plot_model(model::Flux.Chain, plot_path::String, X_train::Matrix{F
               rolls[idx] = ro + t * rr
           end
           
-          input_data = [speed 0f0 0f0 ro]
+          input_data = model_base_row(speed, 0f0, 0f0, ro, input_dim)
           input_data = hcat(input_data, lat_accels', rolls')
           steer_command = feedforward_function(input_data)
           
@@ -1918,7 +1918,7 @@ function multiline_string(strings::Vector{String}, n::Int; prefix="")::String
   return join(lines, ",\n")
 end
 
-function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false)
+function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false, input_dim::Int=18)
   carname = replace(Base.basename(in_file), ".csv" => "")
   outdir = create_folder_with_iterator(out_dir_base, carname, make_new=true)
   logfile = open(outdir * "/$(carname)_log.txt", "a")  # Open log file in append mode
@@ -1934,9 +1934,9 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
     prepared_test = nothing
     if streaming
       println(out_streams, "使用两遍扫描的流式低内存预处理")
-      data, prepared_test = load_data_streaming(in_file, out_streams)
+      data, prepared_test = load_data_streaming(in_file, out_streams, input_dim)
     else
-      data = load_data(in_file, use_existing_input, outdir, out_streams)
+      data = load_data(in_file, use_existing_input, outdir, out_streams, input_dim)
     end
 
     feature_names = model_feature_names(data)
@@ -1954,12 +1954,13 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
       force_cpu=force_cpu,
       requested_batch_size=requested_batch_size,
       prepared_test=prepared_test,
+      input_dim=input_dim,
     )
 
     # Validation plots are optional diagnostics.  Keep a valid exported JSON
     # model usable even when plotting fails on a headless/minimal environment.
     try
-      test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss)
+      test_plot_model(model, outdir, X_train, y_train, X_test, y_test, input_mean, input_std, multiline_string(feature_names, 60, prefix="Model input: "), out_streams, test_loss, input_dim)
     catch e
       println(out_streams, "WARNING: 模型验证图生成失败，模型文件仍然有效：$(sprint(showerror, e))")
     end
@@ -1968,12 +1969,14 @@ function create_model(in_file, out_dir_base; force_cpu::Bool=true, requested_bat
   end
 end
 
-function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false)
+function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384, streaming::Bool=false, input_dim::Int=18)
+  dimension_suffix = "$(input_dim)d"
   # Process only regular CSV files, excluding old balanced-data artifacts.
   csv_files = filter(
-    file -> isfile(joinpath(in_dir, file)) && endswith(lowercase(file), ".csv") && !endswith(lowercase(file), "_balanced.csv"),
+    file -> isfile(joinpath(in_dir, file)) && endswith(lowercase(file), "_$(dimension_suffix).csv"),
     readdir(in_dir),
   )
+  isempty(csv_files) && error("没有找到当前维度的训练 CSV（*_$(dimension_suffix).csv）")
 
   results_dir = joinpath(in_dir, "training_results")
   mkpath(results_dir)
@@ -1986,48 +1989,73 @@ function main(in_dir; force_cpu::Bool=true, requested_batch_size::Int=16384, str
         force_cpu=force_cpu,
         requested_batch_size=requested_batch_size,
         streaming=streaming,
+        input_dim=input_dim,
       )
   end
 end
 
-# Accept data directory as command-line argument, or default to ~/Downloads/rlogs/output/GENESIS
-# GPU training is intentionally unsupported by this trainer.  Keep accepting
-# --cpu for compatibility with existing scripts, but always select CPU.
-force_cpu = true
-streaming = any(argument -> argument == "--streaming", ARGS)
-batch_size_arg = findfirst(a -> startswith(a, "--batch-size="), ARGS)
-batch_size_flag = findfirst(a -> a == "--batch-size", ARGS)
-requested_batch_size = 16384
-if batch_size_arg !== nothing
-  requested_batch_size = try
-    parse(Int, split(ARGS[batch_size_arg], "=", limit=2)[2])
-  catch
+if abspath(PROGRAM_FILE) == abspath(@__FILE__)
+  # Accept data directory as command-line argument, or default to ~/Downloads/rlogs/output/GENESIS
+  # GPU training is intentionally unsupported by this trainer.  Keep accepting
+  # --cpu for compatibility with existing scripts, but always select CPU.
+  force_cpu = true
+  streaming = any(argument -> argument == "--streaming", ARGS)
+  input_dim_arg = findfirst(a -> startswith(a, "--input-dim="), ARGS)
+  input_dim_flag = findfirst(a -> a == "--input-dim", ARGS)
+  input_dim = 18
+  if input_dim_arg !== nothing
+    input_dim = try
+      parse(Int, split(ARGS[input_dim_arg], "=", limit=2)[2])
+    catch
+      error("--input-dim must be 18 or 23")
+    end
+  elseif input_dim_flag !== nothing
+    if input_dim_flag == length(ARGS)
+      error("--input-dim must be followed by 18 or 23")
+    end
+    input_dim = try
+      parse(Int, ARGS[input_dim_flag + 1])
+    catch
+      error("--input-dim must be 18 or 23")
+    end
+  end
+  input_dim in (18, 23) || error("--input-dim must be 18 or 23")
+  batch_size_arg = findfirst(a -> startswith(a, "--batch-size="), ARGS)
+  batch_size_flag = findfirst(a -> a == "--batch-size", ARGS)
+  requested_batch_size = 16384
+  if batch_size_arg !== nothing
+    requested_batch_size = try
+      parse(Int, split(ARGS[batch_size_arg], "=", limit=2)[2])
+    catch
+      error("--batch-size must be a positive integer")
+    end
+  elseif batch_size_flag !== nothing
+    if batch_size_flag == length(ARGS)
+      error("--batch-size must be followed by a positive integer")
+    end
+    requested_batch_size = try
+      parse(Int, ARGS[batch_size_flag + 1])
+    catch
+      error("--batch-size must be a positive integer")
+    end
+  end
+  if requested_batch_size <= 0
     error("--batch-size must be a positive integer")
   end
-elseif batch_size_flag !== nothing
-  if batch_size_flag == length(ARGS)
-    error("--batch-size must be followed by a positive integer")
+
+  positional_args = [
+    argument for (index, argument) in enumerate(ARGS)
+    if !startswith(argument, "--") &&
+       !(batch_size_flag !== nothing && index == batch_size_flag + 1) &&
+       !(input_dim_flag !== nothing && index == input_dim_flag + 1)
+  ]
+
+  println("CPU mode enabled")
+
+  if length(positional_args) > 0
+    main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming, input_dim=input_dim)
+  else
+    home_dir = ENV["HOME"]
+    main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming, input_dim=input_dim)
   end
-  requested_batch_size = try
-    parse(Int, ARGS[batch_size_flag + 1])
-  catch
-    error("--batch-size must be a positive integer")
-  end
-end
-if requested_batch_size <= 0
-  error("--batch-size must be a positive integer")
-end
-
-positional_args = [
-  argument for (index, argument) in enumerate(ARGS)
-  if !startswith(argument, "--") && !(batch_size_flag !== nothing && index == batch_size_flag + 1)
-]
-
-println("CPU mode enabled")
-
-if length(positional_args) > 0
-  main(positional_args[1]; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming)
-else
-  home_dir = ENV["HOME"]
-  main("$home_dir/Downloads/rlogs/output/GENESIS"; force_cpu=force_cpu, requested_batch_size=requested_batch_size, streaming=streaming)
 end

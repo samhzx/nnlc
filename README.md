@@ -45,16 +45,17 @@ Windows 发布包提供 `NNLC_Trainer.exe` 图形界面，适合不想使用命�
 2. 选择输出目录；中间 CSV、覆盖度图、模型验证图和最终 JSON 会保存在这里。
 3. 输入目标车型 `carFingerprint`，例如 `BYD_TANG_DMI_24`。目标车型仅要求非空，不做额外格式限制。
 4. 路线阈值保持“自动推荐”，或取消勾选后填写 `0-100` 的整数。
-5. 训练模式按数据规模选择。项目固定使用 CPU，不会启用 GPU：
+5. 训练模式按数据规模选择，并单独选择输入维度。项目固定使用 CPU，不会启用 GPU：
    - “标准模式”：完整读入训练 CSV，适合数据量较小、内存充足的电脑。
    - “流式模式”：逐个 rlog 文件完整排序，之后对评分、剪枝、覆盖度统计、验证抽样和 Julia 预处理采用有界内存处理，适合 16GB 内存电脑和上亿行 CSV。
+   - “18 维”：现有模型输入；“23 维”：额外加入 `a_ego` 和 `-2.0s/-1.0s` 的期望横向加速度、roll 历史。车端推理输入必须与所训练的维度一致。
 6. GUI 始终使用“容错模式（跳过损坏日志）”。无法读取的文件会写入运行日志，训练前应确认剩余数据量足够。
 7. 点击“开始训练”后，覆盖度图、提取 CSV 和最终训练 CSV 会保留，便于检查数据和排查失败原因。评分、路线剪枝和干预帧移除在一次合并扫描中完成，不再生成单独的路线剪枝 CSV。GUI 不提供关闭这些文件的复选框；如需清理中间 CSV，请改用命令行参数。
 
-GUI 会自动记住上次选择的日志目录、输出目录、目标车型和训练模式。路线阈值需要按每次任务重新确认。
-训练进度区域显示固定 7 步进度条（提取 / 评分 / 修剪 / 覆盖度 / 训练 / 验证 / 部署）、`n / 7`、当前步骤标题、单行最新日志和耗时。完整日志从点击“开始训练”起增量写入程序运行目录的 `logs/YYYYMMDD_HHMMSS_车型.log`（EXE 旁或源码旁），取消、失败或关闭窗口也会保留已写入内容。同一秒内同车型再次启动时，文件名会自动追加 `_2`、`_3` 等编号，确保每次训练日志独立。底部保留“打开输出目录”和“打开日志”：前者打开当前输出目录，后者打开这次日志文件；还没有本次日志文件时打开 `logs` 目录。Windows GUI 启动 Julia 时不弹出黑色控制台。日志会区分启动、加载已缓存依赖、读取数据和编译训练代码；暂时没有新输出时，会按当前阶段大约每 30 秒提示一次。进入训练循环后，完整日志会显示 `Training progress: epoch/epoch_max`，但总进度条只按 7 个流水线步骤前进。
+GUI 会自动记住上次选择的日志目录、输出目录、目标车型、训练模式和输入维度。路线阈值需要按每次任务重新确认。
+训练进度区域显示固定 7 步进度条（提取 / 评分 / 修剪 / 覆盖度 / 训练 / 验证 / 部署）、`n / 7`、当前步骤标题、单行最新日志和耗时。完整日志从点击“开始训练”起增量写入程序运行目录的 `logs/YYYYMMDD_HHMMSS_车型_18d.log` 或 `_23d.log`（EXE 旁或源码旁），取消、失败或关闭窗口也会保留已写入内容。同一秒内同车型、同维度再次启动时，文件名会自动追加 `_2`、`_3` 等编号，确保每次训练日志独立。底部保留“打开输出目录”和“打开日志”：前者打开当前输出目录，后者打开这次日志文件；还没有本次日志文件时打开 `logs` 目录。Windows GUI 启动 Julia 时不弹出黑色控制台。日志会区分启动、加载已缓存依赖、读取数据和编译训练代码；暂时没有新输出时，会按当前阶段大约每 30 秒提示一次。进入训练循环后，完整日志会显示 `Training progress: epoch/epoch_max`，但总进度条只按 7 个流水线步骤前进。
 
-流式模式需要对 CSV 进行多遍顺序扫描，因此处理时间可能比标准模式长，但内存不会随总行数线性增长。它保持完整路线隔离、固定随机种子、训练分箱每箱最多 20 条、测试集最多 10 万条、18 维输入、对称增强及原有损失规则。由于流程中会生成多个大型 CSV，处理上亿行数据时建议输出磁盘至少预留 100GB；程序启动时会显示剩余空间并在不足时警告。
+流式模式需要对 CSV 进行多遍顺序扫描，因此处理时间可能比标准模式长，但内存不会随总行数线性增长。它对所选 18/23 维输入都保持完整路线隔离、固定随机种子、训练分箱每箱最多 20 条、测试集最多 10 万条、对称增强及原有损失规则。由于流程中会生成多个大型 CSV，处理上亿行数据时建议输出磁盘至少预留 100GB；程序启动时会显示剩余空间并在不足时警告。
 
 Windows 发布物分成两个文件：
 
@@ -215,7 +216,8 @@ uv pip install -e .
 
 所有命令行工具都可以通过 `uv run` 运行（会自动发现 `.venv`，无需手动激活）：
 ```bash
-uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
+uv run nnlc-extract ./data --temporal --input-dim 18
+uv run nnlc-extract ./data --temporal --input-dim 23
 ```
 
 提取器默认使用 `auto` 并行解析 rlog，最多启动 16 个 worker，并按原始 rlog 顺序合并结果。需要排查问题或在机械硬盘、低内存设备上运行时，可以使用 `--rlog-workers 1` 恢复串行模式，也可以手动指定较小的并行度。SSD 通常适合更高并行度；超线程可能带来一定吞吐提升，但实际收益取决于 rlog 解压、磁盘速度和物理 CPU 核心数，不能简单按逻辑核心数设置。
@@ -229,21 +231,21 @@ uv run nnlc-extract ./data -o output/lateral_data.csv --temporal
 ### 1. 提取横向数据
 
 ```bash
-# 基本提取
-python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv
+# 18 维输入（默认）
+python3 -m nnlc_tools.extract_lateral_data ./data --temporal --input-dim 18
 
-# 包含时序特征（训练必需）
-python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv --temporal
+# 与当前推理端相同的 23 维输入
+python3 -m nnlc_tools.extract_lateral_data ./data --temporal --input-dim 23
 
 # 指定 4 个 rlog worker；--rlog-workers 1 可恢复串行模式
-python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.csv \
-  --temporal --rlog-workers 4
+python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data_23d.csv \
+  --temporal --input-dim 23 --rlog-workers 4
 
 # Parquet 格式（大型数据集更快）
 python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parquet --format parquet
 ```
 
-如果输入目录本身名为 `YYYYMMDD`，或其**直接子目录**包含 `YYYYMMDD` 日期目录（如下载器按本机导出日期保存的结构），提取器会按天在该日期目录写入 `lateral_data.csv`。某日已有该文件且表头与当前时序列一致时，会完全跳过该日，即使后来又放入新 rlog。需要让补下载的日志进入训练时，请手动删除对应日期目录中的 `lateral_data.csv`。训练开始前仍会按日期名顺序把各日 CSV 合成输出路径的总表。没有日期目录时，行为与原来相同，一次性提取到 `-o`，不会在数据目录写入 CSV。
+如果输入目录本身名为 `YYYYMMDD`，或其**直接子目录**包含 `YYYYMMDD` 日期目录（如下载器按本机导出日期保存的结构），提取器会按输入维度分别缓存为 `lateral_data_18d.csv` 或 `lateral_data_23d.csv`，训练输出目录也生成同名汇总 CSV。只有当前维度缓存且完整表头匹配时才复用；旧版 `lateral_data.csv` 不读取、不迁移。某日缺少所选维度缓存、表头不匹配或补下载后要重新提取时，删除该日对应的 `lateral_data_<维度>d.csv`。没有日期目录时只写带维度后缀的输出 CSV，不在数据目录写缓存。
 
 ### 2. 评估路线质量
 
@@ -251,29 +253,29 @@ python3 -m nnlc_tools.extract_lateral_data ./data -o ./output/lateral_data.parqu
 python3 -m nnlc_tools.score_routes ./data
 
 # 或从提取出的 CSV 评分
-python3 -m nnlc_tools.score_routes ./output/lateral_data.csv
+python3 -m nnlc_tools.score_routes ./output/lateral_data_18d.csv
 
 # 仅显示评分达到 70 分的路线
-python3 -m nnlc_tools.score_routes ./output/lateral_data.csv --min-score 70
+python3 -m nnlc_tools.score_routes ./output/lateral_data_18d.csv --min-score 70
 ```
 
 ### 3. 剪枝路线
 
 ```bash
 # 删除饱和帧和变道帧，不排除路线（默认）
-uv run nnlc-prune-routes ./output/lateral_data.csv -o ./output/lateral_data_routes_pruned.csv
+uv run nnlc-prune-routes ./output/lateral_data_18d.csv -o ./output/interventions_pruned_18d.csv
 
 # 同时排除评分低于 60 分的路线
-uv run nnlc-prune-routes ./output/lateral_data.csv --min-score 60 -o ./output/lateral_data_routes_pruned.csv
+uv run nnlc-prune-routes ./output/lateral_data_18d.csv --min-score 60 -o ./output/interventions_pruned_18d.csv
 
 # 保留饱和帧（停用帧级筛选）
-uv run nnlc-prune-routes ./output/lateral_data.csv --keep-saturated -o ./output/lateral_data_routes_pruned.csv
+uv run nnlc-prune-routes ./output/lateral_data_18d.csv --keep-saturated -o ./output/interventions_pruned_18d.csv
 ```
 
 ### 4. 可视化数据覆盖度
 
 ```bash
-python3 -m nnlc_tools.visualize_coverage ./output/lateral_data_routes_pruned.csv -o ./output/coverage.png
+python3 -m nnlc_tools.visualize_coverage ./output/interventions_pruned_18d.csv -o ./output/coverage_18d.png
 ```
 
 这会生成一个 6 面板图（2 行）：
@@ -318,30 +320,25 @@ uv run nnlc-sc-visualize ./output/lateral_data_routes_pruned.csv -o ./output/sc_
 Julia 配置和训练说明请参见 [training/README.md](training/README.md)。
 
 ```bash
-# 推荐方式——自动处理 juliaup PATH
+# 18 维训练
 mkdir -p ./output/latmodels
-cp ./output/lateral_data_pruned.csv ./output/latmodels/YOUR_CAR.csv
-bash training/run.sh ./output/latmodels
+cp ./output/interventions_pruned_18d.csv ./output/latmodels/YOUR_CAR_18d.csv
+bash training/run.sh ./output/latmodels --input-dim=18
 
-# 或直接运行 Julia
-julia training/latmodel_temporal.jl ./output/latmodels
-
-# CPU 标准训练
-bash training/run.sh ./output/latmodels --cpu
-
-# 上亿行 CSV 的流式低内存训练（固定 CPU）
-julia training/latmodel_temporal.jl ./output/latmodels --streaming --batch-size=4096
+# 23 维流式训练（固定 CPU）
+cp ./output/interventions_pruned_23d.csv ./output/latmodels/YOUR_CAR_23d.csv
+bash training/run.sh ./output/latmodels --input-dim=23 --streaming --batch-size=4096
 ```
 
 完整的一键流式流程也可以直接从命令行启动：
 
 ```bash
 python nnlc_auto_train.py --data ./data --car YOUR_CAR \
-    --output ./output --streaming --batch-size 4096
+    --output ./output --input-dim 23 --streaming --batch-size 4096
 
 # 训练成功后不保留完整中间 CSV
 python nnlc_auto_train.py --data ./data --car YOUR_CAR \
-    --output ./output --streaming --batch-size 4096 --no-keep-intermediates
+    --output ./output --input-dim 23 --streaming --batch-size 4096 --no-keep-intermediates
 ```
 
 ### 8. 部署模型
@@ -380,12 +377,13 @@ cp my_car_model.json /path/to/openpilot/sunnypilot/neural_network_data/neural_ne
 ### extract_lateral_data
 
 ```
-python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--filter-overrides] [--skip-corrupt] [--rlog-workers N] input
+python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parquet}] [--temporal] [--input-dim {18,23}] [--filter-overrides] [--skip-corrupt] [--rlog-workers N] input
 
   input               包含 rlog 文件的目录
-  -o, --output        输出文件路径（默认：lateral_data.csv）
+  -o, --output        输出文件路径（默认：lateral_data_<input-dim>d.csv）
   --format            输出格式（默认：根据扩展名推断）
   --temporal          添加 NNLC 训练所需的时序滞后/超前列
+  --input-dim         模型输入维度：18 或 23（默认 18）
   --filter-overrides  删除驾驶员接管的行（steering_pressed=True）
   --skip-corrupt      跳过无法解析的损坏 rlog，继续处理其他文件并在末尾列出
   --rlog-workers N    rlog 并行解析 worker 数（正整数或 auto，默认 auto；1 为串行模式）
@@ -395,7 +393,7 @@ python -m nnlc_tools.extract_lateral_data [-h] [-o OUTPUT] [--format {csv,parque
 
 每个 rlog 都在主提取进程之外的独立工作进程中解析，多个 worker 可以同时处理不同 rlog。运行日志会即时打印完成文件的完整路径，最终 CSV 始终按输入 rlog 顺序合并；每个 rlog 的 temporal 窗口也只在当前 rlog 内计算，不会跨文件串联。工作进程每处理 100 个文件会主动重启，避免原生解析库长期运行产生资源累积。若 `pycapnp` 等原生库导致 worker 崩溃，容错模式会在全新进程中重试当前文件一次，仍失败才记录并跳过；严格模式会显示该文件路径和退出码后立即停止。只有 worker 完整返回的分段 CSV 才会合并到最终数据中，崩溃产生的半截文件不会参与训练。
 
-当输入根目录名为 `YYYYMMDD`，或其直接子目录含 `YYYYMMDD` 时，提取器会把各日结果缓存为 `日期目录/lateral_data.csv`（与训练输出文件名相同，但位于日期目录中）。该文件可读且表头与当前时序列一致时直接复用，不会因为后来增删 rlog 或文件时间变化而自动失效。日志会打印复用了几天、新提取了几天，再按日期名顺序合成 `-o` 的总 `lateral_data.csv`。取消提取时不会留下半截日 CSV。同一路线若在不同日期目录各有一份，会进入总表两次，不会跨天去重。没有日期目录时不会改写数据目录。旧版其它缓存格式不会被读取或转换。
+当输入根目录名为 `YYYYMMDD`，或其直接子目录含 `YYYYMMDD` 时，提取器按输入维度分别缓存为 `日期目录/lateral_data_18d.csv` 或 `lateral_data_23d.csv`。当前维度缓存表头正确时直接复用；另一维度缓存和旧版通用 `lateral_data.csv` 均不读取。日志打印复用/提取天数和缓存路径，再按日期顺序合成带维度后缀的总 CSV。无日期目录时不会改写数据目录。
 
 ### score_routes
 

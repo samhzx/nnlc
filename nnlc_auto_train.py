@@ -45,6 +45,12 @@ from nnlc_runtime import (
     load_runtime_config,
     runtime_paths,
 )
+from nnlc_tools.model_inputs import (
+    DEFAULT_INPUT_DIM,
+    INPUT_DIMENSIONS,
+    INPUT_PROFILES,
+    dimension_suffix,
+)
 from nnlc_version import VersionError, get_version
 
 
@@ -208,32 +214,10 @@ def _emit(message):
 
 # 模型验收标准
 MAX_TEST_LOSS = 0.05
-REQUIRED_INPUT_SIZE = 18
-EXPECTED_INPUT_VARS = [
-    "v_ego",
-    "desired_lateral_accel",
-    "friction_input",
-    "roll",
-    "desired_lateral_accel_tm03",
-    "desired_lateral_accel_tm02",
-    "desired_lateral_accel_tm01",
-    "desired_lateral_accel_tp03",
-    "desired_lateral_accel_tp06",
-    "desired_lateral_accel_tp10",
-    "desired_lateral_accel_tp15",
-    "roll_tm03",
-    "roll_tm02",
-    "roll_tm01",
-    "roll_tp03",
-    "roll_tp06",
-    "roll_tp10",
-    "roll_tp15",
-]
 # Julia's JSON export keeps the serialized column-major orientation.  The
 # Python inference loader transposes each weight after loading it, so model
 # validation must check the raw JSON shapes rather than the post-transpose
 # inference shapes.
-EXPECTED_LAYER_JSON_SHAPES = ((7, 18), (13, 7), (3, 13), (1, 3))
 EXPECTED_LAYER_OUTPUT_SIZES = (7, 13, 3, 1)
 BUNDLED_WORKER_MODULES = frozenset({
     "nnlc_tools.extract_lateral_data",
@@ -583,17 +567,20 @@ def validate_data_dir(data_dir):
 # ============================================================
 
 def step_extract(data_dir, output_dir, python_exe, skip_corrupt_rlogs=False,
-                 cancel_event=None, process_holder=None, rlog_workers="auto"):
+                 cancel_event=None, process_holder=None, rlog_workers="auto",
+                 input_dim=DEFAULT_INPUT_DIM):
     """步骤1: 提取横向控制数据。"""
-    output_csv = os.path.join(output_dir, "lateral_data.csv")
+    suffix = dimension_suffix(input_dim)
+    output_csv = os.path.join(output_dir, f"lateral_data_{suffix}.csv")
     command = [python_exe, "-m", "nnlc_tools.extract_lateral_data", data_dir,
-               "-o", output_csv, "--temporal", "--rlog-workers", str(rlog_workers)]
+               "-o", output_csv, "--temporal", "--input-dim", str(input_dim),
+               "--rlog-workers", str(rlog_workers)]
     if skip_corrupt_rlogs:
         command.append("--skip-corrupt")
     run_command(
         command,
-        "提取横向控制数据（含时序特征，跳过损坏日志）"
-        if skip_corrupt_rlogs else "提取横向控制数据（含时序特征）",
+        f"提取 {input_dim} 维横向控制数据（含时序特征，跳过损坏日志）"
+        if skip_corrupt_rlogs else f"提取 {input_dim} 维横向控制数据（含时序特征）",
         cancel_event=cancel_event,
         process_holder=process_holder,
     )
@@ -648,13 +635,16 @@ def step_score(input_csv, python_exe, streaming=False, cancel_event=None,
 
 def step_prepare_training(input_csv, min_score, output_dir, streaming=False,
                           route_results=None, cancel_event=None,
-                          process_holder=None, keep_intermediates=True):
+                          process_holder=None, keep_intermediates=True,
+                          input_dim=DEFAULT_INPUT_DIM):
     """步骤3: 修剪低质量路线并移除干预帧，直接写出最终训练 CSV。"""
     from nnlc_tools.prune_routes import prepare_training_csv
     from nnlc_tools.score_routes import keep_routes_from_scores
 
     _raise_if_cancelled(cancel_event)
-    output_csv = os.path.join(output_dir, "interventions_pruned.csv")
+    output_csv = os.path.join(
+        output_dir, f"interventions_pruned_{dimension_suffix(input_dim)}.csv"
+    )
     keep_routes = keep_routes_from_scores(route_results or [], min_score)
     print_info(f"修剪路线并移除干预帧 (min-score={min_score})")
     stats = prepare_training_csv(
@@ -702,9 +692,12 @@ def step_prepare_training(input_csv, min_score, output_dir, streaming=False,
 
 
 def step_visualize(input_csv, output_dir, python_exe, streaming=False,
-                   cancel_event=None, process_holder=None):
+                   cancel_event=None, process_holder=None,
+                   input_dim=DEFAULT_INPUT_DIM):
     """步骤4: 可视化数据覆盖度。"""
-    output_png = os.path.join(output_dir, "coverage.png")
+    output_png = os.path.join(
+        output_dir, f"coverage_{dimension_suffix(input_dim)}.png"
+    )
     command = [python_exe, "-m", "nnlc_tools.visualize_coverage", input_csv,
                "-o", output_png]
     if streaming:
@@ -843,7 +836,7 @@ def _forward_process_output(process, cancel_event=None, idle_message=None,
 
 def step_train(input_csv, car_name, output_dir, cancel_event=None,
                process_holder=None, batch_size=16384, force_cpu=True,
-               streaming=False):
+               streaming=False, input_dim=DEFAULT_INPUT_DIM):
     """步骤5: Julia 训练模型。"""
     _raise_if_cancelled(cancel_event)
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
@@ -855,10 +848,11 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
 
     # Julia 会训练该目录下的全部 CSV。先移除上次任务留下的输入文件，
     # 避免更换车型并复用输出目录时意外重复训练旧车型。
+    active_suffix = f"_{dimension_suffix(input_dim)}.csv"
     stale_inputs = []
     with os.scandir(train_input_dir) as entries:
         for entry in entries:
-            if entry.is_file() and entry.name.lower().endswith(".csv"):
+            if entry.is_file() and entry.name.lower().endswith(active_suffix):
                 stale_inputs.append(entry.path)
     for stale_input in stale_inputs:
         os.remove(stale_input)
@@ -866,7 +860,8 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
         print_info(f"已清理 {len(stale_inputs)} 个旧训练输入文件")
 
     # 复制 CSV 为车型命名
-    car_csv = os.path.join(train_input_dir, f"{car_name}.csv")
+    dimension_name = f"{car_name}_{dimension_suffix(input_dim)}"
+    car_csv = os.path.join(train_input_dir, f"{dimension_name}.csv")
     if streaming:
         try:
             os.link(input_csv, car_csv)
@@ -878,7 +873,9 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
         shutil.copy2(input_csv, car_csv)
 
     # 清理旧的训练结果（如果存在）
-    train_results_dir = os.path.join(train_input_dir, "training_results", car_name)
+    train_results_dir = os.path.join(
+        train_input_dir, "training_results", dimension_name
+    )
     if os.path.exists(train_results_dir):
         print_info(f"清理旧训练结果: {train_results_dir}")
         shutil.rmtree(train_results_dir)
@@ -891,11 +888,16 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     # The supported application mode is CPU-only.  Keep the argument for API
     # compatibility with older callers, but never allow a GPU path here.
     force_cpu = True
-    cmd = [julia_exe, script_path, train_input_dir, "--cpu", f"--batch-size={batch_size}"]
+    cmd = [
+        julia_exe, script_path, train_input_dir, "--cpu",
+        f"--batch-size={batch_size}", f"--input-dim={input_dim}",
+    ]
     if streaming:
         cmd.append("--streaming")
     mode_label = "流式模式" if streaming else "标准模式"
-    print_info(f"Julia 训练中（{mode_label}，batch size={batch_size:,}）")
+    print_info(
+        f"Julia 训练中（{input_dim} 维，{mode_label}，batch size={batch_size:,}）"
+    )
     print_info(f"命令: {' '.join(cmd)}")
     print_info("首次在该 Julia 环境训练时会编译依赖并缓存；之后会加载缓存，不必每次重新编译依赖")
     print_info("每次训练仍会加载依赖、读取数据，并在本次进程中编译训练代码")
@@ -956,7 +958,7 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     print_ok(f"Julia 训练结束 (耗时 {elapsed:.1f}s, 退出码 0)")
 
     # 检查模型文件
-    model_json = os.path.join(train_results_dir, f"{car_name}.json")
+    model_json = os.path.join(train_results_dir, f"{dimension_name}.json")
     if not os.path.exists(model_json):
         # 列出训练结果目录内容，帮助排查
         if os.path.exists(train_results_dir):
@@ -968,9 +970,14 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     return model_json, train_results_dir
 
 
-def _validate_model_structure(params):
+def _validate_model_structure(params, input_dim=DEFAULT_INPUT_DIM):
     """Validate the complete JSON contract exported by the Julia trainer."""
     issues = []
+    if isinstance(input_dim, bool) or not isinstance(input_dim, int) or input_dim not in INPUT_PROFILES:
+        return [f"input_dim={input_dim!r} (应为 {INPUT_DIMENSIONS})"]
+    expected_vars = list(INPUT_PROFILES[input_dim]["input_vars"])
+    expected_input_size = input_dim
+    expected_layer_shapes = ((7, input_dim), (13, 7), (3, 13), (1, 3))
     if not isinstance(params, dict):
         return ["模型 JSON 顶层必须是对象"]
 
@@ -983,8 +990,8 @@ def _validate_model_structure(params):
         issues.append(f"缺少必需字段: {', '.join(missing_fields)}")
 
     input_size = params.get("input_size")
-    if isinstance(input_size, bool) or not isinstance(input_size, int) or input_size != REQUIRED_INPUT_SIZE:
-        issues.append(f"input_size={input_size!r} (应为 {REQUIRED_INPUT_SIZE})")
+    if isinstance(input_size, bool) or not isinstance(input_size, int) or input_size != expected_input_size:
+        issues.append(f"input_size={input_size!r} (应为 {expected_input_size})")
 
     output_size = params.get("output_size")
     if isinstance(output_size, bool) or not isinstance(output_size, int) or output_size != 1:
@@ -993,17 +1000,17 @@ def _validate_model_structure(params):
     input_vars = params.get("input_vars")
     if not isinstance(input_vars, list):
         issues.append("input_vars 必须是字符串数组")
-    elif input_vars != EXPECTED_INPUT_VARS:
+    elif input_vars != expected_vars:
         if not all(isinstance(value, str) for value in input_vars):
             issues.append("input_vars 必须全部是字符串")
-        if len(input_vars) != REQUIRED_INPUT_SIZE:
+        if len(input_vars) != expected_input_size:
             issues.append(
-                f"input_vars 长度为 {len(input_vars)} (应为 {REQUIRED_INPUT_SIZE})"
+                f"input_vars 长度为 {len(input_vars)} (应为 {expected_input_size})"
             )
         else:
             differences = [
                 f"#{index}: {actual!r} 应为 {expected!r}"
-                for index, (actual, expected) in enumerate(zip(input_vars, EXPECTED_INPUT_VARS))
+                for index, (actual, expected) in enumerate(zip(input_vars, expected_vars))
                 if actual != expected
             ]
             issues.append("input_vars 顺序或名称错误: " + "; ".join(differences[:4]))
@@ -1091,12 +1098,12 @@ def _validate_model_structure(params):
     vector_values(
         numeric_array(params.get("input_mean"), "input_mean"),
         "input_mean",
-        REQUIRED_INPUT_SIZE,
+        expected_input_size,
     )
     stds = vector_values(
         numeric_array(params.get("input_std"), "input_std"),
         "input_std",
-        REQUIRED_INPUT_SIZE,
+        expected_input_size,
     )
     if stds is not None and any(value <= 0 for value in stds):
         issues.append("input_std 必须全部大于 0")
@@ -1105,11 +1112,11 @@ def _validate_model_structure(params):
     if not isinstance(layers, list):
         issues.append("layers 必须是数组")
         layers = []
-    elif len(layers) != len(EXPECTED_LAYER_JSON_SHAPES):
-        issues.append(f"layers 数量为 {len(layers)} (应为 {len(EXPECTED_LAYER_JSON_SHAPES)})")
+    elif len(layers) != len(expected_layer_shapes):
+        issues.append(f"layers 数量为 {len(layers)} (应为 {len(expected_layer_shapes)})")
 
     expected_activations = (frozenset({"sigmoid", "σ"}),) * 2 + (frozenset({"identity"}),) * 2
-    for index, expected_shape in enumerate(EXPECTED_LAYER_JSON_SHAPES):
+    for index, expected_shape in enumerate(expected_layer_shapes):
         if index >= len(layers):
             break
         layer = layers[index]
@@ -1145,7 +1152,8 @@ def _validate_model_structure(params):
 
 
 def step_validate(model_json, train_data_csv, output_dir, python_exe,
-                  streaming=False, cancel_event=None, process_holder=None):
+                  streaming=False, cancel_event=None, process_holder=None,
+                  input_dim=DEFAULT_INPUT_DIM):
     """步骤7: 验证模型质量。"""
     # 1. 检查 JSON 结构
     try:
@@ -1155,7 +1163,7 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
         print_error(f"模型 JSON 无法读取或格式错误: {exc}")
         return False
 
-    issues = _validate_model_structure(params)
+    issues = _validate_model_structure(params, input_dim=input_dim)
 
     input_size = params.get("input_size") if isinstance(params, dict) else None
 
@@ -1184,7 +1192,9 @@ def step_validate(model_json, train_data_csv, output_dir, python_exe,
     print_ok("模型 JSON 结构、输入变量、权重维度和归一化参数: 正确")
 
     # 2. 生成验证图表
-    validation_dir = os.path.join(output_dir, "validation")
+    validation_dir = os.path.join(
+        output_dir, f"validation_{dimension_suffix(input_dim)}"
+    )
     os.makedirs(validation_dir, exist_ok=True)
 
     # 找到训练数据（balanced.csv 或原始 CSV）
@@ -1290,7 +1300,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
                cancel_event=None, process_holder=None, batch_size=16384,
                force_cpu=True, skip_corrupt_rlogs=False,
                streaming_mode=False, keep_intermediates=True,
-               rlog_workers="auto"):
+               rlog_workers="auto", input_dim=DEFAULT_INPUT_DIM):
     """执行完整的 NNLC 模型训练流程。
 
     Args:
@@ -1307,6 +1317,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         force_cpu: 兼容旧调用方的参数；当前训练始终使用 CPU
         skip_corrupt_rlogs: 是否跳过无法解析的损坏 rlog 并继续提取
         rlog_workers: rlog 并行解析 worker 数，正整数或 auto
+        input_dim: 模型输入维数，18 或 23；默认 18
         streaming_mode: 是否使用分块评分、剪枝、可视化和 Julia 流式训练
         keep_intermediates: 是否在成功后保留提取和最终训练 CSV 文件
 
@@ -1315,6 +1326,8 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     """
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
         raise ValueError("batch_size 必须是正整数")
+    if isinstance(input_dim, bool) or not isinstance(input_dim, int) or input_dim not in INPUT_DIMENSIONS:
+        raise ValueError(f"input_dim 必须是以下值之一：{INPUT_DIMENSIONS}")
 
     # GPU training is intentionally not exposed by this application.
     force_cpu = True
@@ -1332,6 +1345,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     print(f"  NNLC 横向控制模型一键训练")
     print(f"{'='*60}{Colors.RESET}")
     print_info(f"车型: {car_name}")
+    print_info(f"训练维度: {input_dim} 维")
     print_info(f"数据: {data_dir}")
     print_info(f"Python: {python_exe}")
 
@@ -1359,6 +1373,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         cancel_event=cancel_event,
         process_holder=process_holder,
         rlog_workers=rlog_workers,
+        input_dim=input_dim,
     )
 
     # ---- 步骤 2: 评估路线质量 ----
@@ -1385,6 +1400,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         streaming=streaming_mode, route_results=route_results,
         cancel_event=cancel_event, process_holder=process_holder,
         keep_intermediates=keep_intermediates,
+        input_dim=input_dim,
     )
     pruned_csv = None
 
@@ -1399,6 +1415,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
             streaming=streaming_mode,
             cancel_event=cancel_event,
             process_holder=process_holder,
+            input_dim=input_dim,
         )
 
     # ---- 训练模型 ----
@@ -1414,6 +1431,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         streaming=streaming_mode,
         cancel_event=cancel_event,
         process_holder=process_holder,
+        input_dim=input_dim,
     )
 
     # ---- 步骤 6: 验证模型 ----
@@ -1422,6 +1440,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     print_step(validate_step, total_steps, "验证模型质量")
     quality_ok = step_validate(model_json, final_csv, output_dir, python_exe,
                                streaming=streaming_mode,
+                               input_dim=input_dim,
                                cancel_event=cancel_event,
                                process_holder=process_holder)
 
@@ -1435,7 +1454,11 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
     deployed_path = step_deploy(model_json, car_name, skip_deploy, deploy_dir=deploy_dir)
 
     if streaming_mode and not keep_intermediates:
-        training_copy = os.path.join(output_dir, "training_input", f"{car_name}.csv")
+        training_copy = os.path.join(
+            output_dir,
+            "training_input",
+            f"{car_name}_{dimension_suffix(input_dim)}.csv",
+        )
         cleanup_failures = []
         for intermediate in {lateral_csv, final_csv, training_copy}:
             try:
@@ -1466,6 +1489,7 @@ def auto_train(data_dir, car_name, min_score=None, skip_deploy=False,
         test_loss = float("inf")
 
     print(f"  车型:        {car_name}")
+    print(f"  训练维度:    {input_dim} 维")
     print(f"  数据目录:    {data_dir}")
     print(f"  输出目录:    {output_dir}")
     print(f"  模型文件:    {deployed_path}")
@@ -1605,6 +1629,9 @@ def main():
     )
     parser.add_argument("--streaming", action="store_true",
                         help="使用流式评分、剪枝、覆盖度统计和 Julia 训练")
+    parser.add_argument("--input-dim", type=int, choices=INPUT_DIMENSIONS,
+                        default=DEFAULT_INPUT_DIM,
+                        help="模型输入维数：18 或 23（默认 18）")
     parser.add_argument("--no-keep-intermediates", action="store_true",
                         help="流式模式成功后删除完整中间 CSV")
     parser.add_argument("--gui", action="store_true", help="启动 Tkinter 操作界面")
@@ -1652,6 +1679,7 @@ def main():
         streaming_mode=args.streaming,
         keep_intermediates=not args.no_keep_intermediates,
         rlog_workers=args.rlog_workers,
+        input_dim=args.input_dim,
     )
 
 

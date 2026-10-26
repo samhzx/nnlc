@@ -33,6 +33,12 @@ import pandas as pd
 from tqdm import tqdm
 
 from nnlc_tools.bool_utils import parse_bool
+from nnlc_tools.model_inputs import (
+    DEFAULT_INPUT_DIM,
+    INPUT_DIMENSIONS,
+    temporal_offsets,
+    temporal_suffix,
+)
 from nnlc_tools.route_utils import extract_route_id
 
 
@@ -41,10 +47,6 @@ MAX_RLOGS_PER_WORKER = 100
 MAX_RLOG_WORKERS = 16
 REORDER_WINDOW_SECONDS = 2.0
 NANOSECONDS_PER_SECOND = 1_000_000_000
-
-# Temporal offsets matching nnlc.py's past_times and future_times
-PAST_TIMES = [-0.3, -0.2, -0.1]
-FUTURE_TIMES = [0.3, 0.6, 1.0, 1.5]
 
 # ---- friction_input 计算所需常量（与 latcontrol_torque_ext_base.py 一致） ----
 LAT_PLAN_MIN_IDX = 5
@@ -199,7 +201,9 @@ COLUMNS = [
 
 
 DATE_DIR_NAME_RE = re.compile(r"^\d{8}$")
-DAY_CSV_NAME = "lateral_data.csv"
+def day_csv_name(input_dim=DEFAULT_INPUT_DIM):
+    temporal_offsets(input_dim)
+    return f"lateral_data_{input_dim}d.csv"
 
 
 def _natural_path_key(path):
@@ -520,20 +524,21 @@ def extract_segment(rlog_path, row_callback=None, *, reorder_window_seconds=REOR
         lr.close()
 
 
-def _temporal_column_specs():
+def _temporal_column_specs(input_dim=DEFAULT_INPUT_DIM):
     """Return temporal output columns in the same order as add_temporal_columns."""
     specs = []
-    for offset in PAST_TIMES + FUTURE_TIMES:
-        suffix = f"_t{offset:+.1f}".replace(".", "").replace("+", "p").replace("-", "m")
+    for offset in temporal_offsets(input_dim):
+        suffix = temporal_suffix(offset)
         for column in ("actual_lateral_accel", "desired_lateral_accel", "roll"):
             specs.append((int(round(offset / 0.01)), COLUMNS.index(column), f"{column}{suffix}"))
     return specs
 
 
-def csv_output_columns(temporal=False):
+def csv_output_columns(temporal=False, input_dim=DEFAULT_INPUT_DIM):
     """Return the CSV column names produced by extraction."""
+    temporal_offsets(input_dim)
     return COLUMNS + (
-        [spec[2] for spec in _temporal_column_specs()] if temporal else []
+        [spec[2] for spec in _temporal_column_specs(input_dim)] if temporal else []
     ) + ["route_id"]
 
 
@@ -577,20 +582,25 @@ def _remove_with_retry(path, attempts=5, delay=0.1):
 class _StreamingCsvWriter:
     """Write extracted rows while retaining only the temporal look-ahead window."""
 
-    _MAX_PAST = 30
     _MAX_FUTURE = 150
 
-    def __init__(self, output_path, temporal=False, filter_overrides=False, route_id="unknown"):
+    def __init__(self, output_path, temporal=False, filter_overrides=False,
+                 route_id="unknown", input_dim=DEFAULT_INPUT_DIM):
+        temporal_offsets(input_dim)
         self.temporal = temporal
         self.filter_overrides = filter_overrides
         self.route_id = route_id or "unknown"
-        self.temporal_specs = _temporal_column_specs() if temporal else []
+        self.temporal_specs = _temporal_column_specs(input_dim) if temporal else []
         self.output_columns = COLUMNS + [spec[2] for spec in self.temporal_specs] + ["route_id"]
         self.handle = open(output_path, "w", newline="", encoding="utf-8")
         self.writer = csv.writer(self.handle, lineterminator="\n")
         self.writer.writerow(self.output_columns)
         self.pending = deque()
-        self.past = deque(maxlen=self._MAX_PAST)
+        max_past = max(
+            (abs(offset) for offset, _column, _name in self.temporal_specs if offset < 0),
+            default=0,
+        )
+        self.past = deque(maxlen=max_past or 1)
         self.rows_written = 0
         self.rows_seen = 0
         self.rows_filtered = 0
@@ -847,7 +857,7 @@ class _RlogWorkerSlot:
 
 
 def _extract_one_rlog(slot, index, rlog_path, output_dir, segment_prefix, temporal,
-                      filter_overrides, skip_corrupt, cancel_event=None,
+                      input_dim, filter_overrides, skip_corrupt, cancel_event=None,
                       stop_event=None):
     """Parse one rlog into a private segment file for ordered merging."""
     crash_retries = 0
@@ -868,6 +878,7 @@ def _extract_one_rlog(slot, index, rlog_path, output_dir, segment_prefix, tempor
                 "rlog_path": rlog_path,
                 "output_path": segment_path,
                 "temporal": temporal,
+                "input_dim": input_dim,
                 "filter_overrides": filter_overrides,
                 "route_id": extract_route_id(rlog_path),
             })
@@ -923,16 +934,18 @@ def _extract_one_rlog(slot, index, rlog_path, output_dir, segment_prefix, tempor
 def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
                          filter_overrides=False, skip_corrupt=False,
                          show_progress=True, worker_factory=None,
-                         rlog_workers="auto", cancel_event=None):
+                         rlog_workers="auto", cancel_event=None,
+                         input_dim=DEFAULT_INPUT_DIM):
     """Extract rlogs through a restartable parallel native-parser worker pool.
 
     Each worker is isolated in a child process. Results are merged in the
     original input order so parallel execution remains deterministic.
     """
     worker_factory = worker_factory or _RlogWorker
+    temporal_offsets(input_dim)
     rlog_files = [os.fspath(path) for path in rlog_files]
     worker_count = resolve_rlog_workers(rlog_workers, len(rlog_files))
-    output_columns = csv_output_columns(temporal)
+    output_columns = csv_output_columns(temporal, input_dim)
     expected_header = _csv_header_bytes(output_columns)
     skipped_rlogs = []
     rows_written = rows_seen = rows_filtered = 0
@@ -979,6 +992,7 @@ def extract_rlogs_to_csv(rlog_files, output_path, temporal=False,
                     output_dir,
                     segment_prefix,
                     temporal,
+                    input_dim,
                     filter_overrides,
                     skip_corrupt,
                     cancel_event,
@@ -1176,23 +1190,25 @@ def extract_directory_to_csv(input_dir, output_path, temporal=False,
                              filter_overrides=False, skip_corrupt=False,
                              show_progress=True, worker_factory=None,
                              rlog_workers="auto", cancel_event=None,
-                             rlog_files=None):
+                             rlog_files=None, input_dim=DEFAULT_INPUT_DIM):
     """Extract an rlog directory to CSV, using per-day caches when applicable.
 
     When the input tree is organized by YYYYMMDD, each date directory stores
-    ``lateral_data.csv``. Existing readable files with the current temporal
-    header are reused as-is. Newly extracted days are written atomically so a
-    cancelled run cannot replace a day file with a partial CSV. The combined
-    output is then concatenated in date-name order.
+    a dimension-specific CSV. Only the current dimension's cache is reused.
+    Newly extracted days are written atomically so a cancelled run cannot
+    replace a day file with a partial CSV. The combined output is then
+    concatenated in date-name order.
 
     Without YYYYMMDD directories, this writes only ``output_path`` and does
     not create files inside the data directory.
     """
     if rlog_files is None:
         rlog_files = find_rlogs(input_dir)
+    temporal_offsets(input_dim)
     rlog_files = [os.fspath(path) for path in rlog_files]
     extract_kwargs = {
         "temporal": temporal,
+        "input_dim": input_dim,
         "filter_overrides": filter_overrides,
         "skip_corrupt": skip_corrupt,
         "show_progress": show_progress,
@@ -1216,7 +1232,7 @@ def extract_directory_to_csv(input_dir, output_path, temporal=False,
     for path in skipped_outside:
         print(f"WARNING: Skipping rlog outside YYYYMMDD directory: {path}", flush=True)
 
-    expected_header = _csv_header_bytes(csv_output_columns(temporal))
+    expected_header = _csv_header_bytes(csv_output_columns(temporal, input_dim))
     day_csvs = []
     extract_failed = False
     date_dirs = sorted(
@@ -1226,7 +1242,7 @@ def extract_directory_to_csv(input_dir, output_path, temporal=False,
     for date_dir in date_dirs:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("提取已取消")
-        day_csv = os.path.join(date_dir, DAY_CSV_NAME)
+        day_csv = os.path.join(date_dir, day_csv_name(input_dim))
         day_rlogs = grouped[date_dir]
         if daily_csv_is_reusable(day_csv, expected_header):
             print(f"Reusing cached CSV: {day_csv}", flush=True)
@@ -1268,18 +1284,17 @@ def extract_directory_to_csv(input_dir, output_path, temporal=False,
     return stats
 
 
-def add_temporal_columns(df):
+def add_temporal_columns(df, input_dim=DEFAULT_INPUT_DIM):
     """Add lagged/lead columns for temporal model training.
 
-    Adds columns at offsets matching nnlc.py's past_times [-0.3, -0.2, -0.1]
-    and future_times [0.3, 0.6, 1.0, 1.5].
+    Adds columns at offsets matching the selected NNLC input profile.
     """
     dt = 0.01  # controlsState runs at 100Hz
     temporal_cols = ["actual_lateral_accel", "desired_lateral_accel", "roll"]
 
-    for offset in PAST_TIMES + FUTURE_TIMES:
+    for offset in temporal_offsets(input_dim):
         shift_frames = int(round(offset / dt))
-        suffix = f"_t{offset:+.1f}".replace(".", "").replace("+", "p").replace("-", "m")
+        suffix = temporal_suffix(offset)
 
         for col in temporal_cols:
             if col in df.columns:
@@ -1293,12 +1308,15 @@ def main():
         description="Extract lateral control data from rlogs to CSV/Parquet.",
     )
     parser.add_argument("input", help="Directory containing rlog files")
-    parser.add_argument("-o", "--output", default="lateral_data.csv",
-                        help="Output file path (default: lateral_data.csv)")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output file path (default: lateral_data_<input-dim>d.csv)")
     parser.add_argument("--format", choices=["csv", "parquet"], default=None,
                         help="Output format (default: inferred from extension)")
     parser.add_argument("--temporal", action="store_true",
                         help="Add temporal lag/lead columns for NNLC training")
+    parser.add_argument("--input-dim", type=int, choices=INPUT_DIMENSIONS,
+                        default=DEFAULT_INPUT_DIM,
+                        help="NNLC model input dimension (default: 18)")
     parser.add_argument("--filter-overrides", action="store_true",
                         help="Drop rows where driver overrides (steering_pressed=True)")
     parser.add_argument("--skip-corrupt", action="store_true",
@@ -1310,6 +1328,11 @@ def main():
         help="rlog 并行解析 worker 数（正整数或 auto，默认 auto；1 为串行模式）",
     )
     args = parser.parse_args()
+    output_format = args.format or (
+        "parquet" if args.output and args.output.endswith(".parquet") else "csv"
+    )
+    default_extension = ".parquet" if output_format == "parquet" else ".csv"
+    output_path = args.output or f"lateral_data_{args.input_dim}d{default_extension}"
 
     if not os.path.isdir(args.input):
         print(f"ERROR: Input directory not found: {args.input}")
@@ -1323,15 +1346,11 @@ def main():
     print(f"Found {len(rlog_files)} rlog files")
 
     # Determine output format
-    fmt = args.format
-    if fmt is None:
-        if args.output.endswith(".parquet"):
-            fmt = "parquet"
-        else:
-            fmt = "csv"
+    fmt = output_format
 
     extract_kwargs = {
         "temporal": args.temporal,
+        "input_dim": args.input_dim,
         "filter_overrides": args.filter_overrides,
         "skip_corrupt": args.skip_corrupt,
         "rlog_workers": args.rlog_workers,
@@ -1343,7 +1362,7 @@ def main():
         # memory usage is bounded by one sorted rlog plus the temporal
         # look-ahead buffer instead of the complete dataset. Date-organized
         # trees also keep a per-day CSV beside the rlogs, then merge into -o.
-        stats = extract_directory_to_csv(args.input, args.output, **extract_kwargs)
+        stats = extract_directory_to_csv(args.input, output_path, **extract_kwargs)
         rows_written = stats["rows_written"]
         rows_seen = stats["rows_seen"]
         rows_filtered = stats["rows_filtered"]
@@ -1395,10 +1414,10 @@ def main():
             print("ERROR: No data extracted from any rlog file")
             sys.exit(1)
 
-        parquet_dir = os.path.dirname(os.path.abspath(args.output))
+        parquet_dir = os.path.dirname(os.path.abspath(output_path))
         os.makedirs(parquet_dir, exist_ok=True)
         parquet_temp = tempfile.NamedTemporaryFile(
-            prefix=f".{os.path.basename(args.output)}.", suffix=".tmp",
+            prefix=f".{os.path.basename(output_path)}.", suffix=".tmp",
             dir=parquet_dir, delete=False,
         )
         parquet_temp_path = parquet_temp.name
@@ -1407,7 +1426,7 @@ def main():
             df = pd.read_csv(temp_path)
             print(f"Extracted {len(df)} rows")
             df.to_parquet(parquet_temp_path, index=False)
-            _replace_with_retry(parquet_temp_path, args.output)
+            _replace_with_retry(parquet_temp_path, output_path)
         finally:
             for path in (temp_path, parquet_temp_path):
                 try:
@@ -1424,7 +1443,7 @@ def main():
         f"{stats['exact_sort_fallbacks']} exact-sort fallbacks; "
         f"max observed lateness {stats['max_lateness_seconds']:.6f}s"
     )
-    print(f"Saved to {args.output} ({fmt})")
+    print(f"Saved to {output_path} ({fmt})")
 
 
 if __name__ == "__main__":

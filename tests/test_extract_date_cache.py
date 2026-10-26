@@ -24,7 +24,9 @@ class FakeWorker:
         path = request["rlog_path"]
         with self.state["lock"]:
             self.state["calls"][path] = self.state["calls"].get(path, 0) + 1
-        columns = extractor.csv_output_columns(request.get("temporal"))
+        columns = extractor.csv_output_columns(
+            request.get("temporal"), request.get("input_dim", 18)
+        )
         row = [0] * len(columns)
         row[0] = float(self.state["row_values"][path])
         row[-1] = request["route_id"]
@@ -83,10 +85,10 @@ def touch_rlog(path):
     return os.fspath(path)
 
 
-def write_day_csv(path, timestamp, route_id, temporal=True):
+def write_day_csv(path, timestamp, route_id, temporal=True, input_dim=18):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns = extractor.csv_output_columns(temporal)
+    columns = extractor.csv_output_columns(temporal, input_dim)
     row = [0] * len(columns)
     row[0] = float(timestamp)
     row[-1] = route_id
@@ -148,7 +150,7 @@ def test_two_days_skip_existing_and_preserve_find_rlogs_order(tmp_path):
     assert rlogs == [day1_rlog, day2_rlog]
 
     write_day_csv(
-        data / "20261016" / "lateral_data.csv",
+        data / "20261016" / "lateral_data_18d.csv",
         10,
         extract_route_id(day1_rlog),
     )
@@ -164,7 +166,7 @@ def test_two_days_skip_existing_and_preserve_find_rlogs_order(tmp_path):
     assert stats["extracted_days"] == 1
     assert day1_rlog not in state["calls"]
     assert state["calls"][day2_rlog] == 1
-    assert (data / "20261017" / "lateral_data.csv").is_file()
+    assert (data / "20261017" / "lateral_data_18d.csv").is_file()
 
     expected = tmp_path / "expected.csv"
     extractor.extract_rlogs_to_csv(
@@ -202,7 +204,7 @@ def test_single_date_dir_as_reallog_root_reuses_day_csv(tmp_path):
     output = tmp_path / "combined.csv"
 
     stats, _state = extract_with_fake(data, output, {rlog: 9})
-    day_csv = data / "lateral_data.csv"
+    day_csv = data / "lateral_data_18d.csv"
     assert stats["extracted_days"] == 1
     assert day_csv.is_file()
     assert read_rows(output) == read_rows(day_csv)
@@ -214,10 +216,105 @@ def test_single_date_dir_as_reallog_root_reuses_day_csv(tmp_path):
     assert read_rows(output) == read_rows(day_csv)
 
 
+def test_18d_and_23d_date_caches_are_independent_and_legacy_cache_is_ignored(tmp_path):
+    data = tmp_path / "reallog"
+    rlog = touch_rlog(data / "20261016" / "route-a--0" / "rlog.zst")
+    date_dir = data / "20261016"
+    legacy_cache = write_day_csv(
+        date_dir / "lateral_data.csv", 99, "legacy", input_dim=18
+    )
+
+    output_18 = tmp_path / "out" / "lateral_data_18d.csv"
+    stats_18_first, state_18_first = extract_with_fake(
+        data, output_18, {rlog: 18}, input_dim=18
+    )
+    assert stats_18_first["extracted_days"] == 1
+    assert state_18_first["calls"][rlog] == 1
+    assert (date_dir / "lateral_data_18d.csv").is_file()
+    assert read_rows(output_18)[0]["timestamp"] == "18.0"
+
+    output_23 = tmp_path / "out" / "lateral_data_23d.csv"
+    stats_23_first, state_23_first = extract_with_fake(
+        data, output_23, {rlog: 23}, input_dim=23
+    )
+    assert stats_23_first["extracted_days"] == 1
+    assert state_23_first["calls"][rlog] == 1
+    assert (date_dir / "lateral_data_23d.csv").is_file()
+    assert "a_ego" in extractor.csv_output_columns(True, 23)
+    assert "desired_lateral_accel_tm20" in extractor.csv_output_columns(True, 23)
+    assert read_rows(output_23)[0]["timestamp"] == "23.0"
+
+    stats_18_again, state_18_again = extract_with_fake(
+        data, output_18, {rlog: -1}, input_dim=18
+    )
+    stats_23_again, state_23_again = extract_with_fake(
+        data, output_23, {rlog: -1}, input_dim=23
+    )
+    assert stats_18_again["reused_days"] == stats_23_again["reused_days"] == 1
+    assert state_18_again["calls"] == state_23_again["calls"] == {}
+    assert read_rows(output_18)[0]["timestamp"] == "18.0"
+    assert read_rows(output_23)[0]["timestamp"] == "23.0"
+    assert read_rows(legacy_cache)[0]["timestamp"] == "99.0"
+
+
+def test_legacy_generic_cache_is_never_reused(tmp_path):
+    data = tmp_path / "reallog"
+    rlog = touch_rlog(data / "20261016" / "route-a--0" / "rlog.zst")
+    legacy_cache = write_day_csv(
+        data / "20261016" / "lateral_data.csv", 99, "legacy", input_dim=18
+    )
+    output = tmp_path / "out" / "lateral_data_18d.csv"
+
+    stats, state = extract_with_fake(data, output, {rlog: 7}, input_dim=18)
+
+    assert stats["reused_days"] == 0
+    assert stats["extracted_days"] == 1
+    assert state["calls"][rlog] == 1
+    assert read_rows(output)[0]["timestamp"] == "7.0"
+    assert read_rows(legacy_cache)[0]["timestamp"] == "99.0"
+
+
+def test_23d_stream_writer_keeps_200_past_frames_and_resets_at_segment_boundary(tmp_path):
+    output = tmp_path / "writer-23d.csv"
+    writer = extractor._StreamingCsvWriter(
+        output, temporal=True, input_dim=23, route_id="route"
+    )
+
+    def row(value):
+        values = [0] * len(extractor.COLUMNS)
+        values[extractor.COLUMNS.index("timestamp")] = value
+        values[extractor.COLUMNS.index("a_ego")] = value / 10
+        values[extractor.COLUMNS.index("actual_lateral_accel")] = value / 1000
+        values[extractor.COLUMNS.index("desired_lateral_accel")] = value
+        values[extractor.COLUMNS.index("roll")] = value / 100
+        return values
+
+    for value in range(1, 206):
+        writer.accept(row(value))
+    writer.finish_segment()
+    for value in range(1001, 1206):
+        writer.accept(row(value))
+    writer.finish()
+    writer.close()
+
+    rows = read_rows(output)
+    assert len(rows) == 410
+    assert rows[199]["desired_lateral_accel_tm20"] == ""
+    assert rows[200]["desired_lateral_accel_tm20"] == "1"
+    assert rows[200]["desired_lateral_accel_tm10"] == "101"
+    assert rows[205]["desired_lateral_accel_tm20"] == ""
+    assert rows[404]["desired_lateral_accel_tm20"] == ""
+    assert rows[405]["desired_lateral_accel_tm20"] == "1001"
+    writer_18 = extractor._StreamingCsvWriter(
+        tmp_path / "writer-18d.csv", temporal=True, input_dim=18
+    )
+    assert writer_18.past.maxlen == 30
+    writer_18.close()
+
 def test_wrong_header_day_csv_is_reextracted(tmp_path):
     data = tmp_path / "reallog"
     rlog = touch_rlog(data / "20261016" / "route-a--0" / "rlog.zst")
-    day_csv = data / "20261016" / "lateral_data.csv"
+    day_csv = data / "20261016" / "lateral_data_18d.csv"
     day_csv.parent.mkdir(parents=True, exist_ok=True)
     day_csv.write_text("foo,bar\n1,2\n", encoding="utf-8")
     output = tmp_path / "out.csv"
@@ -228,14 +325,14 @@ def test_wrong_header_day_csv_is_reextracted(tmp_path):
     assert state["calls"][rlog] == 1
     with open(day_csv, newline="", encoding="utf-8") as handle:
         header = next(csv.reader(handle))
-    assert header == extractor.csv_output_columns(True)
+    assert header == extractor.csv_output_columns(True, 18)
     assert [float(row["timestamp"]) for row in read_rows(output)] == [6]
 
 
 def test_temporal_mode_mismatch_invalidates_day_csv(tmp_path):
     data = tmp_path / "reallog"
     rlog = touch_rlog(data / "20261016" / "route-a--0" / "rlog.zst")
-    day_csv = data / "20261016" / "lateral_data.csv"
+    day_csv = data / "20261016" / "lateral_data_18d.csv"
     write_day_csv(day_csv, 1, "route-a", temporal=False)
     output = tmp_path / "out.csv"
 
@@ -255,9 +352,9 @@ def test_temporal_mode_mismatch_invalidates_day_csv(tmp_path):
 def test_unreadable_day_csv_body_is_reextracted(tmp_path, body):
     data = tmp_path / "reallog"
     rlog = touch_rlog(data / "20261016" / "route-a--0" / "rlog.zst")
-    day_csv = data / "20261016" / "lateral_data.csv"
+    day_csv = data / "20261016" / "lateral_data_18d.csv"
     day_csv.write_bytes(
-        extractor._csv_header_bytes(extractor.csv_output_columns(True)) + body,
+        extractor._csv_header_bytes(extractor.csv_output_columns(True, 18)) + body,
     )
     output = tmp_path / "out.csv"
 
@@ -271,7 +368,7 @@ def test_unreadable_day_csv_body_is_reextracted(tmp_path, body):
 
 
 def test_merge_separates_day_csvs_without_trailing_newline(tmp_path):
-    header = extractor._csv_header_bytes(extractor.csv_output_columns(True))
+    header = extractor._csv_header_bytes(extractor.csv_output_columns(True, 18))
     first = tmp_path / "first.csv"
     second = tmp_path / "second.csv"
     output = tmp_path / "combined.csv"
@@ -325,9 +422,9 @@ def test_cancel_during_worker_keeps_existing_outputs_and_cleans_temps(tmp_path):
         )
 
     day_dir = data / "20261016"
-    assert not (day_dir / "lateral_data.csv").exists()
+    assert not (day_dir / "lateral_data_18d.csv").exists()
     assert output.read_text(encoding="utf-8") == "previous-complete-output\n"
-    assert not list(day_dir.glob(".lateral_data.csv.*.tmp"))
+    assert not list(day_dir.glob(".lateral_data_18d.csv.*.tmp"))
     assert not list(tmp_path.glob(".out.csv.*.tmp"))
 
 
@@ -383,7 +480,7 @@ extractor.extract_directory_to_csv(
             process.kill()
             process.wait(timeout=5)
 
-    assert not (data / "20261016" / "lateral_data.csv").exists()
+    assert not (data / "20261016" / "lateral_data_18d.csv").exists()
     assert output.read_text(encoding="utf-8") == "previous-complete-output\n"
 
 
@@ -397,7 +494,10 @@ def test_cli_main_routes_csv_extraction_through_directory_helper(
 
     def fake_extract(input_dir, output_path, **kwargs):
         captured.update(input_dir=input_dir, output_path=output_path, **kwargs)
-        write_day_csv(output_path, 12, "route-a", temporal=kwargs["temporal"])
+        write_day_csv(
+            output_path, 12, "route-a", temporal=kwargs["temporal"],
+            input_dim=kwargs.get("input_dim", 18),
+        )
         return {
             "rows_written": 1,
             "rows_seen": 1,
@@ -416,7 +516,7 @@ def test_cli_main_routes_csv_extraction_through_directory_helper(
         "sys.argv",
         [
             "nnlc-extract", str(data), "-o", str(output), "--temporal",
-            "--rlog-workers", "2",
+            "--input-dim", "23", "--rlog-workers", "2",
         ],
     )
 
@@ -425,6 +525,7 @@ def test_cli_main_routes_csv_extraction_through_directory_helper(
     assert captured["input_dir"] == str(data)
     assert captured["output_path"] == str(output)
     assert captured["temporal"] is True
+    assert captured["input_dim"] == 23
     assert captured["rlog_workers"] == "2"
     assert captured["rlog_files"] == ["dummy/rlog.zst"]
     assert read_rows(output)[0]["timestamp"] == "12.0"
@@ -447,7 +548,7 @@ def test_training_step_invokes_shared_extractor_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(nnlc_auto_train, "run_command", fake_run_command)
 
     output = nnlc_auto_train.step_extract(
-        str(data), str(output_dir), "python", rlog_workers=3,
+        str(data), str(output_dir), "python", rlog_workers=3, input_dim=23,
     )
 
     command = captured["command"]
@@ -455,6 +556,8 @@ def test_training_step_invokes_shared_extractor_cli(tmp_path, monkeypatch):
     assert command[command.index("-o") + 1] == str(output)
     assert "--temporal" in command
     assert command[command.index("--rlog-workers") + 1] == "3"
+    assert Path(output).name == "lateral_data_23d.csv"
+    assert command[command.index("--input-dim") + 1] == "23"
     assert Path(output).is_file()
 
 
@@ -471,5 +574,5 @@ def test_date_mode_skips_rlogs_outside_date_directories(tmp_path, capsys):
     assert extra in stats["skipped_outside_date_dirs"]
     assert extra not in state["calls"]
     assert [float(row["timestamp"]) for row in read_rows(output)] == [3]
-    assert not (data / "misc" / "lateral_data.csv").exists()
+    assert not (data / "misc" / "lateral_data_18d.csv").exists()
     assert "Skipping rlog outside YYYYMMDD directory" in capsys.readouterr().out

@@ -26,6 +26,7 @@ except ImportError:  # Some minimal Python builds (including CI macOS) omit Tk.
 
 from nnlc_auto_train import _terminate_process_tree, auto_train
 from nnlc_runtime import application_directory
+from nnlc_tools.model_inputs import DEFAULT_INPUT_DIM, INPUT_DIMENSIONS
 from nnlc_update_ui import GuiUpdateController
 from nnlc_version import get_version
 
@@ -38,6 +39,18 @@ TRAINING_MODES = {
     "标准模式": 16384,
     "流式模式": 4096,
 }
+INPUT_DIM_OPTIONS = {f"{input_dim} 维": input_dim for input_dim in INPUT_DIMENSIONS}
+INPUT_DIM_LABELS = {value: label for label, value in INPUT_DIM_OPTIONS.items()}
+
+
+def normalize_input_dim(value) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value in INPUT_DIMENSIONS
+        else DEFAULT_INPUT_DIM
+    )
+
+
 LEGACY_TRAINING_MODES = {
     "CPU 标准模式": "标准模式",
     "CPU 流式低内存模式": "流式模式",
@@ -72,9 +85,11 @@ def sanitize_log_car_name(car_name: str) -> str:
     return sanitized or "model"
 
 
-def training_log_filename(car_name: str, when: datetime | None = None) -> str:
+def training_log_filename(
+    car_name: str, when: datetime | None = None, input_dim: int = DEFAULT_INPUT_DIM
+) -> str:
     stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    return f"{stamp}_{sanitize_log_car_name(car_name)}.log"
+    return f"{stamp}_{sanitize_log_car_name(car_name)}_{input_dim}d.log"
 
 
 def training_log_directory(base_dir: str | os.PathLike[str] | None = None) -> Path:
@@ -83,17 +98,23 @@ def training_log_directory(base_dir: str | os.PathLike[str] | None = None) -> Pa
 
 
 def training_log_path(car_name: str, when: datetime | None = None,
-                      base_dir: str | os.PathLike[str] | None = None) -> Path:
-    return training_log_directory(base_dir) / training_log_filename(car_name, when)
+                      base_dir: str | os.PathLike[str] | None = None,
+                      input_dim: int = DEFAULT_INPUT_DIM) -> Path:
+    return training_log_directory(base_dir) / training_log_filename(
+        car_name, when, input_dim
+    )
 
 
 def create_training_log_file(
     car_name: str,
     when: datetime | None = None,
     base_dir: str | os.PathLike[str] | None = None,
+    input_dim: int = DEFAULT_INPUT_DIM,
 ):
     """Create a new log without overwriting or appending to another run."""
-    base_path = training_log_path(car_name, when=when, base_dir=base_dir)
+    base_path = training_log_path(
+        car_name, when=when, base_dir=base_dir, input_dim=input_dim
+    )
     base_path.parent.mkdir(parents=True, exist_ok=True)
     candidate = base_path
     suffix = 2
@@ -320,6 +341,9 @@ class NNLCApp:
         saved_mode = LEGACY_TRAINING_MODES.get(saved_mode, saved_mode)
         if not isinstance(saved_mode, str) or saved_mode not in TRAINING_MODES:
             saved_mode = "标准模式"
+        saved_input_dim = normalize_input_dim(
+            saved_preferences.get("input_dim", DEFAULT_INPUT_DIM)
+        )
 
         saved_car = saved_preferences.get("car")
         if not isinstance(saved_car, str) or not saved_car.strip():
@@ -332,6 +356,7 @@ class NNLCApp:
         self.car_var = tk.StringVar(value=saved_car)
         self.threshold_var = tk.StringVar()
         self.training_mode_var = tk.StringVar(value=saved_mode)
+        self.input_dim_var = tk.StringVar(value=INPUT_DIM_LABELS[saved_input_dim])
         self.auto_threshold_var = tk.BooleanVar(value=True)
         self.skip_viz_var = tk.BooleanVar(value=True)
         self.keep_intermediates_var = tk.BooleanVar(value=True)
@@ -407,6 +432,9 @@ class NNLCApp:
         training_mode = LEGACY_TRAINING_MODES.get(training_mode, training_mode)
         if training_mode not in TRAINING_MODES:
             training_mode = "标准模式"
+        input_dim = INPUT_DIM_OPTIONS.get(
+            self.input_dim_var.get(), DEFAULT_INPUT_DIM
+        )
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -416,6 +444,7 @@ class NNLCApp:
                     {
                         "car": car,
                         "training_mode": training_mode,
+                        "input_dim": input_dim,
                         "data_dir": self._saved_path(self.data_var.get()),
                         "output_dir": self._saved_path(self.output_var.get()),
                         "keep_intermediates": bool(self.keep_intermediates_var.get()),
@@ -512,6 +541,7 @@ class NNLCApp:
         param_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         param_inner.columnconfigure(0, minsize=LABEL_W)
         param_inner.columnconfigure(1, weight=1)
+        param_inner.columnconfigure(2, minsize=LABEL_W)
 
         tk.Label(param_inner, text="目标车型", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
             row=0, column=0, sticky="w", pady=PAD_ROW
@@ -537,34 +567,42 @@ class NNLCApp:
         self.training_mode_combo.bind("<<ComboboxSelected>>", self._on_training_mode_changed)
         self.config_widgets.append(self.training_mode_combo)
 
+        tk.Label(param_inner, text="训练维度", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
+            row=1, column=2, sticky="w", pady=PAD_ROW
+        )
+        self.input_dim_box = self._fixed_box(param_inner, width=MODE_BOX_W)
+        self.input_dim_box.grid(row=1, column=3, sticky="w", padx=(10, 0), pady=PAD_ROW)
+        self.input_dim_combo = ttk.Combobox(
+            self.input_dim_box,
+            textvariable=self.input_dim_var,
+            values=tuple(INPUT_DIM_OPTIONS),
+            state="readonly",
+            font=F_BASE,
+        )
+        self.input_dim_combo.pack(fill="both", expand=True)
+        self.input_dim_combo.bind("<<ComboboxSelected>>", self._on_input_dim_changed)
+        self.config_widgets.append(self.input_dim_combo)
+
         tk.Label(param_inner, text="路线阈值", font=F_BASE, bg=C_CARD_BG, fg=C_TEXT).grid(
             row=1, column=0, sticky="w", pady=PAD_ROW
         )
-        self.thr_box = self._fixed_box(param_inner)
-        self.thr_box.grid(row=1, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
+        threshold_controls = tk.Frame(param_inner, bg=C_CARD_BG)
+        threshold_controls.grid(row=1, column=1, sticky="w", padx=(10, 14), pady=PAD_ROW)
+        self.thr_box = self._fixed_box(threshold_controls, width=64)
+        self.thr_box.pack(side="left")
         self.threshold_entry = self._make_form_entry(self.thr_box, self.threshold_var)
-
-        check_frame = tk.Frame(param_inner, bg=C_CARD_BG)
-        check_frame.grid(row=1, column=2, columnspan=2, sticky="w", pady=PAD_ROW)
-        auto_lbl = tk.Label(
-            check_frame,
-            text="自动推荐",
-            font=F_BASE,
-            bg=C_CARD_BG,
-            fg=C_TEXT,
-            cursor="hand2",
-        )
-        auto_lbl.pack(side="left")
         self.auto_threshold_check = tk.Checkbutton(
-            check_frame,
+            threshold_controls,
+            text="自动",
             variable=self.auto_threshold_var,
+            font=F_BASE,
             bg=C_CARD_BG,
             activebackground=C_CARD_BG,
             selectcolor=C_CARD_BG,
+            cursor="hand2",
             command=self._toggle_threshold,
         )
-        self.auto_threshold_check.pack(side="left")
-        auto_lbl.bind("<Button-1>", lambda _e: self.auto_threshold_check.invoke())
+        self.auto_threshold_check.pack(side="left", padx=(4, 0))
         self.config_widgets.append(self.auto_threshold_check)
         self._toggle_threshold()
 
@@ -866,6 +904,9 @@ class NNLCApp:
         self._update_streaming_options()
         self._save_preferences()
 
+    def _on_input_dim_changed(self, _event=None) -> None:
+        self._save_preferences()
+
     def _choose_data(self) -> None:
         path = filedialog.askdirectory(title="选择日志目录")
         if path:
@@ -922,9 +963,9 @@ class NNLCApp:
                 font=F_BOLD if color == C_STEP_CURRENT else F_SUB,
             )
 
-    def _open_training_log(self, car: str) -> None:
+    def _open_training_log(self, car: str, input_dim: int = DEFAULT_INPUT_DIM) -> None:
         self._close_training_log()
-        path, self.log_file = create_training_log_file(car)
+        path, self.log_file = create_training_log_file(car, input_dim=input_dim)
         self.current_log_path = path
         self._log_write_failed = False
         self._log_line_buffer = ""
@@ -933,7 +974,7 @@ class NNLCApp:
         if self.log_file is None or self._log_write_failed:
             return
         try:
-            self.log_file.write(text)
+            self.log_file.write(strip_ansi(text))
             self.log_file.flush()
         except OSError as exc:
             self._log_write_failed = True
@@ -1125,7 +1166,7 @@ class NNLCApp:
             try:
                 min_score = int(self.threshold_var.get().strip())
             except ValueError:
-                messagebox.showerror("参数错误", "路线阈值必须是 0-100 的整数，或勾选自动推荐。")
+                messagebox.showerror("参数错误", "路线阈值必须是 0-100 的整数，或勾选“自动”。")
                 return
             if not 0 <= min_score <= 100:
                 messagebox.showerror("参数错误", "路线阈值必须在 0-100 之间。")
@@ -1137,8 +1178,12 @@ class NNLCApp:
         if batch_size is None:
             messagebox.showerror("参数错误", "请选择有效的训练模式。")
             return
+        input_dim = INPUT_DIM_OPTIONS.get(self.input_dim_var.get())
+        if input_dim not in INPUT_DIMENSIONS:
+            messagebox.showerror("参数错误", "请选择有效的训练维度。")
+            return
         try:
-            self._open_training_log(car)
+            self._open_training_log(car, input_dim=input_dim)
         except OSError as exc:
             messagebox.showerror("保存失败", f"无法创建训练日志：\n{exc}")
             return
@@ -1157,7 +1202,7 @@ class NNLCApp:
                   batch_size,
                   training_mode == "流式模式",
                   bool(self.keep_intermediates_var.get()),
-                  self.cancel_event, self.process_holder),
+                  self.cancel_event, self.process_holder, input_dim),
             daemon=True,
         )
         self.worker.start()
@@ -1175,6 +1220,7 @@ class NNLCApp:
         keep_intermediates,
         cancel_event,
         process_holder,
+        input_dim=DEFAULT_INPUT_DIM,
     ) -> None:
         writer = _QueueWriter(self.messages)
         try:
@@ -1192,6 +1238,7 @@ class NNLCApp:
                     keep_intermediates=keep_intermediates,
                     cancel_event=cancel_event,
                     process_holder=process_holder,
+                    input_dim=input_dim,
                 )
             self.messages.put(("done", model_path))
         except BaseException as exc:

@@ -19,6 +19,7 @@ REMOTE_CONFIG_DIR = (
 )
 RECENT_WINDOW_SECONDS = 5 * 60
 CHUNK_SIZE = 256 * 1024
+SFTP_MAX_REQUEST_SIZE = 256 * 1024
 PREFETCH_CONCURRENT_REQUESTS = 64
 MANIFEST_NAME = ".c3_rlog_manifest.json"
 _PART_META_SUFFIX = ".part.json"
@@ -798,6 +799,8 @@ def connect_sftp(
                 "无法使用该口令解锁私钥；请检查口令或密钥格式。"
             ) from exc
         raise TransferError("私钥格式不受支持或文件已损坏。") from exc
+
+    paramiko.SFTPFile.MAX_REQUEST_SIZE = SFTP_MAX_REQUEST_SIZE
 
     settings_dir = Path(settings_dir)
     settings_dir.mkdir(parents=True, exist_ok=True)

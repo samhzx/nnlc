@@ -388,6 +388,20 @@
 
     .gui-param-row .gui-label { white-space: nowrap; }
 
+    .gui-threshold-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .gui-threshold-group .gui-input {
+      width: 62px;
+      flex: 0 0 62px;
+    }
+
+    .gui-threshold-auto { white-space: nowrap; }
+
     .gui-input,
     .gui-select {
       min-height: 29px;
@@ -723,13 +737,13 @@
         <p>下面是当前界面的结构示意。红色编号与其后的参数表一一对应。</p>
         <div class="gui-window" role="img" aria-label="NNLC GUI 界面示意图">
           <div class="gui-titlebar">
-            <span>NNLC 横向控制模型训练 v1.1.4</span>
+            <span>NNLC 横向控制模型训练 v1.1.5</span>
             <span class="window-controls">— □ ×</span>
           </div>
           <div class="gui-body">
             <div class="gui-heading">
               <span>NNLC 横向控制模型训练</span>
-              <span class="gui-version">v1.1.4</span>
+              <span class="gui-version">v1.1.5</span>
             </div>
             <div class="gui-columns">
               <div class="gui-group">
@@ -754,18 +768,18 @@
                   <span class="gui-select">标准模式　⌄</span>
                 </div>
                 <div class="gui-param-row">
-                  <span class="gui-label">路线阈值 <span class="marker">5</span></span>
-                  <span class="gui-input disabled">自动推荐</span>
-                  <span class="gui-label">自动推荐</span>
-                  <span class="check">✓</span>
+                  <span class="gui-label">路线阈值 <span class="marker">6</span></span>
+                  <span class="gui-threshold-group"><span class="gui-input disabled"></span><span class="gui-threshold-auto"><span class="check">✓</span> 自动</span></span>
+                  <span class="gui-label">训练维度 <span class="marker">5</span></span>
+                  <span class="gui-select">18 维　⌄</span>
                 </div>
-                <div class="gui-hint">取消自动推荐后可输入 0-100 的整数；流式模式适合超大数据和 16GB 内存电脑。</div>
+                <div class="gui-hint">维度需与车端推理模型一致；流式模式适合超大数据和 16GB 内存电脑。</div>
               </div>
             </div>
             <div class="gui-group">
               <span class="gui-group-title">训练进度</span>
               <div class="gui-progress-head">
-                <span>5 / 7  训练 BYD_TANG_DMI_24 模型 <span class="marker">8</span></span>
+                <span>5 / 7  训练 BYD_TANG_DMI_24 模型 <span class="marker">9</span></span>
                 <span class="gui-hint">耗时 12:48</span>
               </div>
               <div class="progress-track"><div class="progress-value"></div></div>
@@ -773,16 +787,16 @@
                 <span class="done">提取</span><span class="done">评分</span><span class="done">修剪</span><span class="done">覆盖度</span><span class="active">训练</span><span>验证</span><span>部署</span>
               </div>
               <div class="gui-log">
-                <div class="gui-hint">最新日志 <span class="marker">9</span></div>
+                <div class="gui-hint">最新日志 <span class="marker">10</span></div>
                 正在编译训练代码（自动微分，本次迭代），请继续等待（已等待 86 秒）
                 <div class="gui-hint" style="margin-top:8px;">完整日志写入程序运行目录的 logs/*.log</div>
               </div>
             </div>
             <div class="gui-controls">
-              <span class="gui-button">打开输出目录 <span class="marker">7</span></span>
-              <span class="gui-button">打开日志 <span class="marker">10</span></span>
+              <span class="gui-button">打开输出目录 <span class="marker">8</span></span>
+              <span class="gui-button">打开日志 <span class="marker">11</span></span>
               <span></span>
-              <span class="gui-button primary">开始训练 <span class="marker">6</span></span>
+              <span class="gui-button primary">开始训练 <span class="marker">7</span></span>
             </div>
             <div class="gui-status">训练中，请保持窗口打开...</div>
           </div>
@@ -801,13 +815,14 @@
               <tr><td><strong>2. 输出目录</strong></td><td>保存中间数据、图片、训练结果和最终车型 JSON。可以输入路径，也可以点击输入框右侧的 <code>···</code> 浏览按钮。</td><td>首次优先使用 <code>%USERPROFILE%\Documents\NNLC_Output</code>；Documents 目录不存在时使用程序当前目录下的 <code>NNLC_Output</code>。以后回填上次路径。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>3. 目标车型</strong></td><td>最终模型文件名使用这里的文本。通常填写车辆 <code>carFingerprint</code>，例如 <code>BYD_TANG_DMI_24</code>。程序只检查非空，不限制格式。</td><td>首次为 <code>BYD_TANG_DMI_24</code>，以后回填上次内容。</td><td><span class="badge yes">会记忆</span></td></tr>
               <tr><td><strong>4. 训练模式</strong></td><td>在标准模式和流式模式之间选择。选择方法见下一节。</td><td>首次为标准模式。</td><td><span class="badge yes">会记忆</span></td></tr>
-              <tr><td><strong>5. 路线阈值</strong></td><td>勾选自动推荐时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动推荐</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>自动推荐</strong></td><td>控制路线阈值是否由程序自动选择。取消勾选后，路线阈值输入框才可编辑。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
-              <tr><td><strong>6. 开始训练</strong></td><td>先校验目录、目标车型、阈值和模式，再启动后台训练。训练期间参数会被锁定，开始训练按钮不可点。</td><td>点击后重置进度卡，并立刻创建本次日志文件。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>7. 打开输出目录</strong></td><td>在文件管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>8. 训练进度</strong></td><td>显示固定 7 步进度：提取、评分、修剪、覆盖度、训练、验证、部署。标题形如 <code>5 / 7  训练 车型 模型</code>。未开始时为 <code>0 / 7  等待开始</code>。</td><td>总进度只按流水线步骤前进，不使用 Julia 的 epoch 数字。</td><td><span class="badge no">不适用</span></td></tr>
-              <tr><td><strong>9. 最新日志</strong></td><td>只显示当前最新一行，并按标签实际宽度铺满；超出部分用省略号截断。完整内容写入程序运行目录 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同一秒同车型再次启动时会追加 <code>_2</code>、<code>_3</code> 等编号。</td><td>每次训练独立创建文件，从点击开始训练起增量写入；取消、失败或关窗也保留已写内容。</td><td><span class="badge no">写入运行目录</span></td></tr>
-              <tr><td><strong>10. 打开日志</strong></td><td>打开本次训练写入的日志文件。还没有本次文件时，改为打开程序运行目录下的 <code>logs</code> 文件夹。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>5. 训练维度</strong></td><td>选择 18 维或 23 维输入，必须与部署设备上的推理代码和模型输入顺序一致。23 维增加纵向加速度及 -2.0s/-1.0s 历史量。</td><td>首次为 18 维。</td><td><span class="badge yes">会记忆</span></td></tr>
+              <tr><td><strong>6. 路线阈值</strong></td><td>勾选“自动”时不需要填写。手动设置必须是 <code>0-100</code> 的整数；越高越严格，保留路线越少。</td><td><span class="badge default">自动</span>，根据高质量路线比例选择 70、60 或 40。</td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>自动</strong></td><td>控制路线阈值是否由程序自动选择。取消勾选后，路线阈值输入框才可编辑。</td><td><span class="badge default">已勾选</span></td><td><span class="badge no">不记忆</span></td></tr>
+              <tr><td><strong>7. 开始训练</strong></td><td>先校验目录、目标车型、阈值、模式和输入维度，再启动后台训练。训练期间参数会被锁定，开始训练按钮不可点。</td><td>点击后重置进度卡，并立刻创建本次维度日志文件。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>8. 打开输出目录</strong></td><td>在文件管理器中打开当前输出目录。目录尚未创建时会提示先完成一次训练。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>9. 训练进度</strong></td><td>显示固定 7 步进度：提取、评分、修剪、覆盖度、训练、验证、部署。标题形如 <code>5 / 7  训练 车型 模型</code>。未开始时为 <code>0 / 7  等待开始</code>。</td><td>总进度只按流水线步骤前进，不使用 Julia 的 epoch 数字。</td><td><span class="badge no">不适用</span></td></tr>
+              <tr><td><strong>10. 最新日志</strong></td><td>只显示当前最新一行，并按标签实际宽度铺满；超出部分用省略号截断。完整内容写入程序运行目录 <code>logs/YYYYMMDD_HHMMSS_车型_18d.log</code> 或 <code>_23d.log</code>；同秒同车型同维度再次启动时会追加编号。</td><td>每次训练独立创建文件，从点击开始训练起增量写入；取消、失败或关窗也保留已写内容。</td><td><span class="badge no">写入运行目录</span></td></tr>
+              <tr><td><strong>11. 打开日志</strong></td><td>打开本次训练写入的日志文件。还没有本次文件时，改为打开程序运行目录下的 <code>logs</code> 文件夹。</td><td>训练期间仍可打开。</td><td><span class="badge no">不适用</span></td></tr>
             </tbody>
           </table>
         </div>
@@ -825,10 +840,12 @@
               <tr><td>后续 CSV 处理</td><td>评分采用有界分块计数；路线剪枝和干预帧移除在内存中一次完成，覆盖度、验证抽样和 Julia 预处理仍完整载入数据。</td><td>评分、合并剪枝/干预、覆盖度、验证抽样和 Julia 预处理都采用分块或流式处理，不生成单独的 <code>routes_pruned.csv</code>。</td></tr>
               <tr><td>Julia batch size</td><td><code>16384</code></td><td><code>4096</code></td></tr>
               <tr><td>速度</td><td>数据能放入内存时通常更快。</td><td>需要顺序扫描大型 CSV，通常更慢，但内存不会随总行数线性增加。</td></tr>
-              <tr><td>训练规则</td><td colspan="2">两者都使用 CPU，并保持相同的 18 维输入、路线隔离、对称增强、损失规则及模型结构。模式不是“质量高低”选项。</td></tr>
+              <tr><td>训练规则</td><td colspan="2">两者都使用所选的 18/23 维输入，并保持相同的路线隔离、对称增强、损失规则及网络隐藏层结构。处理模式不是“质量高低”选项。</td></tr>
             </tbody>
           </table>
         </div>
+        <h3>训练维度</h3>
+        <p><strong>18 维</strong>沿用现有输入；<strong>23 维</strong>在前四个当前量后加入 <code>a_ego</code>，并将期望横向加速度和 roll 的历史点扩展到 <code>-2.0s</code>、<code>-1.0s</code>。选用的维度必须和设备推理端一致。</p>
         <div class="preset-grid">
           <div class="mini-panel">
             <h3>普通数据推荐</h3>
@@ -851,9 +868,10 @@
         <ol class="steps">
           <li><strong>确认输入目录</strong>目录必须存在，并且内部至少包含一个受支持的 rlog 文件。</li>
           <li><strong>确认输出空间</strong>不要把超大任务输出到剩余空间不足的系统盘。输出目录不存在时程序会自动创建。</li>
-          <li><strong>检查目标车型与阈值</strong>目标车型不能为空。首次训练建议保留“自动推荐”，避免阈值过高把数据全部删除。</li>
+          <li><strong>检查目标车型与阈值</strong>目标车型不能为空。首次训练建议保留“自动”，避免阈值过高把数据全部删除。</li>
           <li><strong>选择训练模式</strong>按内存和数据规模选择标准或流式；不确定且电脑只有 16 GB 内存时优先流式。rlog 提取默认自动使用多个 worker 并行解析。</li>
-          <li><strong>点击开始训练</strong>进度卡先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。同时在程序运行目录创建独立日志 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>；同秒冲突时自动追加编号。</li>
+          <li><strong>选择训练维度</strong>选择 18 维或 23 维，并确认设备推理端使用匹配的输入顺序；默认 18 维。</li>
+          <li><strong>点击开始训练</strong>进度卡先显示“训练任务已启动”，状态栏变为“训练中，请保持窗口打开...”。同时在程序运行目录创建标记输入维度的独立日志；同秒、同车型、同维度冲突时自动追加编号。</li>
           <li><strong>观察进度</strong>进度条按 7 个流水线步骤前进，卡片只显示最新一行日志；耗时会持续更新，但不代表 Julia epoch 百分比。完整日志请点“打开日志”。</li>
           <li><strong>等待完成提示</strong>成功时状态栏显示“训练完成”，弹窗给出最终模型路径；失败时弹窗显示异常原因。</li>
         </ol>
@@ -862,7 +880,8 @@
         <div class="callout danger"><strong>不要直接强制关闭。</strong>训练中点击窗口关闭按钮会询问是否中断。确认退出后，GUI 会结束当前 Python/Julia 子进程树；未完成的模型不会部署。</div>
         <h3>完整日志写在哪里</h3>
         <p>完整训练日志不保存在输出目录，而是写入程序运行目录：</p>
-        <pre><code>NNLC_Trainer.exe 所在目录\logs/YYYYMMDD_HHMMSS_车型.log</code></pre>
+        <pre><code>NNLC_Trainer.exe 所在目录\logs/YYYYMMDD_HHMMSS_车型_18d.log
+NNLC_Trainer.exe 所在目录\logs/YYYYMMDD_HHMMSS_车型_23d.log</code></pre>
         <p>源码直接运行时，这个目录就是项目根目录下的 <code>logs</code>。窗口只显示最新一行；排查失败时请打开这份文件，而不是只看进度卡。</p>
       </section>
 
@@ -870,12 +889,12 @@
         <h2>7. 程序内部的训练流程</h2>
         <p>GUI 默认执行完整的 7 步流程，并生成覆盖度图、提取 CSV 和最终训练 CSV。评分、路线剪枝和干预帧移除在一次合并扫描中完成，不再生成单独的 <code>routes_pruned.csv</code>。</p>
         <ol class="steps">
-          <li><strong>提取横向控制数据</strong>递归读取 rlog，默认按 2 秒窗口重排事件；迟到事件超出窗口时该文件回退到全量稳定排序，生成带时序特征的 <code>lateral_data.csv</code>。较小的 zstd/bz2 日志在内存中解压，较大的仍写入临时文件。若 reallog 目录本身是 <code>YYYYMMDD</code>，或其直接子目录包含下载器那种日期目录，会先把各日结果写到 <code>日期目录/lateral_data.csv</code>；该文件已存在且表头正确时跳过该日，再按日期顺序合成输出目录的总表。补下载同一天的日志后，若要重新提取，需要手动删除该日的 <code>lateral_data.csv</code>。没有日期目录时仍只写输出目录，不会在数据目录生成 CSV。</li>
+          <li><strong>提取横向控制数据</strong>递归读取 rlog，默认按 2 秒窗口重排事件；迟到事件超出窗口时该文件回退到全量稳定排序，按所选维度生成 <code>lateral_data_18d.csv</code> 或 <code>lateral_data_23d.csv</code>。日期目录中的缓存也按维度分别命名，缺少缓存或表头不匹配时重新提取；旧版通用 <code>lateral_data.csv</code> 不会复用。没有日期目录时只在输出目录生成 CSV。</li>
           <li><strong>评估路线质量</strong>根据激活时长、饱和、停车、变道等指标评分，并计算自动推荐阈值。</li>
-          <li><strong>修剪路线并移除干预帧</strong>删除低于阈值的路线、饱和帧、变道帧和干预事件，直接生成最终训练数据 <code>interventions_pruned.csv</code>。</li>
-          <li><strong>生成覆盖度图</strong>输出 <code>coverage.png</code> 和 <code>coverage_gaps.txt</code>。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
-          <li><strong>Julia CPU 训练</strong>为当前车型准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出模型 JSON 和训练图。</li>
-          <li><strong>验证模型质量</strong>校验 JSON 字段、18 维输入、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
+          <li><strong>修剪路线并移除干预帧</strong>删除低于阈值的路线、饱和帧、变道帧和干预事件，生成带维度后缀的 <code>interventions_pruned_18d.csv</code> 或 <code>interventions_pruned_23d.csv</code>。</li>
+          <li><strong>生成覆盖度图</strong>输出带维度后缀的覆盖度图和补采建议。建议里的速度使用 km/h，并说明缺口该怎么补采。</li>
+          <li><strong>Julia CPU 训练</strong>为当前车型和维度准备训练输入，执行 <code>latmodel_temporal.jl</code> 并输出对应维度的模型 JSON 和训练图。</li>
+          <li><strong>验证模型质量</strong>按所选维度校验 JSON 输入数、变量顺序、权重、归一化参数和测试损失，并尝试生成两张模型验证图。</li>
           <li><strong>部署到输出目录</strong>将验证通过的模型原子复制为输出目录根部的 <code>车型.json</code>。已有同名模型会先备份为 <code>车型.json.bak</code>。</li>
         </ol>
         <div class="callout success"><strong>只有质量验证通过才会部署。</strong>训练脚本生成 JSON 不代表流程已经成功；必须看到 GUI 的“训练完成”弹窗和绿色“模型质量验证通过”。</div>
@@ -884,19 +903,19 @@
       <section id="outputs">
         <h2>8. 输出目录和文件用途</h2>
         <pre><code>NNLC_Output\
-├─ lateral_data.csv                    # rlog 提取后的完整数据
-├─ interventions_pruned.csv            # 移除干预后的最终训练数据
-├─ coverage.png                        # 数据覆盖度图（始终生成）
-├─ coverage_gaps.txt                   # 覆盖缺口补采建议，速度使用 km/h
+├─ lateral_data_<维度>d.csv             # 18d 或 23d rlog 提取数据
+├─ interventions_pruned_<维度>d.csv    # 对应维度的最终训练数据
+├─ coverage_<维度>d.png                 # 对应维度的数据覆盖度图
+├─ coverage_<维度>d_gaps.txt            # 覆盖缺口补采建议
 ├─ 车型.json                            # 最终可部署模型，最重要的文件
 ├─ 车型.json.bak                        # 重训覆盖前的旧模型备份（如有）
-├─ validation\
+├─ validation_<维度>d\
 │  ├─ lat_accel_vs_torque.png          # 横向加速度与扭矩验证图
 │  └─ torque_vs_speed.png              # 扭矩与车速验证图
 └─ training_input\
-   ├─ 车型.csv                          # 交给 Julia 的训练输入
-   └─ training_results\车型\
-      ├─ 车型.json                      # Julia 原始模型结果
+   ├─ 车型_<维度>d.csv                  # 交给 Julia 的训练输入
+   └─ training_results\车型_<维度>d\
+      ├─ 车型_<维度>d.json              # Julia 原始模型结果
       ├─ 车型.training.png              # 训练过程图
       ├─ 车型-a.png / 车型-a.pdf        # Julia 分析图
       └─ 车型-b.png / 车型-b.pdf        # Julia 分析图</code></pre>
@@ -904,12 +923,12 @@
         <h3>GUI 始终保留中间 CSV</h3>
         <p>GUI 会保留提取 CSV 和最终训练 CSV，方便检查数据和排查失败原因。整个训练、质量验证和部署完成后，以下文件仍会保留：</p>
         <ul>
-          <li><code>lateral_data.csv</code></li>
-          <li><code>interventions_pruned.csv</code></li>
-          <li><code>training_input\车型.csv</code></li>
+          <li><code>lateral_data_18d.csv</code> 或 <code>lateral_data_23d.csv</code></li>
+          <li><code>interventions_pruned_18d.csv</code> 或 <code>interventions_pruned_23d.csv</code></li>
+          <li><code>training_input\车型_18d.csv</code> 或 <code>车型_23d.csv</code></li>
         </ul>
         <p>如需在训练成功后清理这些文件，请使用命令行流程的 <code>--no-keep-intermediates</code> 参数；该参数不对应 GUI 控件。任务失败或取消时命令行也不会执行成功后的清理，以便排查。</p>
-        <div class="callout warning"><strong>复用同一个输出目录时要注意：</strong>新训练开始前会清理 <code>training_input</code> 根目录中旧的 CSV，并删除同车型旧的 <code>training_results\车型</code> 结果目录；输出目录根部的同名模型会保留一份 <code>.bak</code> 备份。</div>
+        <div class="callout warning"><strong>复用同一个输出目录时要注意：</strong>新训练开始前只清理当前维度的训练输入与结果，另一维度产物会保留；输出目录根部的同名部署模型会保留一份 <code>.bak</code> 备份并由本次通过验证的模型替换。</div>
       </section>
 
       <section id="quality">
@@ -921,7 +940,7 @@
               <tr><td>提取数据量</td><td>少于 10,000 行会警告。</td><td>继续训练前优先补充更多有效驾驶数据。</td></tr>
               <tr><td>路线修剪结果</td><td>0 行直接失败；少于 5,000 行严重不足；少于 20,000 行提示可能过拟合。</td><td>降低路线阈值，检查激活驾驶数据，或补采路线。</td></tr>
               <tr><td>干预移除结果</td><td>0 行直接失败。</td><td>检查数据是否大多为人工接管、变道、颠簸或无效控制状态。</td></tr>
-              <tr><td>模型结构</td><td>必须包含完整字段、18 个指定输入、正确权重维度和激活函数。</td><td>不要手工修改 Julia 生成的 JSON；结构错误需重新训练。</td></tr>
+              <tr><td>模型结构</td><td>必须包含与所选 18/23 维相符的输入数、变量顺序、权重维度和激活函数。</td><td>不要手工修改 Julia 生成的 JSON；结构错误需重新训练。</td></tr>
               <tr><td>测试损失</td><td><code>0 ≤ model_test_loss &lt; 0.05</code> 才通过。</td><td>未通过时补充更均衡、更干净的数据，再调整阈值重训。</td></tr>
               <tr><td>验证图</td><td>图表生成失败只会警告，不改变已经完成的数值质量判定。</td><td>模型可以通过结构与损失验证，但仍建议解决绘图错误后人工查看曲线。</td></tr>
             </tbody>
@@ -929,11 +948,11 @@
         </div>
         <h3>覆盖度图重点看什么</h3>
         <ul>
-          <li>覆盖度建议不是弹窗，而是写在同目录的 <code>coverage_gaps.txt</code>，训练日志的可视化步骤里也会打印。</li>
+          <li>覆盖度建议不是弹窗，而是写在同目录的维度化 <code>coverage_18d_gaps.txt</code> 或 <code>coverage_23d_gaps.txt</code>，训练日志的可视化步骤里也会打印。</li>
           <li>热力图红色框表示该速度 × 横向加速度格子只有 1–49 个样本；完全空白的格子没有红框，常见于没跑过的高速区间。</li>
           <li>这里的“高速”按车速分箱判断，不是地图道路类型。没跑过 90 km/h 以上路段时，高速建议会写 0 样本。</li>
           <li>同时检查左右转向是否均衡，以及低速急弯、高速缓弯是否为空。</li>
-          <li><code>coverage_gaps.txt</code> 会把缺口翻译成补采建议：目标速度用 km/h，并写明当前样本、为什么要补、怎么补和路线例子。</li>
+          <li>对应维度的 <code>coverage_*_gaps.txt</code> 会把缺口翻译成补采建议：目标速度用 km/h，并写明当前样本、为什么要补、怎么补和路线例子。</li>
         </ul>
       </section>
 
@@ -947,6 +966,7 @@
           <li>上次选择的输出目录</li>
           <li>上次填写的目标车型</li>
           <li>上次选择的训练模式</li>
+          <li>上次选择的输入维度</li>
         </ul>
         <p>手动阈值和自动推荐开关不会保存。覆盖度图和中间 CSV 的保留行为固定，不需要保存设置。配置损坏或无法读取时，程序自动回退到默认设置；配置目录不可写不会阻止训练启动。已保存的目录下次会回填，即使当前不存在；开始训练时仍会检查日志目录是否有效。</p>
         <div class="callout"><strong>恢复默认偏好：</strong>先退出 GUI，再删除 <code>%APPDATA%\NNLC\settings.json</code>。下次启动时会重新创建。</div>
@@ -964,7 +984,7 @@
         </details>
         <details>
           <summary>同一天补下载了 rlog，但训练数据没有增加</summary>
-          <div><p>识别到 <code>YYYYMMDD</code> 日期目录时，每个日期目录里的 <code>lateral_data.csv</code> 是按天缓存。该文件已存在且表头与当前时序列一致时，即使后来又放入新 rlog 也不会重提。删除对应日期目录中的 <code>lateral_data.csv</code> 后再训练，该日才会重新提取并进入输出目录的总表。评分、剪枝和 Julia 训练仍针对合并后的总 CSV。</p></div>
+          <div><p>提取器按维度独立缓存。18 维检查日期目录中的 <code>lateral_data_18d.csv</code>，23 维检查 <code>lateral_data_23d.csv</code>。已有当前维度缓存且表头正确时会复用，即使后来又放入新 rlog 也不会重提；需要重提时删除对应维度缓存。旧版通用 <code>lateral_data.csv</code> 不会读取或迁移。评分、剪枝和 Julia 训练针对本次维度对应的总 CSV。</p></div>
         </details>
         <details>
           <summary>容错模式跳过了文件</summary>
@@ -984,7 +1004,7 @@
         </details>
         <details>
           <summary>模型质量验证未通过</summary>
-          <div><p>程序不会把该模型部署为最终模型。查看日志中列出的 JSON 结构问题或 <code>model_test_loss</code>。不要仅通过反复提高或降低阈值碰运气，应结合 <code>coverage.png</code> 补齐缺失工况并减少污染数据。</p></div>
+          <div><p>程序不会把该模型部署为最终模型。查看日志中列出的 JSON 结构问题或 <code>model_test_loss</code>。不要仅通过反复提高或降低阈值碰运气，应结合本次维度对应的覆盖度图补齐缺失工况并减少污染数据。</p></div>
         </details>
         <details>
           <summary>验证图生成失败，但日志显示质量判定通过</summary>
@@ -1008,7 +1028,7 @@
         </details>
         <details>
           <summary>怎样提供一份可分析的错误日志</summary>
-          <div><p>不要只截取进度卡上的最新一行。请打开程序运行目录 <code>logs</code> 中对应的 <code>YYYYMMDD_HHMMSS_车型.log</code>，并包含：GUI 选择的模式、阈值、从失败步骤标题开始的全部内容、执行命令、Traceback 或 Julia 错误、退出码，以及被跳过的 rlog 清单。路径中的个人用户名可以打码，但应保留目录层级和文件名。</p></div>
+          <div><p>不要只截取进度卡上的最新一行。请打开程序运行目录 <code>logs</code> 中对应的 <code>YYYYMMDD_HHMMSS_车型_18d.log</code> 或 <code>_23d.log</code>，并包含：GUI 选择的处理模式和输入维度、阈值、从失败步骤标题开始的全部内容、执行命令、Traceback 或 Julia 错误、退出码，以及被跳过的 rlog 清单。路径中的个人用户名可以打码，但应保留目录层级和文件名。</p></div>
         </details>
       </section>
 
@@ -1019,8 +1039,8 @@
           <li><strong>确认质量验证通过</strong>日志应显示 JSON 结构正确、测试损失小于 <code>0.05</code>。</li>
           <li><strong>确认最终模型位置</strong>输出目录根部应存在与车型名称一致的 <code>车型.json</code>。</li>
           <li><strong>检查跳过日志清单</strong>确认被跳过的数量不会显著破坏数据覆盖。</li>
-          <li><strong>检查覆盖度与验证图</strong>打开 <code>coverage.png</code> 和 <code>validation</code> 中的两张曲线图，确认没有明显空白或异常形状。</li>
-          <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志。同名旧模型通常位于输出目录的 <code>车型.json.bak</code>；本次完整日志位于程序运行目录的 <code>logs/YYYYMMDD_HHMMSS_车型.log</code>。</li>
+          <li><strong>检查覆盖度与验证图</strong>打开本次维度对应的覆盖度图和验证目录中的两张曲线图，确认没有明显空白或异常形状。</li>
+          <li><strong>保留可回退文件</strong>首次上车验证前备份旧模型和本次训练日志。同名旧模型通常位于输出目录的 <code>车型.json.bak</code>；本次完整日志文件名包含 <code>18d</code> 或 <code>23d</code>。</li>
         </ol>
         <div class="callout danger"><strong>道路验证注意安全。</strong>新模型应先在可控环境中低风险验证，并随时准备接管。离线质量验证通过不等于覆盖了所有车辆状态和道路工况。</div>
       </section>

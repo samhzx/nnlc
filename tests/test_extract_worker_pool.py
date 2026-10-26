@@ -26,8 +26,9 @@ class FakeWorker:
             Path(request["output_path"]).write_text("partial\n", encoding="utf-8")
             raise extractor.RlogWorkerCrash(11, "simulated native crash")
 
+        input_dim = request.get("input_dim", 18)
         columns = extractor.COLUMNS + (
-            [spec[2] for spec in extractor._temporal_column_specs()]
+            [spec[2] for spec in extractor._temporal_column_specs(input_dim)]
             if request.get("temporal") else []
         ) + ["route_id"]
         row = [0] * len(columns)
