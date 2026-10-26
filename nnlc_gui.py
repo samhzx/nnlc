@@ -35,13 +35,14 @@ _PIPELINE_STEP_RE = re.compile(r"^\[(\d+)/(\d+)\]\s+(.+)$")
 PIPELINE_STEP_COUNT = 7
 PIPELINE_STEP_LABELS = ("提取", "评分", "修剪", "覆盖度", "训练", "验证", "部署")
 TRAINING_MODES = {
-    "CPU 标准模式": 16384,
-    "CPU 流式低内存模式": 4096,
+    "标准模式": 16384,
+    "流式模式": 4096,
 }
 LEGACY_TRAINING_MODES = {
-    "标准模式": "CPU 标准模式",
-    "低内存模式": "CPU 流式低内存模式",
-    "CPU 低内存模式": "CPU 流式低内存模式",
+    "CPU 标准模式": "标准模式",
+    "CPU 流式低内存模式": "流式模式",
+    "低内存模式": "流式模式",
+    "CPU 低内存模式": "流式模式",
 }
 
 
@@ -318,7 +319,7 @@ class NNLCApp:
         saved_mode = saved_preferences.get("training_mode")
         saved_mode = LEGACY_TRAINING_MODES.get(saved_mode, saved_mode)
         if not isinstance(saved_mode, str) or saved_mode not in TRAINING_MODES:
-            saved_mode = "CPU 标准模式"
+            saved_mode = "标准模式"
 
         saved_car = saved_preferences.get("car")
         if not isinstance(saved_car, str) or not saved_car.strip():
@@ -405,7 +406,7 @@ class NNLCApp:
         training_mode = self.training_mode_var.get()
         training_mode = LEGACY_TRAINING_MODES.get(training_mode, training_mode)
         if training_mode not in TRAINING_MODES:
-            training_mode = "CPU 标准模式"
+            training_mode = "标准模式"
         path = self._preferences_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1131,6 +1132,7 @@ class NNLCApp:
                 return
 
         training_mode = self.training_mode_var.get().strip()
+        training_mode = LEGACY_TRAINING_MODES.get(training_mode, training_mode)
         batch_size = TRAINING_MODES.get(training_mode)
         if batch_size is None:
             messagebox.showerror("参数错误", "请选择有效的训练模式。")
@@ -1153,7 +1155,7 @@ class NNLCApp:
             target=self._run_worker,
             args=(data_dir, output_dir, car, min_score, skip_visualize,
                   batch_size,
-                  training_mode == "CPU 流式低内存模式",
+                  training_mode == "流式模式",
                   bool(self.keep_intermediates_var.get()),
                   self.cancel_event, self.process_holder),
             daemon=True,

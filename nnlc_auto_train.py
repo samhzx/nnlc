@@ -894,7 +894,7 @@ def step_train(input_csv, car_name, output_dir, cancel_event=None,
     cmd = [julia_exe, script_path, train_input_dir, "--cpu", f"--batch-size={batch_size}"]
     if streaming:
         cmd.append("--streaming")
-    mode_label = "CPU 流式低内存模式" if streaming else "CPU 模式"
+    mode_label = "流式模式" if streaming else "标准模式"
     print_info(f"Julia 训练中（{mode_label}，batch size={batch_size:,}）")
     print_info(f"命令: {' '.join(cmd)}")
     print_info("首次在该 Julia 环境训练时会编译依赖并缓存；之后会加载缓存，不必每次重新编译依赖")
