@@ -215,7 +215,8 @@ def test_dimension_specific_file_names_and_commands(tmp_path, monkeypatch):
     )
     command = captured["command"]
     assert model_json.replace("\\", "/").endswith("training_results/BYD_TEST_23d/BYD_TEST_23d.json")
-    assert "BYD_TEST_23d.csv" in str(list((tmp_path / "out" / "training_input").glob("*.csv"))[0])
+    csv_names = {path.name for path in (tmp_path / "out" / "training_input").glob("*.csv")}
+    assert "BYD_TEST_23d.csv" in csv_names
     assert old_18d_input.read_text(encoding="utf-8") == "keep\n"
     assert old_18d_marker.read_text(encoding="utf-8") == "keep\n"
     assert "--input-dim=23" in command
