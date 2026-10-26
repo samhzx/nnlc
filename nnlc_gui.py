@@ -587,9 +587,10 @@ class NNLCApp:
             row=1, column=0, sticky="w", pady=PAD_ROW
         )
         threshold_controls = tk.Frame(param_inner, bg=C_CARD_BG)
-        threshold_controls.grid(row=1, column=1, sticky="w", padx=(10, 14), pady=PAD_ROW)
-        self.thr_box = self._fixed_box(threshold_controls, width=64)
-        self.thr_box.pack(side="left")
+        threshold_controls.grid(row=1, column=1, sticky="ew", padx=(10, 14), pady=PAD_ROW)
+        threshold_controls.columnconfigure(0, weight=1)
+        self.thr_box = self._fixed_box(threshold_controls)
+        self.thr_box.grid(row=0, column=0, sticky="ew")
         self.threshold_entry = self._make_form_entry(self.thr_box, self.threshold_var)
         self.auto_threshold_check = tk.Checkbutton(
             threshold_controls,
@@ -602,7 +603,7 @@ class NNLCApp:
             cursor="hand2",
             command=self._toggle_threshold,
         )
-        self.auto_threshold_check.pack(side="left", padx=(4, 0))
+        self.auto_threshold_check.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.config_widgets.append(self.auto_threshold_check)
         self._toggle_threshold()
 
