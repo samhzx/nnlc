@@ -1089,8 +1089,10 @@ class NNLCApp:
         )
         if not busy:
             # Comboboxes are intentionally readonly; restoring every widget
-            # to ``normal`` would let an invalid training mode be typed in.
+            # to ``normal`` would let invalid training mode or dimension
+            # values be typed in.
             self.training_mode_combo.configure(state="readonly")
+            self.input_dim_combo.configure(state="readonly")
             self._update_streaming_options()
 
     def _update_elapsed(self) -> None:
