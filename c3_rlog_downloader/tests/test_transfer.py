@@ -16,6 +16,7 @@ from c3_rlog_downloader.settings import default_destination, load_settings, save
 from c3_rlog_downloader.transfer import (
     PREFETCH_CONCURRENT_REQUESTS,
     REMOTE_CONFIG_DIR,
+    REMOTE_NNLC_DIR,
     REMOTE_ROOT,
     CleanupPreview,
     DownloadFailure,
@@ -35,6 +36,7 @@ from c3_rlog_downloader.transfer import (
     run_download,
     scan_remote_tree,
     upload_config_file,
+    deploy_nnlc_file,
 )
 
 EXPORT_DATE = date(2026, 10, 16)
@@ -82,6 +84,7 @@ class MemorySFTP:
         self.read_count = {}
         self.stat_count = {}
         self.fail_first_read = set()
+        self.fail_put = False
         self.removed = []
         self.opened_files = []
 
@@ -149,11 +152,20 @@ class MemorySFTP:
         self.removed.append(path)
 
     def put(self, localpath, remotepath):
+        if self.fail_put:
+            raise OSError("simulated put failure")
         parent = remotepath.rsplit("/", 1)[0]
         if parent not in self.nodes or not stat.S_ISDIR(self.nodes[parent][0]):
             raise FileNotFoundError(parent)
         data = Path(localpath).read_bytes()
         self.nodes[remotepath] = (stat.S_IFREG | 0o644, data, self.now)
+
+    def rename(self, src, dst):
+        if src not in self.nodes:
+            raise FileNotFoundError(src)
+        if dst in self.nodes:
+            raise OSError("exists")
+        self.nodes[dst] = self.nodes.pop(src)
 
     def rmdir(self, path):
         if path not in self.nodes:
@@ -591,6 +603,67 @@ def test_upload_config_overwrites_existing_json(tmp_path):
 
     assert uploaded == remote_path
     assert sftp.nodes[remote_path][1] == b'{"new": true}'
+
+
+
+def test_deploy_nnlc_backups_then_overwrites(tmp_path):
+    sftp = MemorySFTP()
+    remote_path = REMOTE_NNLC_DIR + "/nnlc.py"
+    sftp.add_file(remote_path, b"old-nnlc")
+    local = tmp_path / "nnlc_18d.py"
+    local.write_text("new-nnlc", encoding="utf-8")
+
+    backup_path, deployed = deploy_nnlc_file(
+        sftp, local, timestamp="20261027-120000"
+    )
+
+    assert deployed == remote_path
+    assert backup_path == REMOTE_NNLC_DIR + "/nnlc.py.bak.20261027-120000"
+    assert sftp.nodes[backup_path][1] == b"old-nnlc"
+    assert sftp.nodes[remote_path][1] == b"new-nnlc"
+
+
+def test_deploy_nnlc_rejects_missing_remote_wrong_dir_and_non_python(tmp_path):
+    sftp = MemorySFTP()
+    sftp.add_dir(REMOTE_NNLC_DIR)
+    local = tmp_path / "nnlc.py"
+    local.write_text("new-nnlc", encoding="utf-8")
+    with pytest.raises(TransferError, match="没有 nnlc.py"):
+        deploy_nnlc_file(sftp, local, timestamp="20261027-120000")
+    sftp.add_file(REMOTE_NNLC_DIR + "/nnlc.py", b"old-nnlc")
+    with pytest.raises(TransferError, match="固定的 NNLC 脚本目录"):
+        deploy_nnlc_file(sftp, local, remote_dir="/tmp", timestamp="20261027-120000")
+    other = tmp_path / "nnlc.txt"
+    other.write_text("new-nnlc", encoding="utf-8")
+    with pytest.raises(TransferError, match="必须是 Python"):
+        deploy_nnlc_file(sftp, other, timestamp="20261027-120000")
+
+
+def test_deploy_nnlc_backup_collision_and_put_failure(tmp_path):
+    sftp = MemorySFTP()
+    remote_path = REMOTE_NNLC_DIR + "/nnlc.py"
+    backup_path = REMOTE_NNLC_DIR + "/nnlc.py.bak.20261027-120000"
+    sftp.add_file(remote_path, b"old-nnlc")
+    sftp.add_file(backup_path, b"previous")
+    local = tmp_path / "nnlc.py"
+    local.write_text("new-nnlc", encoding="utf-8")
+    with pytest.raises(TransferError, match="备份文件已存在"):
+        deploy_nnlc_file(sftp, local, timestamp="20261027-120000")
+    assert sftp.nodes[remote_path][1] == b"old-nnlc"
+
+    sftp.remove(backup_path)
+    sftp.fail_put = True
+    with pytest.raises(TransferError, match="原文件已备份"):
+        deploy_nnlc_file(sftp, local, timestamp="20261027-120000")
+    assert remote_path not in sftp.nodes
+    assert sftp.nodes[backup_path][1] == b"old-nnlc"
+
+
+def test_nnlc_payloads_are_present():
+    root = Path(__file__).resolve().parents[1] / "nnlc_payloads"
+    assert (root / "nnlc_18d.py").is_file()
+    assert (root / "nnlc_23d.py").is_file()
+    assert (root / "nnlc.py").is_file()
 
 
 def test_upload_config_rejects_non_json_and_unknown_directory(tmp_path):

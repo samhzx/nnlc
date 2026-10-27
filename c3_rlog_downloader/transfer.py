@@ -17,6 +17,7 @@ REMOTE_ROOT = "/data/media/0/realdata"
 REMOTE_CONFIG_DIR = (
     "/data/openpilot/sunnypilot/neural_network_data/neural_network_lateral_control"
 )
+REMOTE_NNLC_DIR = "/data/openpilot/sunnypilot/selfdrive/controls/lib/nnlc"
 RECENT_WINDOW_SECONDS = 5 * 60
 CHUNK_SIZE = 256 * 1024
 SFTP_MAX_REQUEST_SIZE = 255 * 1024  # OpenSSH SSH_FXP_READ cap; 256KB triggers short reads
@@ -865,6 +866,57 @@ def upload_config_file(sftp, local_path: Path, remote_dir: str = REMOTE_CONFIG_D
     except Exception as exc:  # noqa: BLE001 - surface SFTP backend failures to the UI.
         raise TransferError("上传模型参数失败：" + str(exc)) from exc
     return remote_path
+
+
+def deploy_nnlc_file(
+    sftp,
+    local_path: Path,
+    remote_dir: str = REMOTE_NNLC_DIR,
+    timestamp: str | None = None,
+) -> tuple[str, str]:
+    """Backup device nnlc.py, then overwrite it with a bundled script."""
+    source = Path(local_path).expanduser()
+    if not source.is_file():
+        raise TransferError("软件内未找到对应维度的 nnlc.py。")
+    if source.suffix.casefold() != ".py":
+        raise TransferError("部署文件必须是 Python 脚本。")
+    remote_dir = posixpath.normpath(remote_dir)
+    if remote_dir != REMOTE_NNLC_DIR:
+        raise TransferError("部署目录不是固定的 NNLC 脚本目录，已拒绝操作。")
+    try:
+        attr = sftp.lstat(remote_dir)
+    except OSError as exc:
+        raise TransferError("无法访问设备 NNLC 目录，请确认设备已连接且目录存在。") from exc
+    mode = int(getattr(attr, "st_mode", 0) or 0)
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise TransferError("设备 NNLC 路径不是目录。")
+    remote_path = posixpath.join(remote_dir, "nnlc.py")
+    try:
+        file_attr = sftp.lstat(remote_path)
+    except OSError as exc:
+        raise TransferError("设备上没有 nnlc.py，已取消部署。") from exc
+    file_mode = int(getattr(file_attr, "st_mode", 0) or 0)
+    if stat.S_ISLNK(file_mode) or not stat.S_ISREG(file_mode):
+        raise TransferError("设备上的 nnlc.py 不是普通文件，已取消部署。")
+    stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
+    backup_path = posixpath.join(remote_dir, f"nnlc.py.bak.{stamp}")
+    try:
+        sftp.lstat(backup_path)
+    except OSError:
+        pass
+    else:
+        raise TransferError("备份文件已存在，请稍后重试。")
+    try:
+        sftp.rename(remote_path, backup_path)
+    except Exception as exc:  # noqa: BLE001 - surface SFTP backend failures to the UI.
+        raise TransferError("备份原 nnlc.py 失败：" + str(exc)) from exc
+    try:
+        sftp.put(str(source), remote_path)
+    except Exception as exc:  # noqa: BLE001 - surface SFTP backend failures to the UI.
+        raise TransferError(
+            f"覆盖 nnlc.py 失败，原文件已备份为 {backup_path}：" + str(exc)
+        ) from exc
+    return backup_path, remote_path
 
 
 def close_sftp(client, sftp) -> None:

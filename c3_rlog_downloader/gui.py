@@ -19,13 +19,27 @@ from c3_rlog_downloader.transfer import (
     HostKeyMismatch,
     InvalidKeyPassphrase,
     KeyPassphraseRequired,
+    REMOTE_NNLC_DIR,
     TransferCancelled,
+    TransferError,
     TransferProgress,
     close_sftp,
     connect_sftp,
+    deploy_nnlc_file,
     run_cleanup,
     run_download,
     upload_config_file,
+)
+
+NNLC_PAYLOAD_FILES = {
+    "18": "nnlc_18d.py",
+    "23": "nnlc_23d.py",
+    "compat": "nnlc.py",
+}
+NNLC_DEPLOY_OPTIONS = (
+    ("18", "部署18维", "18维"),
+    ("23", "部署23维", "23维"),
+    ("compat", "部署兼容维度", "兼容维度"),
 )
 
 APP_TITLE = "C3 rlog 下载器"
@@ -193,10 +207,11 @@ class C3DownloaderApp:
         self.connected_key_path: str | None = None
         self.form_controls = []
         self.path_pickers = []
+        self.deploy_buttons = []
 
         root.title(f"{APP_TITLE} v{APP_VERSION}")
-        root.geometry("900x700")
-        root.minsize(780, 620)
+        root.geometry("1180x700")
+        root.minsize(1020, 620)
         root.configure(bg=C_PAGE_BG)
         self._set_window_icon()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -222,6 +237,7 @@ class C3DownloaderApp:
         body.pack(fill="x", padx=PAD_PAGE, pady=(16, 0))
         body.columnconfigure(0, weight=1, uniform="col")
         body.columnconfigure(1, weight=1, uniform="col")
+        body.columnconfigure(2, weight=1, uniform="col")
 
         connection_card, connection_inner = self._make_card(
             body, "设备连接", self.connection_status_var
@@ -273,8 +289,8 @@ class C3DownloaderApp:
         self.key_picker = key_picker
         self.path_pickers.append(key_picker)
 
-        destination_card, destination_inner = self._make_card(body, "上传下载")
-        destination_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        destination_card, destination_inner = self._make_card(body, "下载设置")
+        destination_card.grid(row=0, column=1, sticky="nsew", padx=(10, 10))
         destination_inner.columnconfigure(0, minsize=LABEL_W)
         destination_inner.columnconfigure(1, weight=1)
         destination_picker = PathPicker(
@@ -283,8 +299,13 @@ class C3DownloaderApp:
         self._form_row(destination_inner, 0, "下载目录", destination_picker)
         self.destination_picker = destination_picker
         self.path_pickers.append(destination_picker)
-        config_actions = tk.Frame(destination_inner, bg=C_CARD_BG)
-        config_actions.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
+
+        deploy_card, deploy_inner = self._make_card(body, "模型部署")
+        deploy_card.grid(row=0, column=2, sticky="nsew", padx=(10, 0))
+        deploy_inner.columnconfigure(0, minsize=LABEL_W)
+        deploy_inner.columnconfigure(1, weight=1)
+        config_actions = tk.Frame(deploy_inner, bg=C_CARD_BG)
+        config_actions.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=PAD_ROW)
         self.upload_button_box = tk.Frame(
             config_actions, bg=C_ACCENT, height=INPUT_H
         )
@@ -314,18 +335,33 @@ class C3DownloaderApp:
         )
         self.upload_button.pack(fill="both", expand=True, padx=1, pady=1)
         self._fit_upload_button_width()
-        self.upload_button.bind("<Enter>", self._upload_button_enter)
-        self.upload_button.bind("<Leave>", self._upload_button_leave)
+        self._bind_accent_button_hover(self.upload_button_box, self.upload_button)
         tk.Label(
-            destination_inner,
+            deploy_inner,
             text="模型参数",
             font=F_BASE,
             bg=C_CARD_BG,
             fg=C_TEXT,
-        ).grid(row=1, column=0, sticky="e", pady=PAD_ROW)
+        ).grid(row=0, column=0, sticky="e", pady=PAD_ROW)
+        deploy_actions = tk.Frame(deploy_inner, bg=C_CARD_BG)
+        deploy_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(PAD_ROW, 0))
+        self.deploy_buttons = []
+        for index, (variant, button_text, dimension) in enumerate(NNLC_DEPLOY_OPTIONS):
+            box, button = self._make_accent_button(
+                deploy_actions,
+                button_text,
+                lambda v=variant, d=dimension: self.deploy_nnlc(v, d),
+            )
+            box.pack(
+                side="left",
+                fill="x",
+                expand=True,
+                padx=(0 if index == 0 else 8, 0),
+            )
+            self.deploy_buttons.append((box, button))
 
         progress_card, progress_inner = self._make_card(body, "下载进度")
-        progress_card.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        progress_card.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         progress_summary = tk.Frame(progress_inner, bg=C_CARD_BG)
         progress_summary.pack(fill="x")
         progress_summary.columnconfigure(0, weight=2)
@@ -837,7 +873,11 @@ class C3DownloaderApp:
             cursor="arrow" if self.busy else "hand2",
         )
         can_upload = connected and not self.busy
-        self._set_upload_button_style(enabled=can_upload)
+        self._set_accent_button_style(
+            self.upload_button_box, self.upload_button, can_upload
+        )
+        for box, button in self.deploy_buttons:
+            self._set_accent_button_style(box, button, can_upload)
         can_start = connected and not self.busy
         self.start_button.configure(
             state="normal" if can_start else "disabled",
@@ -895,10 +935,10 @@ class C3DownloaderApp:
             self.settings_dir,
         )
 
-    def _set_upload_button_style(self, enabled: bool) -> None:
+    def _set_accent_button_style(self, box, button, enabled: bool) -> None:
         if enabled:
-            self.upload_button_box.configure(bg=C_ACCENT)
-            self.upload_button.configure(
+            box.configure(bg=C_ACCENT)
+            button.configure(
                 state="normal",
                 bg=C_ACCENT,
                 fg="#ffffff",
@@ -908,8 +948,8 @@ class C3DownloaderApp:
                 cursor="hand2",
             )
             return
-        self.upload_button_box.configure(bg=C_ACCENT_DISABLED)
-        self.upload_button.configure(
+        box.configure(bg=C_ACCENT_DISABLED)
+        button.configure(
             state="disabled",
             bg=C_ACCENT_DISABLED,
             fg="#ffffff",
@@ -919,15 +959,42 @@ class C3DownloaderApp:
             cursor=self._disabled_cursor(),
         )
 
-    def _upload_button_enter(self, _event=None) -> None:
-        if str(self.upload_button["state"]) == "disabled":
-            return
-        self.upload_button_box.configure(bg=C_ACCENT_HOVER)
-        self.upload_button.configure(bg=C_ACCENT_HOVER)
+    def _bind_accent_button_hover(self, box, button) -> None:
+        def enter(_event=None):
+            if str(button["state"]) == "disabled":
+                return
+            box.configure(bg=C_ACCENT_HOVER)
+            button.configure(bg=C_ACCENT_HOVER)
 
-    def _upload_button_leave(self, _event=None) -> None:
-        connected = self.connection_sftp is not None
-        self._set_upload_button_style(enabled=connected and not self.busy)
+        def leave(_event=None):
+            connected = self.connection_sftp is not None
+            self._set_accent_button_style(box, button, connected and not self.busy)
+
+        button.bind("<Enter>", enter)
+        button.bind("<Leave>", leave)
+
+    def _make_accent_button(self, parent, text, command):
+        box = tk.Frame(parent, bg=C_ACCENT, height=INPUT_H)
+        box.pack_propagate(False)
+        button = tk.Button(
+            box,
+            text=text,
+            font=F_BASE,
+            command=command,
+            bg=C_ACCENT,
+            fg="#ffffff",
+            activebackground=C_ACCENT_HOVER,
+            activeforeground="#ffffff",
+            disabledforeground="#ffffff",
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+            padx=8,
+            cursor="hand2",
+        )
+        button.pack(fill="both", expand=True, padx=1, pady=1)
+        self._bind_accent_button_hover(box, button)
+        return box, button
 
     def connect(self) -> None:
         if self.busy or self.connection_sftp is not None:
@@ -1088,6 +1155,63 @@ class C3DownloaderApp:
         try:
             remote_path = upload_config_file(self.connection_sftp, config_path)
             self.messages.put(("upload_complete", remote_path))
+        except TransferCancelled as exc:
+            self.messages.put(("cancelled", str(exc)))
+        except Exception as exc:  # noqa: BLE001 - surface unexpected transport failures in the UI.
+            self.messages.put(("failed", str(exc)))
+
+    def deploy_nnlc(self, variant: str, dimension: str) -> None:
+        if self.busy:
+            return
+        if self.connection_sftp is None:
+            messagebox.showinfo("尚未连接", "请先点击“连接设备”并等待连接成功。", parent=self.root)
+            return
+        confirmed = messagebox.askyesno(
+            "确认部署",
+            f"将备份设备上的 nnlc.py，再覆盖为「{dimension}」版本。\n\n"
+            f"目标：{REMOTE_NNLC_DIR}/nnlc.py\n\n"
+            "是否继续？",
+            parent=self.root,
+        )
+        if not confirmed:
+            return
+        try:
+            local_path = self._bundled_nnlc_path(variant)
+        except TransferError as exc:
+            messagebox.showerror("无法部署", str(exc), parent=self.root)
+            return
+        self.cancel_event = threading.Event()
+        self.operation = "deploy"
+        self.status_var.set(f"正在部署{dimension}")
+        self._append_log(f"开始部署{dimension} nnlc.py")
+        self._set_busy(True)
+        self._start_deploy_worker(local_path, dimension)
+
+    def _bundled_nnlc_path(self, variant: str) -> Path:
+        filename = NNLC_PAYLOAD_FILES[variant]
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        path = root / "nnlc_payloads" / filename
+        if not path.is_file():
+            raise TransferError(f"软件内未找到 {filename}")
+        return path
+
+    def _start_deploy_worker(self, local_path: Path, dimension: str) -> None:
+        if self.connection_sftp is None:
+            self._finish("设备未连接")
+            return
+        self.worker = threading.Thread(
+            target=self._deploy_worker,
+            args=(local_path, dimension),
+            daemon=True,
+        )
+        self.worker.start()
+
+    def _deploy_worker(self, local_path: Path, dimension: str) -> None:
+        try:
+            backup_path, remote_path = deploy_nnlc_file(
+                self.connection_sftp, local_path
+            )
+            self.messages.put(("deploy_complete", (dimension, backup_path, remote_path)))
         except TransferCancelled as exc:
             self.messages.put(("cancelled", str(exc)))
         except Exception as exc:  # noqa: BLE001 - surface unexpected transport failures in the UI.
@@ -1351,6 +1475,19 @@ class C3DownloaderApp:
             self._finish("配置上传成功")
             self._append_log(f"配置已覆盖上传到 {payload}", "success")
             messagebox.showinfo("上传成功", f"配置已覆盖上传到：\n{payload}", parent=self.root)
+        elif kind == "deploy_complete":
+            dimension, backup_path, remote_path = payload
+            self._finish("NNLC 脚本部署成功")
+            self._append_log(
+                f"{dimension}已覆盖到 {remote_path}，备份 {backup_path}",
+                "success",
+            )
+            messagebox.showinfo(
+                "部署成功",
+                f"已覆盖：{remote_path}\n备份：{backup_path}\n"
+                "如未生效请重启设备上的 openpilot。",
+                parent=self.root,
+            )
         elif kind == "cleanup_complete":
             result = payload
             self._finish("设备日志清理完成" if not result.failures else "清理部分完成")
@@ -1382,11 +1519,17 @@ class C3DownloaderApp:
         elif kind == "failed":
             was_connecting = self.operation == "connect"
             was_upload = self.operation == "upload"
+            was_deploy = self.operation == "deploy"
             self._finish("任务失败")
             if was_connecting:
                 self._set_connection_status("● 未连接")
             self._append_log(payload, "error")
-            title = "上传失败" if was_upload else "任务失败"
+            if was_upload:
+                title = "上传失败"
+            elif was_deploy:
+                title = "部署失败"
+            else:
+                title = "任务失败"
             messagebox.showerror(title, payload, parent=self.root)
 
     def _poll_messages(self) -> None:

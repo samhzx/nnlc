@@ -10,9 +10,16 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 SOURCE_DIR = Path(SPECPATH).resolve()
 REPO_ROOT = SOURCE_DIR.parent
 ICON_PATH = SOURCE_DIR / "C3_Rlog_Downloader.ico"
+PAYLOAD_DIR = SOURCE_DIR / "nnlc_payloads"
 
 hiddenimports = collect_submodules("paramiko")
-datas = [*collect_data_files("paramiko"), (str(ICON_PATH), ".")]
+datas = [
+    *collect_data_files("paramiko"),
+    (str(ICON_PATH), "."),
+    (str(PAYLOAD_DIR / "nnlc_18d.py"), "nnlc_payloads"),
+    (str(PAYLOAD_DIR / "nnlc_23d.py"), "nnlc_payloads"),
+    (str(PAYLOAD_DIR / "nnlc.py"), "nnlc_payloads"),
+]
 
 a = Analysis(
     [str(SOURCE_DIR / "main.py")],
